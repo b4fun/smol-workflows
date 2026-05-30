@@ -4,7 +4,7 @@
   "description": "Minimal workflow engine for smol-workflow.",
   "type": "module",
   "bin": {
-    "wf": "./dist/cli.js"
+    "smol-wf": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

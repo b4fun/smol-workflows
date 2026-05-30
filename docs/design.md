@@ -19,26 +19,26 @@ export const meta = {
   ],
 };
 
-export default async function workflow() {
-  phase("Analyze");
+phase("Analyze");
 
-  const plan = await agent("Break down the investment question", {
-    key: "analysis-plan",
-  });
+const plan = await agent("Break down the investment question", {
+  key: "analysis-plan",
+});
 
-  phase("Research");
+phase("Research");
 
-  const results = await parallel([
-    () => agent(`Research AAPL using this plan: ${plan}`, { key: "research-aapl" }),
-    () => agent(`Research MSFT using this plan: ${plan}`, { key: "research-msft" }),
-  ]);
+const results = await parallel([
+  () => agent(`Research AAPL using this plan: ${plan}`, { key: "research-aapl" }),
+  () => agent(`Research MSFT using this plan: ${plan}`, { key: "research-msft" }),
+]);
 
-  phase("Synthesize");
+phase("Synthesize");
 
-  return await agent(`Synthesize these findings: ${JSON.stringify(results)}`, {
-    key: "final-synthesis",
-  });
-}
+const synthesis = await agent(`Synthesize these findings: ${JSON.stringify(results)}`, {
+  key: "final-synthesis",
+});
+
+export default synthesis;
 ```
 
 ## Execution model
@@ -52,8 +52,8 @@ main engine
   └─ isolated runner
        ├─ injects workflow globals
        ├─ imports the user workflow module
-       ├─ executes the default export
-       └─ returns the result to the engine
+       ├─ reads the default workflow result, or calls the default workflow function
+       └─ returns the workflow output to the engine
 ```
 
 The runner should install workflow globals **before importing** the user module. This allows scripts to reference globals at module top-level if needed.
@@ -62,17 +62,129 @@ The runner should install workflow globals **before importing** the user module.
 
 Workflow scripts should use **ES Modules**.
 
-Recommended script format:
+Preferred script format:
 
 ```js
 export const meta = { name: "example" };
 
-export default async function workflow() {
+const result = await agent("Do the work");
+
+export default result;
+```
+
+Supported function format:
+
+```js
+export default async function workflow(input, ctx) {
   return await agent("Do the work");
 }
 ```
 
 ESM was chosen because it is the modern JavaScript module system, supports `import` / `export`, works naturally with `await import(...)`, and supports top-level `await`.
+
+## User script input/output contract
+
+A workflow script is expected to be an ES module with:
+
+1. an optional named `meta` export
+2. a required default export
+
+The preferred style is a top-level ESM workflow where the default export is the final workflow result:
+
+```ts
+import type { WorkflowMetadata } from "@smol-workflow/sdk";
+
+export const meta = {
+  name: "example",
+  description: "Example workflow",
+} satisfies WorkflowMetadata;
+
+phase("Analyze");
+log("workflow args", args);
+
+const output = await agent("Do the work");
+
+export default output;
+```
+
+The supported function style default exports a workflow function:
+
+```ts
+import type { WorkflowHandler } from "@smol-workflow/sdk";
+
+const workflow: WorkflowHandler = async (input, ctx) => {
+  ctx.log("workflow args", input);
+  return await ctx.agent("Do the work");
+};
+
+export default workflow;
+```
+
+When the default export is a function, the runner calls it with:
+
+```ts
+(input: WorkflowArgs, ctx: WorkflowContext) => Awaitable<Output>
+```
+
+Where:
+
+- `input` is the workflow argument map supplied by the runner.
+- `ctx` contains the same runtime capabilities as the globals: `args`, `agent`, `parallel`, `log`, and `phase`.
+- `Output` is the workflow result returned to the engine.
+
+In the preferred top-level ESM style, workflow input is available through the global `args`:
+
+```ts
+args; // global workflow args
+```
+
+In the function style, the same workflow argument map is available through:
+
+```ts
+args;     // global
+ctx.args; // context
+input;    // first function parameter
+```
+
+These should all represent the same runner-provided input. The runner should expose them as read-only/protected values from the script side so user code cannot mutate runner-owned state.
+
+The workflow output is either the default exported value or the resolved return value from the default workflow function:
+
+```ts
+const output = {
+  summary: "Done",
+  data: [1, 2, 3],
+};
+
+export default output;
+```
+
+Workflow outputs should be JSON-serializable by default, because the isolated runner needs to send the result back to the engine and because downstream validation/reporting generally expects JSON-like data.
+
+Top-level `await` is valid in ESM, but top-level `return` is not. Use `export default` for the final result.
+
+Valid:
+
+```js
+const result = await agent("Do work");
+export default result;
+```
+
+Also valid:
+
+```js
+export default async function workflow() {
+  const result = await agent("Do work");
+  return result;
+}
+```
+
+Invalid:
+
+```js
+const result = await agent("Do work");
+return result;
+```
 
 ## Workflow API surface
 

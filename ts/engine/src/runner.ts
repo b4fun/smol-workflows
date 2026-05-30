@@ -19,8 +19,10 @@ type RunnerMessage =
   | RunnerResultMessage
   | RunnerErrorMessage;
 
+type WorkflowFunction = (input?: unknown, ctx?: WorkflowContext) => unknown | Promise<unknown>;
+
 type WorkflowModule = {
-  default?: (input?: unknown, ctx?: WorkflowContext) => unknown | Promise<unknown>;
+  default?: unknown;
 };
 
 const readonlyProxyCache = new WeakMap<object, unknown>();
@@ -69,15 +71,24 @@ async function main(): Promise<void> {
   const { module, cleanup } = await importWorkflowModule(absoluteScriptPath);
 
   try {
-    if (typeof module.default !== "function") {
-      throw new Error("Workflow script must export a default function");
+    if (!hasDefaultExport(module)) {
+      throw new Error("Workflow script must default export a workflow result or function");
     }
 
-    const result = await module.default(globals.args, ctx);
+    const exported = module.default;
+    const result =
+      typeof exported === "function"
+        ? await (exported as WorkflowFunction)(globals.args, ctx)
+        : await exported;
+
     send({ type: "result", result });
   } finally {
     await cleanup();
   }
+}
+
+function hasDefaultExport(module: WorkflowModule): module is WorkflowModule & { default: unknown } {
+  return Object.prototype.hasOwnProperty.call(module, "default");
 }
 
 function createEchoAgent(): AgentRunFn {

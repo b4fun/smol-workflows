@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { formatLogValue, runWorkflow, type WorkflowArgs } from "./index.js";
 
 async function main(): Promise<void> {
@@ -20,7 +21,7 @@ async function main(): Promise<void> {
     throw new Error("Missing workflow script path");
   }
 
-  const args = parseArgs(argv);
+  const args = await parseArgs(argv);
 
   const result = await runWorkflow({
     scriptPath,
@@ -37,7 +38,7 @@ async function main(): Promise<void> {
   console.log(JSON.stringify(result ?? null, null, 2));
 }
 
-function parseArgs(argv: string[]): WorkflowArgs {
+async function parseArgs(argv: string[]): Promise<WorkflowArgs> {
   const args: WorkflowArgs = {};
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -47,17 +48,46 @@ function parseArgs(argv: string[]): WorkflowArgs {
       throw new Error(`Unexpected positional argument: ${token}`);
     }
 
-    const withoutPrefix = token.slice(2);
-    const equalsIndex = withoutPrefix.indexOf("=");
+    if (token === "--args-from-file") {
+      const filePath = argv[index + 1];
+
+      if (filePath === undefined || filePath.startsWith("--")) {
+        throw new Error("Missing value for --args-from-file");
+      }
+
+      mergeArgs(args, await readArgsFile(filePath));
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--args-from-file=")) {
+      const filePath = token.slice("--args-from-file=".length);
+
+      if (!filePath) {
+        throw new Error("Missing value for --args-from-file");
+      }
+
+      mergeArgs(args, await readArgsFile(filePath));
+      continue;
+    }
+
+    if (!token.startsWith("--args-")) {
+      throw new Error(
+        `Unknown option: ${token}. Run arguments must use --args-<name> or --args-from-file.`,
+      );
+    }
+
+    const rawArg = token.slice("--args-".length);
+    const equalsIndex = rawArg.indexOf("=");
 
     if (equalsIndex >= 0) {
-      const key = withoutPrefix.slice(0, equalsIndex);
-      const value = withoutPrefix.slice(equalsIndex + 1);
+      const key = rawArg.slice(0, equalsIndex);
+      const value = rawArg.slice(equalsIndex + 1);
       assignArg(args, key, value);
       continue;
     }
 
-    const key = withoutPrefix;
+    const key = rawArg;
     const next = argv[index + 1];
 
     if (next === undefined || next.startsWith("--")) {
@@ -70,6 +100,26 @@ function parseArgs(argv: string[]): WorkflowArgs {
   }
 
   return args;
+}
+
+async function readArgsFile(filePath: string): Promise<WorkflowArgs> {
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+
+  if (!isRecord(parsed) || Array.isArray(parsed)) {
+    throw new Error(`--args-from-file must contain a JSON object: ${filePath}`);
+  }
+
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function mergeArgs(args: WorkflowArgs, values: WorkflowArgs): void {
+  for (const [key, value] of Object.entries(values)) {
+    assignArg(args, key, value);
+  }
 }
 
 function assignArg(args: WorkflowArgs, key: string, value: unknown): void {
@@ -94,15 +144,17 @@ function assignArg(args: WorkflowArgs, key: string, value: unknown): void {
 
 function printHelp(): void {
   console.log(`Usage:
-  wf run <workflow-script> [--key value] [--flag] [--key=value]
+  smol-wf run <workflow-script> [--args-<name> value] [--args-flag] [--args-<name>=value]
+  smol-wf run <workflow-script> --args-from-file <json-file>
 
 Example:
-  wf run user-script.js --my-arg1 "arg-value-1" --my-arg2 "arg-value-2"
+  smol-wf run user-script.js --args-my-arg1 "arg-value-1" --args-my-arg2 "arg-value-2"
+  smol-wf run user-script.js --args-from-file args.json
 `);
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`wf: ${message}`);
+  console.error(`smol-wf: ${message}`);
   process.exitCode = 1;
 });

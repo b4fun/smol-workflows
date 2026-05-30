@@ -45,10 +45,46 @@ test("runWorkflow injects args, agent, parallel, log, and phase", async () => {
   ]);
 });
 
-test("runWorkflow rejects scripts without a default function", async () => {
+test("runWorkflow supports top-level module-result workflows", async () => {
+  const logs: unknown[][] = [];
+  const phases: Array<{ name: string; options?: unknown }> = [];
+
+  const result = await runWorkflow({
+    scriptPath: fixturePath("module-result.workflow.js"),
+    args: {
+      "my-arg1": "arg-value-1",
+      "my-arg2": "arg-value-2",
+    },
+    onLog: (...values) => logs.push(values),
+    onPhase: (name, options) => phases.push({ name, options }),
+  });
+
+  assert.deepEqual(result, {
+    first: "echo: first: arg-value-1",
+    second: "echo: second: arg-value-2",
+    args: {
+      "my-arg1": "arg-value-1",
+      "my-arg2": "arg-value-2",
+    },
+  });
+
+  assert.deepEqual(logs, [
+    [
+      "module result args",
+      {
+        "my-arg1": "arg-value-1",
+        "my-arg2": "arg-value-2",
+      },
+    ],
+  ]);
+
+  assert.deepEqual(phases, [{ name: "ModuleResult", options: undefined }]);
+});
+
+test("runWorkflow rejects scripts without a default export", async () => {
   await assert.rejects(
     () => runWorkflow({ scriptPath: fixturePath("missing-default.workflow.js") }),
-    /Workflow script must export a default function/,
+    /Workflow script must default export a workflow result or function/,
   );
 });
 
