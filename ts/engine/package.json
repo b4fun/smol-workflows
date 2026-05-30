@@ -1,0 +1,33 @@
+{
+  "name": "@smol-workflow/engine",
+  "version": "0.1.0",
+  "description": "Minimal workflow engine for smol-workflow.",
+  "type": "module",
+  "bin": {
+    "wf": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist dist-test",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+  },
+  "dependencies": {
+    "@smol-workflow/sdk": "file:../sdk"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.0",
+    "typescript": "6.0.3"
+  }
+}
