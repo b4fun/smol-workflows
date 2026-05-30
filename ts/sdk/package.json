@@ -1,0 +1,28 @@
+{
+  "name": "@smol-workflow/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for smol-workflow.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "json-schema-to-ts": "3.1.1"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
