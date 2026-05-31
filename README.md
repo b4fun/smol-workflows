@@ -2,7 +2,7 @@
 
 Minimal agentic workflow runtime for orchestrating your agents at scale.
 
-The workflow scripting syntax is based on [Claude Code's dynamic workflows](https://code.claude.com/docs/en/workflows#orchestrate-subagents-at-scale-with-dynamic-workflows) model: scripts with injected workflow capabilities such as `agent`, `parallel`, `pipeline`, `phase`, and `log`.
+The workflow scripting syntax is based on [Claude Code's dynamic workflows](https://code.claude.com/docs/en/workflows#orchestrate-subagents-at-scale-with-dynamic-workflows) model: scripts with injected workflow capabilities such as `agent`, `parallel`, `pipeline`, `workflow`, `budget`, `phase`, and `log`.
 
 ## What is in this repo
 
@@ -19,8 +19,10 @@ Workflows are ES modules. The runner injects these globals before importing the 
 - `agent(prompt, options?)`
 - `parallel(tasks)`
 - `pipeline(items, ...stages)`
+- `workflow(nameOrRef, args?)`
+- `budget`
 - `log(...values)`
-- `phase(name, options?)`
+- `phase(name)`
 
 Example:
 
@@ -47,9 +49,9 @@ smol-wf run <workflow-script> --args-from-file <args.json>
 smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
 ```
 
-### Coding Harness Plugins
+### Agent providers
 
-TODO: implement support for Codex/OpenCode/Pi/Claude Code.
+The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`.
 
 ## Durable backends
 
@@ -59,16 +61,14 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 
 ## TODOs
 
-- [ ] full coverage of dynamic workflow's options
-- [ ] port engine to rust based impl + built-in durable workflows
-- [ ] isolation support
-- [ ] durable retry
-- [ ] budget
-- [ ] concurrency limit and control
-- [ ] output schema plugins for opencode / pi
-- [ ] plugin usages support
+- [ ] back budget accounting with an authoritative run/session data source instead of parent-child IPC snapshots
+- [ ] full coverage of dynamic workflow options and resume semantics
+- [ ] port engine to Rust-based implementation + built-in durable workflows
+- [ ] isolation support for file-mutating agents
+- [ ] durable retry policies
+- [ ] concurrency limits and controls
 - [ ] dashboard
-- [ ] improve context passing between agents, provide more primitives for accessing propagated context and in workflow/pre-defined memory data
+- [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data
 - [ ] environment abstraction
 - [ ] environment sandbox / isolation
 - [ ] remote environment support
