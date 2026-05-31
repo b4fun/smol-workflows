@@ -143,23 +143,9 @@ Implementation requirements:
 
 ### Behavior
 
-Pi currently runs in JSON mode and uses prompt-only JSON instructions for `schema` calls.
+Pi structured-output calls should run in JSON mode with a generated extension that registers a custom terminating `structured_output` tool. The provider should enable only that tool for the run and read the structured payload from the tool result.
 
-Current implementation strategy:
-
-```sh
-pi \
-  --print \
-  --mode json \
-  --model <model> \
-  '<prompt plus JSON Schema instruction>'
-```
-
-The provider parses JSON-lines events, extracts the last assistant output, and parses it as JSON for schema-backed calls.
-
-Research found a stronger path: load a temporary extension that registers a custom terminating `structured_output` tool, enable only that tool for the run, and read the structured payload from the tool result.
-
-Expected CLI pattern:
+Implementation strategy:
 
 ```sh
 pi \
@@ -192,8 +178,6 @@ Expected extraction point:
 
 ### Expected approach
 
-Move Pi schema-backed calls from prompt-only JSON to a generated extension/tool path.
-
 Implementation requirements:
 
 1. Generate a temporary Pi extension from the workflow JSON Schema.
@@ -221,20 +205,9 @@ Important caveat: Pi tool schemas are useful guidance and produce tool arguments
 
 ### Behavior
 
-OpenCode currently uses prompt-only JSON instructions in the engine provider.
+OpenCode structured-output calls should use the server/session prompt API with `format: { type: "json_schema" }`. The provider should read the structured value from the session message rather than parsing free text.
 
-Current implementation strategy:
-
-```sh
-opencode run \
-  --format json \
-  --model <provider/model> \
-  '<prompt plus JSON Schema instruction>'
-```
-
-The provider parses stdout as JSON or JSONL, extracts the final output text, and parses it as JSON for schema-backed calls.
-
-Research found a stronger path through OpenCode's server/session API. A message can include:
+Implementation strategy:
 
 ```json
 {
@@ -249,8 +222,6 @@ Research found a stronger path through OpenCode's server/session API. A message 
 OpenCode source shows this path creates a real `StructuredOutput` tool, requires the tool choice, validates the tool arguments, and stores the structured value on the message.
 
 ### Expected approach
-
-Move OpenCode schema-backed calls to the server/session prompt API with `format: { type: "json_schema" }`.
 
 Implementation requirements:
 
@@ -311,5 +282,3 @@ Fallback requirements:
 
 - Add engine-level AJV validation for all `agent(prompt, { schema })` outputs.
 - Add bounded schema retry behavior.
-- Upgrade `pi` provider from `schemaMode: "prompt"` to generated extension/tool structured output.
-- Upgrade `opencode` provider from `schemaMode: "prompt"` to server/session `json_schema` format.
