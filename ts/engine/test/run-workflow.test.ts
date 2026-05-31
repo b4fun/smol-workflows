@@ -113,6 +113,36 @@ test("runWorkflow supports pipeline without stage barriers", async () => {
   ]);
 });
 
+test("runWorkflow supports child workflow calls", async () => {
+  const phases: Array<{ name: string; options?: unknown }> = [];
+
+  const result = await runWorkflow({
+    scriptPath: fixturePath("parent-workflow.workflow.js"),
+    args: { value: "from-parent" },
+    onPhase: (name, options) => phases.push({ name, options }),
+  });
+
+  assert.deepEqual(result, {
+    parentArg: "from-parent",
+    child: {
+      childArg: "from-parent",
+      childAgent: "echo: child:from-parent",
+    },
+  });
+
+  assert.deepEqual(phases, [
+    { name: "Parent", options: undefined },
+    { name: "Child", options: undefined },
+  ]);
+});
+
+test("runWorkflow rejects nested child workflow calls beyond one level", async () => {
+  await assert.rejects(
+    () => runWorkflow({ scriptPath: fixturePath("nested-parent.workflow.js") }),
+    /Nested workflow\(\) calls are limited to one level/,
+  );
+});
+
 test("runWorkflow applies phase metadata provider and model defaults to agent calls", async () => {
   const calls: Array<{
     prompt: string;

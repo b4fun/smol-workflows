@@ -169,6 +169,7 @@ The runner injects these globals:
 - `agent(prompt, options?)` — AI call primitive; returns `null` if the run is skipped
 - `parallel(tasks)` — run tasks concurrently with a barrier; thrown tasks resolve to `null`
 - `pipeline(items, ...stages)` — run each item through stages without barriers between stages
+- `workflow(nameOrRef, args?)` — run another workflow inline as a sub-step
 - `log(...values)` — write workflow logs
 - `phase(name)` — mark workflow phase
 

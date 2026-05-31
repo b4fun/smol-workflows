@@ -20,18 +20,22 @@ export type RunWorkflowOptions = {
   onAgent?: WorkflowAgentHandler;
   onLog?: (...values: unknown[]) => void;
   onPhase?: (name: string, options?: unknown) => void;
+  nestingDepth?: number;
 };
 
 type RunnerMessage =
   | { type: "result"; result: unknown }
   | { type: "agent"; id: string; prompt: string; options?: AgentRunOptions }
+  | { type: "workflow"; id: string; scriptPath: string; args?: unknown }
   | { type: "log"; values: unknown[] }
   | { type: "phase"; name: string; options?: unknown }
   | { type: "error"; message: string; stack?: string };
 
 type ParentMessage =
   | { type: "agent.result"; id: string; result: unknown }
-  | { type: "agent.error"; id: string; message: string; stack?: string };
+  | { type: "agent.error"; id: string; message: string; stack?: string }
+  | { type: "workflow.result"; id: string; result: unknown }
+  | { type: "workflow.error"; id: string; message: string; stack?: string };
 
 export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown> {
   const runnerPath = resolve(dirname(fileURLToPath(import.meta.url)), "runner.js");
@@ -42,7 +46,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
     let settled = false;
     let resultReceived = false;
 
-    const child = fork(runnerPath, [scriptPath, JSON.stringify(args)], {
+    const child = fork(runnerPath, [scriptPath, JSON.stringify(args), String(options.nestingDepth ?? 0)], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
 
@@ -76,6 +80,22 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
               const stack = error instanceof Error ? error.stack : undefined;
               sendToRunner({
                 type: "agent.error",
+                id: message.id,
+                message: errorMessage,
+                stack,
+              });
+            });
+          break;
+        case "workflow":
+          void handleWorkflow(message)
+            .then((result) => {
+              sendToRunner({ type: "workflow.result", id: message.id, result });
+            })
+            .catch((error: unknown) => {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              const stack = error instanceof Error ? error.stack : undefined;
+              sendToRunner({
+                type: "workflow.error",
                 id: message.id,
                 message: errorMessage,
                 stack,
@@ -123,12 +143,30 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
       return await handler(message.prompt, message.options);
     }
 
+    async function handleWorkflow(
+      message: Extract<RunnerMessage, { type: "workflow" }>,
+    ): Promise<unknown> {
+      return await runWorkflow({
+        scriptPath: message.scriptPath,
+        args: isWorkflowArgs(message.args) ? message.args : {},
+        agentProvider: options.agentProvider,
+        onAgent: options.onAgent,
+        onLog: options.onLog,
+        onPhase: options.onPhase,
+        nestingDepth: (options.nestingDepth ?? 0) + 1,
+      });
+    }
+
     function sendToRunner(message: ParentMessage): void {
       if (child.connected) {
         child.send(message);
       }
     }
   });
+}
+
+function isWorkflowArgs(value: unknown): value is WorkflowArgs {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function createAgentHandler(provider: AgentProvider = createAgentProvider("debug")): WorkflowAgentHandler {

@@ -1,5 +1,5 @@
-import { readFile, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
   AgentRunFn,
@@ -10,10 +10,13 @@ import type {
   WorkflowContext,
   WorkflowMetadata,
   WorkflowPhaseMetadata,
+  WorkflowRef,
+  WorkflowRunFn,
 } from "@smol-workflow/sdk";
 import { readWorkflowMetadata, toWorkflowMetadata } from "./metadata.js";
 
 type RunnerAgentMessage = { type: "agent"; id: string; prompt: string; options?: AgentRunOptions };
+type RunnerWorkflowMessage = { type: "workflow"; id: string; scriptPath: string; args?: unknown };
 type RunnerLogMessage = { type: "log"; values: unknown[] };
 type RunnerPhaseMessage = { type: "phase"; name: string; options?: unknown };
 type RunnerResultMessage = { type: "result"; result: unknown };
@@ -21,6 +24,7 @@ type RunnerErrorMessage = { type: "error"; message: string; stack?: string };
 
 type RunnerMessage =
   | RunnerAgentMessage
+  | RunnerWorkflowMessage
   | RunnerLogMessage
   | RunnerPhaseMessage
   | RunnerResultMessage
@@ -28,7 +32,9 @@ type RunnerMessage =
 
 type ParentMessage =
   | { type: "agent.result"; id: string; result: unknown }
-  | { type: "agent.error"; id: string; message: string; stack?: string };
+  | { type: "agent.error"; id: string; message: string; stack?: string }
+  | { type: "workflow.result"; id: string; result: unknown }
+  | { type: "workflow.error"; id: string; message: string; stack?: string };
 
 type WorkflowFunction = (input?: unknown, ctx?: WorkflowContext) => unknown | Promise<unknown>;
 
@@ -42,7 +48,12 @@ const pendingAgentCalls = new Map<
   string,
   { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
 >();
+const pendingWorkflowCalls = new Map<
+  string,
+  { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
+>();
 let nextAgentCallID = 0;
+let nextWorkflowCallID = 0;
 
 process.on("message", (message: ParentMessage) => {
   if (!message || typeof message !== "object") {
@@ -70,12 +81,33 @@ process.on("message", (message: ParentMessage) => {
       pending.reject(new Error(message.stack ?? message.message));
       break;
     }
+    case "workflow.result": {
+      const pending = pendingWorkflowCalls.get(message.id);
+      if (!pending) {
+        return;
+      }
+
+      pendingWorkflowCalls.delete(message.id);
+      pending.resolve(message.result);
+      break;
+    }
+    case "workflow.error": {
+      const pending = pendingWorkflowCalls.get(message.id);
+      if (!pending) {
+        return;
+      }
+
+      pendingWorkflowCalls.delete(message.id);
+      pending.reject(new Error(message.stack ?? message.message));
+      break;
+    }
   }
 });
 
 async function main(): Promise<void> {
   const scriptPath = process.argv[2];
   const rawArgs = process.argv[3] ?? "{}";
+  const nestingDepth = Number(process.argv[4] ?? "0");
 
   if (!scriptPath) {
     throw new Error("Missing workflow script path");
@@ -117,6 +149,7 @@ async function main(): Promise<void> {
       "parallel",
     ),
     pipeline: readonlyFunction(createPipeline(), "pipeline"),
+    workflow: readonlyFunction(createWorkflowProxy(absoluteScriptPath, nestingDepth), "workflow"),
     log: readonlyFunction((...values: unknown[]) => {
       send({ type: "log", values });
     }, "log"),
@@ -130,6 +163,7 @@ async function main(): Promise<void> {
   defineWorkflowGlobal("agent", globals.agent);
   defineWorkflowGlobal("parallel", globals.parallel);
   defineWorkflowGlobal("pipeline", globals.pipeline);
+  defineWorkflowGlobal("workflow", globals.workflow);
   defineWorkflowGlobal("log", globals.log);
   defineWorkflowGlobal("phase", globals.phase);
 
@@ -138,6 +172,7 @@ async function main(): Promise<void> {
     agent: globals.agent,
     parallel: globals.parallel,
     pipeline: globals.pipeline,
+    workflow: globals.workflow,
     log: globals.log,
     phase: globals.phase,
   };
@@ -259,6 +294,61 @@ async function callParentAgent(prompt: string, options?: AgentRunOptions): Promi
     pendingAgentCalls.set(id, { resolve, reject });
     send({ type: "agent", id, prompt, options });
   });
+}
+
+function createWorkflowProxy(currentScriptPath: string, nestingDepth: number): WorkflowRunFn {
+  return (async function workflow(nameOrRef: WorkflowRef, args?: unknown): Promise<unknown> {
+    if (nestingDepth >= 1) {
+      throw new Error("Nested workflow() calls are limited to one level");
+    }
+
+    const scriptPath = await resolveWorkflowRef(nameOrRef, currentScriptPath);
+    return await callParentWorkflow(scriptPath, args);
+  }) as WorkflowRunFn;
+}
+
+async function callParentWorkflow(scriptPath: string, args?: unknown): Promise<unknown> {
+  const id = String(++nextWorkflowCallID);
+
+  return await new Promise((resolve, reject) => {
+    pendingWorkflowCalls.set(id, { resolve, reject });
+    send({ type: "workflow", id, scriptPath, args });
+  });
+}
+
+async function resolveWorkflowRef(
+  nameOrRef: WorkflowRef,
+  currentScriptPath: string,
+): Promise<string> {
+  if (typeof nameOrRef !== "string") {
+    return resolvePathRelativeToCurrentScript(nameOrRef.scriptPath, currentScriptPath);
+  }
+
+  return await resolveNamedWorkflow(nameOrRef);
+}
+
+function resolvePathRelativeToCurrentScript(scriptPath: string, currentScriptPath: string): string {
+  return isAbsolute(scriptPath) ? scriptPath : resolve(dirname(currentScriptPath), scriptPath);
+}
+
+async function resolveNamedWorkflow(name: string): Promise<string> {
+  const workflowsDir = resolve(process.cwd(), ".claude", "workflows");
+  const entries = await readdir(workflowsDir, { withFileTypes: true }).catch(() => []);
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".js")) {
+      continue;
+    }
+
+    const scriptPath = join(workflowsDir, entry.name);
+    const metadata = await readWorkflowMetadata(scriptPath);
+
+    if (metadata?.name === name) {
+      return scriptPath;
+    }
+  }
+
+  throw new Error(`Unknown workflow: ${name}`);
 }
 
 function readonlyFunction<Fn extends (...args: never[]) => unknown>(fn: Fn, name: string): Fn {

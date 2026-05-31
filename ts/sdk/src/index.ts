@@ -56,6 +56,15 @@ export type WorkflowMetadata = Omit<DynamicWorkflowMetadata, "phases"> & {
 /** Writes a message to the workflow log. */
 export type WorkflowLogFn = (...args: unknown[]) => void;
 
+/** Reference to a workflow that can be run from another workflow. */
+export type WorkflowRef = string | { scriptPath: string };
+
+/** Runs another workflow inline as a sub-step. */
+export type WorkflowRunFn = <Output = unknown>(
+  nameOrRef: WorkflowRef,
+  args?: unknown,
+) => Promise<Output>;
+
 /** A unit of work passed to `parallel`. */
 export type ParallelTask<T = unknown> = () => Awaitable<T>;
 
@@ -136,6 +145,7 @@ export type WorkflowContext = {
   agent: AgentRunFn;
   parallel: ParallelFn;
   pipeline: PipelineFn;
+  workflow: WorkflowRunFn;
   log: WorkflowLogFn;
   phase: PhaseFn;
 };
@@ -155,6 +165,8 @@ declare global {
   var parallel: ParallelFn;
   /** Global pipeline helper injected by the isolated workflow runner. */
   var pipeline: PipelineFn;
+  /** Global child workflow helper injected by the isolated workflow runner. */
+  var workflow: WorkflowRunFn;
   /** Global logger injected by the isolated workflow runner. */
   var log: WorkflowLogFn;
   /** Global phase helper injected by the isolated workflow runner. */
