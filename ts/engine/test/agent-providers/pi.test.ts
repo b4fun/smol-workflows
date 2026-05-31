@@ -16,7 +16,7 @@ test("pi provider invokes pi print json mode", async () => {
   });
 
   assert.equal(provider.name, "pi");
-  assert.equal(provider.schemaMode, "prompt");
+  assert.equal(provider.schemaMode, "builtin");
   assert.equal(provider.usageMode, "builtin");
   assert.equal(result.output, "fake pi: hello pi");
   assert.equal(result.sessionId, "pi-session-1");
@@ -30,7 +30,7 @@ test("pi provider invokes pi print json mode", async () => {
   });
 });
 
-test("pi provider prompts for schema output and parses JSON", async () => {
+test("pi provider uses structured_output extension for schema output", async () => {
   const provider = createPiAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-pi-provider.mjs")],
@@ -52,13 +52,8 @@ test("pi provider prompts for schema output and parses JSON", async () => {
 
   assert.deepEqual(result.output, {
     summary: "structured pi summary",
-    prompt: `structured prompt\n\nReturn ONLY valid JSON matching this JSON Schema. Do not include markdown fences or explanatory text.\n${JSON.stringify({
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-      },
-      required: ["summary"],
-    }, null, 2)}`,
+    prompt: "structured prompt\n\nUse the smol_workflows_structured_output tool as your final action exactly once.\nDo not emit a final assistant message after calling smol_workflows_structured_output.",
+    extensionRegisteredTool: true,
   });
 });
 

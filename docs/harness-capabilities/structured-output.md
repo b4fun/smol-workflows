@@ -143,23 +143,17 @@ Implementation requirements:
 
 ### Behavior
 
-Pi structured-output calls should run in JSON mode with a generated extension that registers a custom terminating `structured_output` tool. The provider should enable only that tool for the run and read the structured payload from the tool result.
+Pi structured-output calls should run in JSON mode with a generated extension that registers a custom terminating `smol_workflows_structured_output` tool. The provider should read the structured payload from the tool result while leaving normal Pi context and tools available.
 
 Implementation strategy:
 
 ```sh
 pi \
-  --no-extensions \
   --extension /tmp/smol-workflows-structured-output-extension.ts \
-  --no-context-files \
-  --no-skills \
-  --no-prompt-templates \
-  --no-session \
   --mode json \
   --print \
-  --tools structured_output \
   --model <provider/model> \
-  'Use the structured_output tool as your final action exactly once...'
+  'Use the smol_workflows_structured_output tool as your final action exactly once...'
 ```
 
 Expected extraction point:
@@ -167,7 +161,7 @@ Expected extraction point:
 ```json
 {
   "type": "tool_execution_end",
-  "toolName": "structured_output",
+  "toolName": "smol_workflows_structured_output",
   "result": {
     "details": { "...": "structured payload" },
     "terminate": true
@@ -181,10 +175,10 @@ Expected extraction point:
 Implementation requirements:
 
 1. Generate a temporary Pi extension from the workflow JSON Schema.
-2. Register a terminating `structured_output` tool with TypeBox parameters equivalent to the JSON Schema where possible.
-3. Run Pi with extension discovery disabled and only the generated tool enabled.
+2. Register a terminating `smol_workflows_structured_output` tool with TypeBox parameters equivalent to the JSON Schema where possible.
+3. Run Pi with the generated extension, JSON mode, and print mode.
 4. Parse JSON-lines stdout.
-5. Extract `tool_execution_end.result.details` for `toolName === "structured_output"`.
+5. Extract `tool_execution_end.result.details` for `toolName === "smol_workflows_structured_output"`.
 6. Validate locally against the original workflow schema.
 7. Treat failure to call the tool, multiple calls, or invalid `details` as structured-output failures.
 
