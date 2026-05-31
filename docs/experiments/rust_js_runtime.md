@@ -285,9 +285,10 @@ let context = Context::custom::<WorkflowIntrinsics>(&runtime)?;
 Deliberately omit:
 
 - `Performance`,
-- `Eval`,
 - `WeakRef`,
 - potentially `TypedArrays` unless needed.
+
+The initial `rquickjs` implementation includes the `Eval` intrinsic because `rquickjs` requires it for host-driven source evaluation. The workflow sandbox still removes the user-visible `eval` and function-constructor globals before workflow code runs.
 
 ### 2. Block nondeterminism
 
@@ -309,7 +310,7 @@ If deterministic randomness is needed later, expose a seeded workflow API instea
 
 ### 3. Block dynamic code evaluation
 
-Do not include the `Eval` intrinsic. Also harden common escape hatches:
+Even when the runtime needs host-side evaluation support to bootstrap workflow code, remove user-visible dynamic evaluation APIs before the workflow runs:
 
 ```js
 for (const name of ["eval", "Function", "AsyncFunction"]) {
