@@ -1,5 +1,6 @@
 import type { FromSchema } from "json-schema-to-ts";
 import type { JSONSchema } from "./json-schema.js";
+import type { PipelineFn } from "./pipeline.js";
 
 export type {
   JSONArray,
@@ -10,6 +11,7 @@ export type {
   JSONSchemaType,
   JSONValue,
 } from "./json-schema.js";
+export type { PipelineFn, PipelineStage } from "./pipeline.js";
 
 /** A value that may be returned synchronously or asynchronously. */
 export type Awaitable<T> = T | Promise<T>;
@@ -68,24 +70,6 @@ export type ParallelResults<Tasks extends readonly ParallelTask[]> = {
 export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
   tasks: Tasks,
 ) => Promise<ParallelResults<Tasks>>;
-
-/** A stage in a `pipeline` call. */
-export type PipelineStage<Previous = unknown, Item = unknown, Result = unknown> = (
-  previous: Previous,
-  item: Item,
-  index: number,
-) => Awaitable<Result>;
-
-/**
- * Runs items through sequential stages without a barrier between stages.
- *
- * Each item advances to its next stage as soon as that item is ready. If a stage
- * throws for an item, that item resolves to `null` and remaining stages are skipped.
- */
-export type PipelineFn = <Item, Result = unknown>(
-  items: readonly Item[],
-  ...stages: readonly PipelineStage<unknown, Item, unknown>[]
-) => Promise<Array<Result | null>>;
 
 /** Agent options mirrored from the Dynamic Workflow reference. */
 export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchema> = {

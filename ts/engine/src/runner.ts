@@ -6,6 +6,7 @@ import type {
   AgentRunOptions,
   ParallelFn,
   PipelineFn,
+  PipelineStage,
   WorkflowContext,
   WorkflowMetadata,
   WorkflowPhaseMetadata,
@@ -167,7 +168,10 @@ function hasDefaultExport(module: WorkflowModule): module is WorkflowModule & { 
 }
 
 function createPipeline(): PipelineFn {
-  return (async function pipeline(items, ...stages) {
+  return (async function pipeline(
+    items: readonly unknown[],
+    ...stages: readonly PipelineStage<unknown, unknown, unknown>[]
+  ) {
     return await Promise.all(
       items.map(async (item, index) => {
         let previous: unknown = item;
