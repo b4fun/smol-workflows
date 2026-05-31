@@ -9,7 +9,7 @@ The workflow scripting syntax is based on [Claude Code's dynamic workflows](http
 - `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
 - `ts/engine` — CLI and isolated runner (`@smol-workflow/engine`).
 - `examples` — runnable workflow scripts.
-- `docs` — design notes and workflow API reference.
+- `docs` — design notes, workflow API reference, and harness integration findings.
 
 ## Workflow shape
 
@@ -52,6 +52,8 @@ smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|openc
 ### Agent providers
 
 The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`.
+
+See [`docs/harness-integration.md`](docs/harness-integration.md) for structured-output and token-usage findings for Pi and OpenCode.
 
 ## Durable backends
 
