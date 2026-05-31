@@ -18,24 +18,6 @@ It focuses only on structured output: how to request it, where to read it from t
 4. **Bounded retries:** validation failures should be retried with a clear retry limit and diagnostics.
 5. **Degrade predictably:** if a provider lacks a structured-output mechanism, prompt for JSON, parse it, validate it locally, and surface a clear error on failure.
 
-## Current support summary
-
-| Provider | Current engine mode | Recommended mode | Expected extraction point | Notes |
-| --- | --- | --- | --- | --- |
-| `debug` | Deterministic built-in schema generator | Keep built-in | Generated value from schema | Test/mocking provider; no external harness. |
-| `claude-code` | Native CLI schema flag | Keep native | Claude JSON response `structured_output` / `structuredOutput`, fallback parsed final output | Requires Claude Code print mode. Live verification was not run locally because `claude` was not installed. |
-| `codex` | Native CLI schema flag | Keep native | File from `--output-last-message`, parsed as JSON | Codex requires object schemas to set `additionalProperties: false`; provider normalizes schemas before writing schema file. |
-| `pi` | Prompt-only JSON today | Move to generated extension + terminating custom tool | `tool_execution_end.result.details` for `structured_output` | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
-| `opencode` | Prompt-only JSON today | Move to server/session API `format: { type: "json_schema" }` | Session message `structured` value | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
-
-Capability declarations live in `ts/engine/src/agent-providers/types.ts`:
-
-```ts
-type AgentProviderSchemaMode = "builtin" | "prompt" | "none";
-```
-
-These declarations describe the current provider implementation, not necessarily the ideal future path. For example, `pi` and `opencode` currently declare `schemaMode: "prompt"`, but the recommended implementations below are stronger native/tool-based paths.
-
 ## Cross-provider engine behavior
 
 For every provider, schema-backed calls should follow this shape:
