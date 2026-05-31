@@ -65,6 +65,16 @@ export type WorkflowRunFn = <Output = unknown>(
   args?: unknown,
 ) => Promise<Output>;
 
+/** Shared token budget exposed to workflow scripts. */
+export type WorkflowBudget = {
+  /** Target output-token budget, or `null` when no target was configured. */
+  total: number | null;
+  /** Output tokens spent across this workflow run and child workflows. */
+  spent(): number;
+  /** Remaining output-token budget, or `Infinity` when no target was configured. */
+  remaining(): number;
+};
+
 /** A unit of work passed to `parallel`. */
 export type ParallelTask<T = unknown> = () => Awaitable<T>;
 
@@ -146,6 +156,7 @@ export type WorkflowContext = {
   parallel: ParallelFn;
   pipeline: PipelineFn;
   workflow: WorkflowRunFn;
+  budget: WorkflowBudget;
   log: WorkflowLogFn;
   phase: PhaseFn;
 };
@@ -167,6 +178,8 @@ declare global {
   var pipeline: PipelineFn;
   /** Global child workflow helper injected by the isolated workflow runner. */
   var workflow: WorkflowRunFn;
+  /** Global token budget helper injected by the isolated workflow runner. */
+  var budget: WorkflowBudget;
   /** Global logger injected by the isolated workflow runner. */
   var log: WorkflowLogFn;
   /** Global phase helper injected by the isolated workflow runner. */

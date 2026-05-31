@@ -113,6 +113,37 @@ test("runWorkflow supports pipeline without stage barriers", async () => {
   ]);
 });
 
+test("runWorkflow exposes shared budget across agents and child workflows", async () => {
+  const result = await runWorkflow({
+    scriptPath: fixturePath("budget-parent.workflow.js"),
+    budgetTotal: 50,
+  });
+
+  assert.equal(typeof result, "object");
+  assert.notEqual(result, null);
+
+  const budgetResult = result as {
+    initial: { total: number | null; spent: number; remaining: number };
+    afterParentAgent: { total: number | null; spent: number; remaining: number };
+    child: {
+      before: { total: number | null; spent: number; remaining: number };
+      after: { total: number | null; spent: number; remaining: number };
+    };
+    afterChild: { total: number | null; spent: number; remaining: number };
+  };
+
+  assert.deepEqual(budgetResult.initial, { total: 50, spent: 0, remaining: 50 });
+  assert.equal(budgetResult.afterParentAgent.total, 50);
+  assert.ok(budgetResult.afterParentAgent.spent > 0);
+  assert.equal(
+    budgetResult.afterParentAgent.remaining,
+    50 - budgetResult.afterParentAgent.spent,
+  );
+  assert.deepEqual(budgetResult.child.before, budgetResult.afterParentAgent);
+  assert.ok(budgetResult.child.after.spent > budgetResult.child.before.spent);
+  assert.deepEqual(budgetResult.afterChild, budgetResult.child.after);
+});
+
 test("runWorkflow supports child workflow calls", async () => {
   const phases: Array<{ name: string; options?: unknown }> = [];
 

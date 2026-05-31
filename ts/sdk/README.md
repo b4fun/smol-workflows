@@ -170,6 +170,7 @@ The runner injects these globals:
 - `parallel(tasks)` — run tasks concurrently with a barrier; thrown tasks resolve to `null`
 - `pipeline(items, ...stages)` — run each item through stages without barriers between stages
 - `workflow(nameOrRef, args?)` — run another workflow inline as a sub-step
+- `budget` — shared output-token budget with `total`, `spent()`, and `remaining()`
 - `log(...values)` — write workflow logs
 - `phase(name)` — mark workflow phase
 

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { inspect } from "node:util";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
 import { createAgentProvider } from "./agent-providers/index.js";
-import type { AgentProvider } from "./agent-providers/types.js";
+import type { AgentProvider, AgentProviderResult, AgentUsage } from "./agent-providers/types.js";
 
 export type WorkflowArgs = Record<string, unknown>;
 
@@ -20,7 +20,16 @@ export type RunWorkflowOptions = {
   onAgent?: WorkflowAgentHandler;
   onLog?: (...values: unknown[]) => void;
   onPhase?: (name: string, options?: unknown) => void;
+  /** Optional shared output-token budget target. */
+  budgetTotal?: number | null;
+  /** Internal shared budget state used for child workflow calls. */
+  budgetState?: WorkflowBudgetState;
   nestingDepth?: number;
+};
+
+export type WorkflowBudgetState = {
+  total: number | null;
+  spent: number;
 };
 
 type RunnerMessage =
@@ -32,23 +41,36 @@ type RunnerMessage =
   | { type: "error"; message: string; stack?: string };
 
 type ParentMessage =
-  | { type: "agent.result"; id: string; result: unknown }
+  | { type: "agent.result"; id: string; result: unknown; budgetSpent: number; budgetTotal: number | null }
   | { type: "agent.error"; id: string; message: string; stack?: string }
-  | { type: "workflow.result"; id: string; result: unknown }
+  | { type: "workflow.result"; id: string; result: unknown; budgetSpent: number; budgetTotal: number | null }
   | { type: "workflow.error"; id: string; message: string; stack?: string };
 
 export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown> {
   const runnerPath = resolve(dirname(fileURLToPath(import.meta.url)), "runner.js");
   const scriptPath = resolve(options.scriptPath);
   const args = options.args ?? {};
+  const budgetState = options.budgetState ?? {
+    total: options.budgetTotal ?? null,
+    spent: 0,
+  };
 
   return await new Promise((resolveResult, reject) => {
     let settled = false;
     let resultReceived = false;
 
-    const child = fork(runnerPath, [scriptPath, JSON.stringify(args), String(options.nestingDepth ?? 0)], {
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-    });
+    const child = fork(
+      runnerPath,
+      [
+        scriptPath,
+        JSON.stringify(args),
+        String(options.nestingDepth ?? 0),
+        JSON.stringify({ total: budgetState.total, spent: budgetState.spent }),
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      },
+    );
 
     child.stdout?.on("data", (chunk) => {
       process.stderr.write(chunk);
@@ -73,7 +95,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
         case "agent":
           void handleAgent(message)
             .then((result) => {
-              sendToRunner({ type: "agent.result", id: message.id, result });
+              budgetState.spent += getOutputTokenSpend(result.usage);
+              sendToRunner({
+                type: "agent.result",
+                id: message.id,
+                result: result.output,
+                budgetSpent: budgetState.spent,
+                budgetTotal: budgetState.total,
+              });
             })
             .catch((error: unknown) => {
               const errorMessage = error instanceof Error ? error.message : String(error);
@@ -89,7 +118,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
         case "workflow":
           void handleWorkflow(message)
             .then((result) => {
-              sendToRunner({ type: "workflow.result", id: message.id, result });
+              sendToRunner({
+                type: "workflow.result",
+                id: message.id,
+                result,
+                budgetSpent: budgetState.spent,
+                budgetTotal: budgetState.total,
+              });
             })
             .catch((error: unknown) => {
               const errorMessage = error instanceof Error ? error.message : String(error);
@@ -138,9 +173,12 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
 
     async function handleAgent(
       message: Extract<RunnerMessage, { type: "agent" }>,
-    ): Promise<unknown> {
-      const handler = options.onAgent ?? createAgentHandler(options.agentProvider);
-      return await handler(message.prompt, message.options);
+    ): Promise<AgentProviderResult> {
+      if (options.onAgent) {
+        return { output: await options.onAgent(message.prompt, message.options) };
+      }
+
+      return await runProviderAgent(message.prompt, message.options, options.agentProvider);
     }
 
     async function handleWorkflow(
@@ -153,6 +191,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
         onAgent: options.onAgent,
         onLog: options.onLog,
         onPhase: options.onPhase,
+        budgetState,
         nestingDepth: (options.nestingDepth ?? 0) + 1,
       });
     }
@@ -169,22 +208,30 @@ function isWorkflowArgs(value: unknown): value is WorkflowArgs {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function createAgentHandler(provider: AgentProvider = createAgentProvider("debug")): WorkflowAgentHandler {
-  return async (prompt, options) => {
-    const selectedProvider = options?.provider
-      ? createAgentProvider(options.provider)
-      : provider;
-    const result = await selectedProvider.run({
-      prompt,
-      options,
-      context: {
-        phase: options?.phase,
-        key: options?.key,
-      },
-    });
+async function runProviderAgent(
+  prompt: string,
+  options?: AgentRunOptions,
+  provider: AgentProvider = createAgentProvider("debug"),
+): Promise<AgentProviderResult> {
+  const selectedProvider = options?.provider
+    ? createAgentProvider(options.provider)
+    : provider;
+  return await selectedProvider.run({
+    prompt,
+    options,
+    context: {
+      phase: options?.phase,
+      key: options?.key,
+    },
+  });
+}
 
-    return result.output;
-  };
+function getOutputTokenSpend(usage: AgentUsage | undefined): number {
+  return Math.max(0, Math.floor(usage?.outputTokens ?? 0));
+}
+
+function createAgentHandler(provider: AgentProvider = createAgentProvider("debug")): WorkflowAgentHandler {
+  return async (prompt, options) => (await runProviderAgent(prompt, options, provider)).output;
 }
 
 function formatExit(code: number | null, signal: NodeJS.Signals | null): string {

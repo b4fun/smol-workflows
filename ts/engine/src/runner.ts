@@ -13,6 +13,12 @@ import type {
   WorkflowRef,
   WorkflowRunFn,
 } from "@smol-workflow/sdk";
+import {
+  createBudget,
+  parseBudgetSnapshot,
+  updateBudgetSnapshot,
+  type WorkflowBudgetSnapshot,
+} from "./budget.js";
 import { readWorkflowMetadata, toWorkflowMetadata } from "./metadata.js";
 
 type RunnerAgentMessage = { type: "agent"; id: string; prompt: string; options?: AgentRunOptions };
@@ -31,9 +37,9 @@ type RunnerMessage =
   | RunnerErrorMessage;
 
 type ParentMessage =
-  | { type: "agent.result"; id: string; result: unknown }
+  | { type: "agent.result"; id: string; result: unknown; budgetSpent?: number; budgetTotal?: number | null }
   | { type: "agent.error"; id: string; message: string; stack?: string }
-  | { type: "workflow.result"; id: string; result: unknown }
+  | { type: "workflow.result"; id: string; result: unknown; budgetSpent?: number; budgetTotal?: number | null }
   | { type: "workflow.error"; id: string; message: string; stack?: string };
 
 type WorkflowFunction = (input?: unknown, ctx?: WorkflowContext) => unknown | Promise<unknown>;
@@ -54,6 +60,7 @@ const pendingWorkflowCalls = new Map<
 >();
 let nextAgentCallID = 0;
 let nextWorkflowCallID = 0;
+let budgetSnapshot: WorkflowBudgetSnapshot = { total: null, spent: 0 };
 
 process.on("message", (message: ParentMessage) => {
   if (!message || typeof message !== "object") {
@@ -68,6 +75,7 @@ process.on("message", (message: ParentMessage) => {
       }
 
       pendingAgentCalls.delete(message.id);
+      updateBudgetSnapshot(budgetSnapshot, message.budgetSpent, message.budgetTotal);
       pending.resolve(message.result);
       break;
     }
@@ -88,6 +96,7 @@ process.on("message", (message: ParentMessage) => {
       }
 
       pendingWorkflowCalls.delete(message.id);
+      updateBudgetSnapshot(budgetSnapshot, message.budgetSpent, message.budgetTotal);
       pending.resolve(message.result);
       break;
     }
@@ -108,6 +117,7 @@ async function main(): Promise<void> {
   const scriptPath = process.argv[2];
   const rawArgs = process.argv[3] ?? "{}";
   const nestingDepth = Number(process.argv[4] ?? "0");
+  budgetSnapshot = parseBudgetSnapshot(process.argv[5]);
 
   if (!scriptPath) {
     throw new Error("Missing workflow script path");
@@ -150,6 +160,7 @@ async function main(): Promise<void> {
     ),
     pipeline: readonlyFunction(createPipeline(), "pipeline"),
     workflow: readonlyFunction(createWorkflowProxy(absoluteScriptPath, nestingDepth), "workflow"),
+    budget: readonlyProxy(createBudget(() => budgetSnapshot)),
     log: readonlyFunction((...values: unknown[]) => {
       send({ type: "log", values });
     }, "log"),
@@ -164,6 +175,7 @@ async function main(): Promise<void> {
   defineWorkflowGlobal("parallel", globals.parallel);
   defineWorkflowGlobal("pipeline", globals.pipeline);
   defineWorkflowGlobal("workflow", globals.workflow);
+  defineWorkflowGlobal("budget", globals.budget);
   defineWorkflowGlobal("log", globals.log);
   defineWorkflowGlobal("phase", globals.phase);
 
@@ -173,6 +185,7 @@ async function main(): Promise<void> {
     parallel: globals.parallel,
     pipeline: globals.pipeline,
     workflow: globals.workflow,
+    budget: globals.budget,
     log: globals.log,
     phase: globals.phase,
   };

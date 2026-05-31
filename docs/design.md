@@ -230,14 +230,18 @@ type AgentRunOptions = {
   schema?: JSONSchema;
   phase?: string;
   key?: string;
+  model?: string;
+  provider?: string;
 };
 ```
 
 - `schema` requests and/or validates structured output.
 - `phase` associates the run with a tracing/display phase.
 - `key` provides a stable identifier for caching, deduplication, or trace correlation.
+- `model` optionally overrides the selected model for this call.
+- `provider` optionally switches the agent provider for this call.
 
-Model-level options such as `temperature` and `maxTokens` are intentionally omitted for now to keep the primitive small.
+Other model-level options such as `temperature` and `maxTokens` are intentionally omitted for now to keep the primitive small.
 
 ### `parallel`
 
@@ -269,6 +273,83 @@ const results = await pipeline(
 ```
 
 Each stage receives `(previousResult, originalItem, index)`. An item advances to the next stage as soon as that item is ready; it does not wait for other items to finish the current stage. If a stage throws, that item resolves to `null` and remaining stages for that item are skipped.
+
+### `workflow`
+
+`workflow` runs another workflow inline as a sub-step.
+
+Current shape:
+
+```ts
+type WorkflowRef = string | { scriptPath: string };
+
+workflow(nameOrRef: WorkflowRef, args?: unknown): Promise<unknown>;
+```
+
+Use `{ scriptPath }` for a workflow file on disk. Relative paths resolve from the current workflow file, which makes parent/child workflow pairs easy to keep together:
+
+```js
+const childResult = await workflow(
+  { scriptPath: "./child.workflow.js" },
+  { item: "alpha" },
+);
+```
+
+A string reference invokes a saved workflow by `meta.name` from `.claude/workflows/*.js`:
+
+```js
+const report = await workflow("stock-investment-analysis", {
+  stocks: ["NVDA", "AAPL"],
+});
+```
+
+The sub-workflow pattern is useful when a reusable orchestration deserves its own metadata, phases, tests, or examples. Parent workflows can call children sequentially, inside `parallel`, or inside `pipeline` stages. The current engine enforces one level of nesting: a parent workflow may call a child workflow, but that child may not call another workflow.
+
+Implementation notes:
+
+- The runner injects `workflow` as a readonly global and sends child-workflow requests to the parent process over IPC.
+- The parent process runs the child with the same agent provider and callbacks (`onAgent`, `onLog`, `onPhase`).
+- Child workflows receive their own isolated runner process and their own `args` object.
+- Child workflow phases/logs are forwarded through the same parent callbacks as the parent workflow.
+
+### `budget`
+
+`budget` exposes a shared output-token budget to workflow scripts.
+
+Current shape:
+
+```ts
+type WorkflowBudget = {
+  total: number | null;
+  spent(): number;
+  remaining(): number;
+};
+```
+
+- `total` is the configured output-token target, or `null` when no target is configured.
+- `spent()` returns output tokens spent so far across the parent workflow and child workflows.
+- `remaining()` returns `Math.max(0, total - spent())`, or `Infinity` when `total` is `null`.
+
+Example:
+
+```js
+while (budget.total && budget.remaining() > 10_000) {
+  const findings = await agent("Find another batch of issues", { phase: "Scan" });
+  log(`Budget remaining: ${Math.round(budget.remaining() / 1000)}k tokens`);
+}
+```
+
+Implementation details:
+
+- `runWorkflow({ budgetTotal })` creates a shared in-memory budget state in the parent process.
+- Agent calls are still executed by the parent process. When a provider returns usage, the parent increments budget spend by `usage.outputTokens`.
+- Child workflows receive a snapshot of the shared budget when their runner starts.
+- After each agent call or child workflow completes, the parent sends an updated budget snapshot to the runner over IPC.
+- This keeps `budget.spent()` and `budget.remaining()` live enough for workflow control flow while preserving runner isolation.
+- Custom `onAgent` handlers currently return only the agent output, so they do not contribute usage unless their implementation is later extended to report usage.
+- Providers without usage reporting contribute zero spend.
+
+Follow-up: budget accounting should eventually be backed by an authoritative run/session data source rather than parent-child IPC snapshots. That would make accounting more robust for persisted runs, resume/cache behavior, provider retries, and durable backends.
 
 ### `log`
 
