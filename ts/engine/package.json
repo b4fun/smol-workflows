@@ -16,6 +16,10 @@
     "./backends/absurd": {
       "types": "./dist/backends/absurd.d.ts",
       "import": "./dist/backends/absurd.js"
+    },
+    "./agent-providers": {
+      "types": "./dist/agent-providers/index.d.ts",
+      "import": "./dist/agent-providers/index.js"
     }
   },
   "files": [
