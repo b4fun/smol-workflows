@@ -1,0 +1,55 @@
+name: TypeScript package tests
+
+on:
+  push:
+    paths:
+      - 'ts/**'
+      - '.github/workflows/typescript-tests.yml'
+  pull_request:
+    paths:
+      - 'ts/**'
+      - '.github/workflows/typescript-tests.yml'
+
+jobs:
+  test:
+    name: Test TypeScript packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ts/*/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          for package_json in ts/*/package.json; do
+            package_dir="$(dirname "$package_json")"
+            echo "Installing dependencies in $package_dir"
+            npm --prefix "$package_dir" ci
+          done
+
+      - name: Build shared SDK
+        run: npm --prefix ts/sdk run build
+
+      - name: Run package tests
+        run: |
+          set -euo pipefail
+          for package_json in ts/*/package.json; do
+            package_dir="$(dirname "$package_json")"
+            package_name="$(node -e "console.log(require('./$package_json').name)")"
+
+            if node -e "const p = require('./$package_json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
+              echo "Running tests for $package_name ($package_dir)"
+              npm --prefix "$package_dir" test
+            else
+              echo "No test script for $package_name ($package_dir); running typecheck if available"
+              npm --prefix "$package_dir" run typecheck --if-present
+            fi
+          done
