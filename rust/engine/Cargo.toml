@@ -1,0 +1,9 @@
+[package]
+name = "smol-workflow-engine"
+description = "Rust implementation of the smol-workflows engine."
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "smol_workflow_engine"
+path = "src/lib.rs"

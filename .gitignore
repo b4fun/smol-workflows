@@ -6,3 +6,6 @@
 # direnv
 .direnv/
 .envrc.local
+
+# Rust
+/target/
