@@ -37,12 +37,7 @@ test("runWorkflow injects args, agent, parallel, log, and phase", async () => {
     ],
   ]);
 
-  assert.deepEqual(phases, [
-    {
-      name: "Research",
-      options: { metadata: { source: "test" } },
-    },
-  ]);
+  assert.deepEqual(phases, [{ name: "Research", options: undefined }]);
 });
 
 test("runWorkflow supports top-level module-result workflows", async () => {

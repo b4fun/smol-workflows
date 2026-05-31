@@ -143,14 +143,8 @@ export type Agent = {
 /** The global agent helper exposed to workflow scripts. */
 export type AgentRunFn = Agent["run"];
 
-/** Options used to annotate a workflow phase marker. */
-export type PhaseOptions = {
-  /** Runner-defined metadata for tracing, display, or diagnostics. */
-  metadata?: Record<string, unknown>;
-};
-
 /** Marks the current workflow phase for tracing and observability. */
-export type PhaseFn = (name: string, options?: PhaseOptions) => void;
+export type PhaseFn = (name: string) => void;
 
 /** Explicit workflow capabilities passed as the second argument to a workflow. */
 export type WorkflowContext = {

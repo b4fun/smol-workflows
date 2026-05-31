@@ -170,7 +170,7 @@ The runner injects these globals:
 - `parallel(tasks)` — run tasks concurrently with a barrier; thrown tasks resolve to `null`
 - `pipeline(items, ...stages)` — run each item through stages without barriers between stages
 - `log(...values)` — write workflow logs
-- `phase(name, options?)` — mark workflow phase
+- `phase(name)` — mark workflow phase
 
 ## Scripts
 

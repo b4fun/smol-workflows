@@ -5,7 +5,7 @@ export const meta = {
 };
 
 export default async function workflow() {
-  phase("Research", { metadata: { source: "test" } });
+  phase("Research");
   log("received", args);
 
   const [first, second] = await parallel([
