@@ -64,6 +64,7 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 - [ ] isolation support
 - [ ] durable retry
 - [ ] budget
+- [ ] concurrency limit and control
 - [ ] output schema plugins for opencode / pi
 - [ ] plugin usages support
 - [ ] dashboard
