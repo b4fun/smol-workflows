@@ -5,11 +5,14 @@ export type { CodexAgentProviderOptions } from "./codex.js";
 export { createDebugAgentProvider, generateDebugValueFromSchema } from "./debug.js";
 export { createOpenCodeAgentProvider } from "./opencode.js";
 export type { OpenCodeAgentProviderOptions } from "./opencode.js";
+export { createPiAgentProvider } from "./pi.js";
+export type { PiAgentProviderOptions } from "./pi.js";
 
 import { createClaudeCodeAgentProvider, type ClaudeCodeAgentProviderOptions } from "./claude-code.js";
 import { createCodexAgentProvider, type CodexAgentProviderOptions } from "./codex.js";
 import { createDebugAgentProvider } from "./debug.js";
 import { createOpenCodeAgentProvider, type OpenCodeAgentProviderOptions } from "./opencode.js";
+import { createPiAgentProvider, type PiAgentProviderOptions } from "./pi.js";
 import type { AgentProvider, AgentProviderName, AgentProviderOptions } from "./types.js";
 
 export function createAgentProvider(
@@ -25,6 +28,8 @@ export function createAgentProvider(
       return createCodexAgentProvider(options as CodexAgentProviderOptions);
     case "opencode":
       return createOpenCodeAgentProvider(options as OpenCodeAgentProviderOptions);
+    case "pi":
+      return createPiAgentProvider(options as PiAgentProviderOptions);
     default:
       throw new Error(`Unknown agent provider: ${name}`);
   }
