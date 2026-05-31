@@ -1,3 +1,5 @@
+export { createDebugAgentProvider, generateDebugValueFromSchema } from "./debug.js";
+
 export type {
   AgentProvider,
   AgentProviderCapabilities,

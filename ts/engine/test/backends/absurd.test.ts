@@ -5,8 +5,8 @@ import {
   getAgentCheckpointKey,
   runAbsurdWorkflowTask,
   runDurableAgent,
-} from "../src/backends/absurd.js";
-import { fixturePath } from "./helpers.js";
+} from "../../src/backends/absurd.js";
+import { fixturePath } from "../helpers.js";
 
 test("runDurableAgent checkpoints agent calls by explicit key", async () => {
   const ctx = new FakeTaskContext();

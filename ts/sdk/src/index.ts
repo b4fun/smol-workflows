@@ -79,6 +79,14 @@ export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
   phase?: string;
   /** Optional stable key used for caching, deduplication, or trace correlation. */
   key?: string;
+  /**
+   * Optional agent provider override for this call.
+   *
+   * If omitted, the runner's default provider is used. Runners may support
+   * built-in provider names such as `debug`, `claude-code`, `codex`,
+   * `opencode`, or `pi`, and may also register custom provider names.
+   */
+  provider?: string;
 };
 
 /** An AI capability exposed to workflow scripts. */

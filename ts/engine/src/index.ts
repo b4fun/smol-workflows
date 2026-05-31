@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { inspect } from "node:util";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
+import { createDebugAgentProvider } from "./agent-providers/debug.js";
 
 export type WorkflowArgs = Record<string, unknown>;
 
@@ -129,11 +130,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
 }
 
 async function echoAgent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
-  if (options?.schema) {
-    return { echo: prompt };
-  }
+  const result = await createDebugAgentProvider().run({
+    prompt,
+    options,
+    context: {
+      phase: options?.phase,
+      key: options?.key,
+    },
+  });
 
-  return `echo: ${prompt}`;
+  return result.output;
 }
 
 function formatExit(code: number | null, signal: NodeJS.Signals | null): string {

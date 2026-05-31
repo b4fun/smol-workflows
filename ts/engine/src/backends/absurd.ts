@@ -8,6 +8,7 @@ import type {
   WorkerOptions,
 } from "@absurd-sqlite/sdk";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
+import { createDebugAgentProvider } from "../agent-providers/debug.js";
 import sqlite from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -361,11 +362,16 @@ export function getAgentCheckpointKey(prompt: string, options?: AgentRunOptions)
 }
 
 async function echoAgent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
-  if (options?.schema) {
-    return { echo: prompt };
-  }
+  const result = await createDebugAgentProvider().run({
+    prompt,
+    options,
+    context: {
+      phase: options?.phase,
+      key: options?.key,
+    },
+  });
 
-  return `echo: ${prompt}`;
+  return result.output;
 }
 
 function getConfiguredExtensionPath(extensionPath?: string): string | undefined {
