@@ -68,6 +68,7 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 - [ ] output schema plugins for opencode / pi
 - [ ] plugin usages support
 - [ ] dashboard
+- [ ] improve context passing between agents, provide more primitives for accessing propagated context and in workflow/pre-defined memory data
 - [ ] environment abstraction
 - [ ] environment sandbox / isolation
 - [ ] remote environment support
