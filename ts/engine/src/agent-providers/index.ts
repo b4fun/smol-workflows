@@ -3,10 +3,13 @@ export type { ClaudeCodeAgentProviderOptions } from "./claude-code.js";
 export { createCodexAgentProvider } from "./codex.js";
 export type { CodexAgentProviderOptions } from "./codex.js";
 export { createDebugAgentProvider, generateDebugValueFromSchema } from "./debug.js";
+export { createOpenCodeAgentProvider } from "./opencode.js";
+export type { OpenCodeAgentProviderOptions } from "./opencode.js";
 
 import { createClaudeCodeAgentProvider, type ClaudeCodeAgentProviderOptions } from "./claude-code.js";
 import { createCodexAgentProvider, type CodexAgentProviderOptions } from "./codex.js";
 import { createDebugAgentProvider } from "./debug.js";
+import { createOpenCodeAgentProvider, type OpenCodeAgentProviderOptions } from "./opencode.js";
 import type { AgentProvider, AgentProviderName, AgentProviderOptions } from "./types.js";
 
 export function createAgentProvider(
@@ -20,6 +23,8 @@ export function createAgentProvider(
       return createClaudeCodeAgentProvider(options as ClaudeCodeAgentProviderOptions);
     case "codex":
       return createCodexAgentProvider(options as CodexAgentProviderOptions);
+    case "opencode":
+      return createOpenCodeAgentProvider(options as OpenCodeAgentProviderOptions);
     default:
       throw new Error(`Unknown agent provider: ${name}`);
   }

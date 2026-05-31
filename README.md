@@ -56,3 +56,13 @@ TODO: implement support for Codex/OpenCode/Pi/Claude Code.
 We aim to support retryable, durable workflow runs. Today this is experimental and relies on Absurd SQLite for queueing, retries, completion, and persisted workflow/agent state.
 
 TODO: move the durable backend to a Rust-based SQLite implementation soon.
+
+## TODOs
+
+- [ ] full coverage of dynamic workflow's options
+- [ ] port engine to rust based impl + built-in durable workflows
+- [ ] isolation support
+- [ ] output schema plugins for opencode / pi
+- [ ] plugin usages support
+- [ ] durable retry
+- [ ] dashboard
