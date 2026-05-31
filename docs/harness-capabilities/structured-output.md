@@ -16,24 +16,22 @@ It focuses only on structured output: how to request it, where to read it from t
 2. **Prefer native harness support:** when a harness has a JSON Schema / structured-output API, use it instead of prompt-only JSON instructions.
 3. **Validate locally anyway:** provider-native validation is not a substitute for engine validation. The engine should validate the returned payload against the workflow schema with AJV or equivalent before returning it to workflow code.
 4. **Bounded retries:** validation failures should be retried with a clear retry limit and diagnostics.
-5. **Expose usage:** when the harness reports token usage, map it to `AgentProviderResult.usage` so `budget` can account for output tokens.
-6. **Degrade predictably:** if a provider lacks a structured-output mechanism, prompt for JSON, parse it, validate it locally, and surface a clear error on failure.
+5. **Degrade predictably:** if a provider lacks a structured-output mechanism, prompt for JSON, parse it, validate it locally, and surface a clear error on failure.
 
 ## Current support summary
 
-| Provider | Current engine mode | Recommended mode | Expected extraction point | Usage support | Notes |
-| --- | --- | --- | --- | --- | --- |
-| `debug` | Deterministic built-in schema generator | Keep built-in | Generated value from schema | Estimated by engine | Test/mocking provider; no external harness. |
-| `claude-code` | Native CLI schema flag | Keep native | Claude JSON response `structured_output` / `structuredOutput`, fallback parsed final output | Built-in response usage parsing | Requires Claude Code print mode. Live verification was not run locally because `claude` was not installed. |
-| `codex` | Native CLI schema flag | Keep native | File from `--output-last-message`, parsed as JSON | JSONL event usage parsing | Codex requires object schemas to set `additionalProperties: false`; provider normalizes schemas before writing schema file. |
-| `pi` | Prompt-only JSON today | Move to generated extension + terminating custom tool | `tool_execution_end.result.details` for `structured_output` | JSON event usage parsing | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
-| `opencode` | Prompt-only JSON today | Move to server/session API `format: { type: "json_schema" }` | Session message `structured` value | Session/run usage when available | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
+| Provider | Current engine mode | Recommended mode | Expected extraction point | Notes |
+| --- | --- | --- | --- | --- |
+| `debug` | Deterministic built-in schema generator | Keep built-in | Generated value from schema | Test/mocking provider; no external harness. |
+| `claude-code` | Native CLI schema flag | Keep native | Claude JSON response `structured_output` / `structuredOutput`, fallback parsed final output | Requires Claude Code print mode. Live verification was not run locally because `claude` was not installed. |
+| `codex` | Native CLI schema flag | Keep native | File from `--output-last-message`, parsed as JSON | Codex requires object schemas to set `additionalProperties: false`; provider normalizes schemas before writing schema file. |
+| `pi` | Prompt-only JSON today | Move to generated extension + terminating custom tool | `tool_execution_end.result.details` for `structured_output` | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
+| `opencode` | Prompt-only JSON today | Move to server/session API `format: { type: "json_schema" }` | Session message `structured` value | Verified with `github-copilot/gpt-5.4-mini` using examples in this repo. |
 
 Capability declarations live in `ts/engine/src/agent-providers/types.ts`:
 
 ```ts
 type AgentProviderSchemaMode = "builtin" | "prompt" | "none";
-type AgentProviderUsageMode = "builtin" | "none";
 ```
 
 These declarations describe the current provider implementation, not necessarily the ideal future path. For example, `pi` and `opencode` currently declare `schemaMode: "prompt"`, but the recommended implementations below are stronger native/tool-based paths.
@@ -65,10 +63,8 @@ Provider implementations may use a native schema API, a tool call, or prompt-onl
 Current implementation:
 
 - `schemaMode: "builtin"`
-- `usageMode: "builtin"`
 - if `schema` is present, calls `generateDebugValueFromSchema(schema)`;
-- if no `schema` is present, returns `echo: ${prompt}`;
-- estimates token usage locally from string lengths.
+- if no `schema` is present, returns `echo: ${prompt}`.
 
 ### Expected approach
 
@@ -98,8 +94,7 @@ The provider then:
 
 1. parses stdout as JSON;
 2. prefers `structured_output` or `structuredOutput` when present;
-3. falls back to `result` / `output` / `text` / `content` and parses JSON for schema-backed calls;
-4. extracts session ID and usage when present.
+3. falls back to `result` / `output` / `text` / `content` and parses JSON for schema-backed calls.
 
 ### Expected approach
 
@@ -156,7 +151,6 @@ Implementation requirements:
 - Ensure object schemas have `additionalProperties: false`.
 - Read `--output-last-message` as the primary final payload.
 - Parse and validate locally.
-- Map usage from JSONL events.
 
 ### References
 
@@ -182,7 +176,7 @@ pi \
   '<prompt plus JSON Schema instruction>'
 ```
 
-The provider parses JSON-lines events, extracts the last assistant output, and parses it as JSON for schema-backed calls. It also extracts usage from Pi event data.
+The provider parses JSON-lines events, extracts the last assistant output, and parses it as JSON for schema-backed calls.
 
 Research/demo found a stronger path: load a temporary extension that registers a custom terminating `structured_output` tool, enable only that tool for the run, and read the structured payload from the tool result.
 
@@ -229,8 +223,7 @@ Implementation requirements:
 4. Parse JSON-lines stdout.
 5. Extract `tool_execution_end.result.details` for `toolName === "structured_output"`.
 6. Validate locally against the original workflow schema.
-7. Extract usage from Pi JSON events.
-8. Treat failure to call the tool, multiple calls, or invalid `details` as structured-output failures.
+7. Treat failure to call the tool, multiple calls, or invalid `details` as structured-output failures.
 
 Important caveat: Pi tool schemas are useful guidance and produce tool arguments, but they must not be treated as final authority. Exploratory testing found schema-like constraints can still need post-validation. The provider must validate extracted `details` locally.
 
@@ -290,8 +283,7 @@ Implementation requirements:
 3. Send the prompt through the session message endpoint with `format.type = "json_schema"` and the workflow schema.
 4. Read the structured value from the response/session message, not from free text.
 5. Validate locally against the original workflow schema.
-6. Map any available session/run usage to `AgentProviderResult.usage`.
-7. Keep prompt-only JSON as a fallback only when the server/session structured path is unavailable.
+6. Keep prompt-only JSON as a fallback only when the server/session structured path is unavailable.
 
 Verified demo command:
 
@@ -343,4 +335,3 @@ Fallback requirements:
 - Add bounded schema retry behavior.
 - Upgrade `pi` provider from `schemaMode: "prompt"` to generated extension/tool structured output.
 - Upgrade `opencode` provider from `schemaMode: "prompt"` to server/session `json_schema` format.
-- Extend custom `onAgent` handlers to return `{ output, usage }` for budget-accurate structured-output tests/plugins.
