@@ -64,20 +64,7 @@ async function runCodex(
       signal: input.context.signal,
     });
     const events = parseJSONLines(stdout);
-    let finalMessage: string;
-
-    try {
-      finalMessage = await readFile(outputPath, "utf8");
-    } catch (readError) {
-      if (isENOENT(readError)) {
-        // No output file written — fall back to raw stdout.
-        finalMessage = stdout;
-      } else {
-        throw new Error(
-          `Failed to read codex output file: ${readError instanceof Error ? readError.message : String(readError)}`,
-        );
-      }
-    }
+    const finalMessage = await readFinalMessage(outputPath, events);
     const output = input.options?.schema
       ? parseStructuredOutput(finalMessage)
       : finalMessage.trimEnd();
@@ -171,6 +158,30 @@ async function runCommand(
   });
 }
 
+async function readFinalMessage(outputPath: string, events: readonly JSONValue[]): Promise<string> {
+  try {
+    const finalMessage = await readFile(outputPath, "utf8");
+
+    if (finalMessage.trim().length > 0) {
+      return finalMessage;
+    }
+  } catch (readError) {
+    if (!isENOENT(readError)) {
+      throw new Error(
+        `Failed to read codex output file: ${readError instanceof Error ? readError.message : String(readError)}`,
+      );
+    }
+  }
+
+  const assistantText = extractLastAssistantText(events);
+
+  if (assistantText !== undefined) {
+    return assistantText;
+  }
+
+  throw new Error("Codex provider did not return a final assistant message");
+}
+
 function toCodexOutputSchema(schema: unknown): unknown {
   if (typeof schema !== "object" || schema === null) {
     return schema;
@@ -194,6 +205,8 @@ function toCodexOutputSchema(schema: unknown): unknown {
     // entirely. Unconditionally using Object.keys(properties) would silently promote all optional
     // fields to required, misrepresenting the caller's schema contract.
     output.required = Array.isArray(record.required) ? record.required : [];
+    // Codex requires object schemas to explicitly set additionalProperties: false for
+    // --output-schema structured output to work reliably.
     output.additionalProperties = false;
   }
 
@@ -213,19 +226,153 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseStructuredOutput(text: string): unknown {
+  return parseStructuredOutputText(text, new Set());
+}
+
+function parseStructuredOutputText(text: string, seen: Set<string>): unknown {
   const trimmed = text.trim();
 
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-
-    if (fenced?.[1]) {
-      return JSON.parse(fenced[1]) as unknown;
-    }
-
+  if (seen.has(trimmed)) {
     throw new Error("Codex provider did not return valid JSON for schema output");
   }
+
+  seen.add(trimmed);
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+
+    if (typeof parsed === "string") {
+      return parseStructuredOutputText(parsed, seen);
+    }
+
+    return parsed;
+  } catch {
+    // Continue with common provider output shapes below.
+  }
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+
+  if (fenced?.[1]) {
+    return parseStructuredOutputText(fenced[1], seen);
+  }
+
+  const unescaped = tryUnescapeJSONLikeText(trimmed);
+
+  if (unescaped !== undefined) {
+    return parseStructuredOutputText(unescaped, seen);
+  }
+
+  const objectText = extractLikelyJSONObjectText(trimmed);
+
+  if (objectText !== undefined) {
+    return parseStructuredOutputText(objectText, seen);
+  }
+
+  throw new Error("Codex provider did not return valid JSON for schema output");
+}
+
+function tryUnescapeJSONLikeText(text: string): string | undefined {
+  if (!text.includes("\\n") && !text.includes('\\"')) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(`"${text}"`) as string;
+  } catch {
+    return text.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"');
+  }
+}
+
+function extractLikelyJSONObjectText(text: string): string | undefined {
+  const objectStart = text.indexOf("{");
+  const objectEnd = text.lastIndexOf("}");
+  const arrayStart = text.indexOf("[");
+  const arrayEnd = text.lastIndexOf("]");
+
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    return text.slice(objectStart, objectEnd + 1);
+  }
+
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    return text.slice(arrayStart, arrayEnd + 1);
+  }
+
+  return undefined;
+}
+
+function extractLastAssistantText(events: readonly JSONValue[]): string | undefined {
+  let text: string | undefined;
+
+  for (const event of events) {
+    const candidate = extractAssistantText(event);
+
+    if (candidate !== undefined) {
+      text = candidate;
+    }
+  }
+
+  return text;
+}
+
+function extractAssistantText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    let text: string | undefined;
+
+    for (const item of value) {
+      const candidate = extractAssistantText(item);
+
+      if (candidate !== undefined) {
+        text = candidate;
+      }
+    }
+
+    return text;
+  }
+
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const text = extractText(record.text ?? record.output ?? record.message ?? record.content);
+
+  if (
+    (record.role === "assistant" || record.type === "assistant_message" || record.type === "message") &&
+    text !== undefined
+  ) {
+    return text;
+  }
+
+  for (const key of ["message", "content", "output", "text", "delta", "part", "parts", "item", "event", "data", "properties"] as const) {
+    const candidate = extractAssistantText(record[key]);
+
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function extractText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => extractText(item) ?? "").join("") || undefined;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return extractText(record.text ?? record.content ?? record.message ?? record.output);
+  }
+
+  return undefined;
 }
 
 function formatCommandFailure(stdout: string, stderr: string): string {

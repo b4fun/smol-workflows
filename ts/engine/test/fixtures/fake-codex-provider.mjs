@@ -23,8 +23,28 @@ const output = schema
       count: 1,
       prompt: stdin,
       required: schema.required ?? [],
+      additionalProperties: schema.additionalProperties,
     }
   : `fake codex: ${stdin}`
+const finalMessage = schema && stdin.includes('structured-fallback')
+  ? `Here is the answer:\n\n${JSON.stringify(output)}`
+  : schema && stdin.includes('quoted-structured')
+    ? JSON.stringify(JSON.stringify(output))
+  : schema && stdin.includes('escaped-structured')
+    ? JSON.stringify(output).replace(/"/g, '\\"')
+  : typeof output === 'string'
+    ? output
+    : JSON.stringify(output)
+const shouldWriteOutputFile =
+  !stdin.includes('stdout-fallback') &&
+  !stdin.includes('structured-fallback')
 
-writeFileSync(outputPath, typeof output === 'string' ? output : JSON.stringify(output))
+if (shouldWriteOutputFile) {
+  writeFileSync(outputPath, finalMessage)
+} else {
+  console.log(JSON.stringify({
+    type: 'message',
+    message: { role: 'assistant', content: [{ type: 'text', text: finalMessage }] },
+  }))
+}
 console.log(JSON.stringify({ type: 'turn_complete', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }))

@@ -25,10 +25,32 @@ if (prompt.includes('usage-nested')) {
   console.log(JSON.stringify({
     type: 'usage',
     data: {
-      usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 }
+      usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 4 }
     }
   }))
   console.log(JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'nested usage result' }] } }))
+  process.exit(0)
+}
+
+if (prompt.includes('event-properties')) {
+  // Current SDK output can nest assistant payloads under event.properties.
+  console.log(JSON.stringify({
+    type: 'event',
+    event: {
+      properties: {
+        sessionID: 'opencode-session-2',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'event properties result' }],
+        },
+        usage: {
+          input_tokens: 5,
+          output_tokens: 3,
+          cache_read_input_tokens: 4,
+        },
+      },
+    },
+  }))
   process.exit(0)
 }
 

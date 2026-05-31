@@ -52,6 +52,67 @@ test("codex provider writes schema file and parses structured output", async () 
     count: 1,
     prompt: "structured prompt",
     required: ["summary", "count"],
+    additionalProperties: false,
+  });
+});
+
+test("codex provider parses escaped structured output", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "escaped-structured",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          count: { type: "number" },
+        },
+        required: ["summary", "count"],
+      },
+    },
+    context: {},
+  });
+
+  assert.deepEqual(result.output, {
+    summary: "structured debug summary",
+    count: 1,
+    prompt: "escaped-structured",
+    required: ["summary", "count"],
+    additionalProperties: false,
+  });
+});
+
+test("codex provider unwraps quoted structured output strings", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "quoted-structured",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          count: { type: "number" },
+        },
+        required: ["summary", "count"],
+      },
+    },
+    context: {},
+  });
+
+  assert.deepEqual(result.output, {
+    summary: "structured debug summary",
+    count: 1,
+    prompt: "quoted-structured",
+    required: ["summary", "count"],
+    additionalProperties: false,
   });
 });
 
@@ -103,6 +164,73 @@ test("codex provider defaults required to empty array when schema has no require
   });
 
   assert.deepEqual((result.output as Record<string, unknown>).required, []);
+});
+
+test("codex provider sets additionalProperties false for object schemas", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "permissive-schema",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+        },
+        required: ["summary"],
+      },
+    },
+    context: {},
+  });
+
+  assert.equal((result.output as Record<string, unknown>).additionalProperties, false);
+});
+
+test("codex provider falls back to assistant events when output file is missing", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "stdout-fallback",
+    context: {},
+  });
+
+  assert.equal(result.output, "fake codex: stdout-fallback");
+});
+
+test("codex provider parses structured assistant events when output file is missing", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "structured-fallback",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          count: { type: "number" },
+        },
+        required: ["summary", "count"],
+      },
+    },
+    context: {},
+  });
+
+  assert.deepEqual(result.output, {
+    summary: "structured debug summary",
+    count: 1,
+    prompt: "structured-fallback",
+    required: ["summary", "count"],
+    additionalProperties: false,
+  });
 });
 
 test("codex provider propagates non-ENOENT readFile failure", async () => {

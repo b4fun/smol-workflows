@@ -1,13 +1,10 @@
+import { existsSync } from 'node:fs'
+
 const args = process.argv.slice(2)
 const schemaIndex = args.indexOf('--json-schema')
 const schema = schemaIndex >= 0 ? JSON.parse(args[schemaIndex + 1]) : undefined
-
-// Prompt arrives via stdin (sentinel "-" is the last positional arg).
-let prompt = ''
-process.stdin.setEncoding('utf8')
-for await (const chunk of process.stdin) {
-  prompt += chunk
-}
+const prompt = args[args.length - 1] ?? ''
+const projectState = existsSync('.claude') ? 'present' : 'missing'
 
 if (prompt.includes('fail')) {
   console.error('nope')
@@ -21,13 +18,19 @@ const output = schema
       prompt,
       required: schema.required ?? [],
     }
-  : `fake claude: ${prompt}`
+  : projectState === 'present' && !args.includes('--bare')
+    ? `fake claude: ${prompt} (project state)`
+    : `fake claude: ${prompt}`
 
 console.log(JSON.stringify({
   type: 'result',
   session_id: 'claude-session-1',
   result: typeof output === 'string' ? output : '',
   structured_output: schema ? output : undefined,
+  argv: args,
+  home: process.env.HOME,
+  projectState,
+  bareMode: args.includes('--bare'),
   usage: {
     input_tokens: 11,
     output_tokens: 6,

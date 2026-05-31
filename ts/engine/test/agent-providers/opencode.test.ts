@@ -123,13 +123,29 @@ test("opencode provider does not double-count nested usage tokens", async () => 
     subcommand: [fixturePath("fake-opencode-provider.mjs")],
   });
 
-  // Fixture emits usage inside data.usage; this should not be summed with a phantom top-level record.
+  // Fixture emits usage inside data.usage using the current SDK field names and no total_tokens.
   const result = await provider.run({ prompt: "usage-nested", context: {} });
 
-  // Expect exactly the 8 total tokens from the nested usage — not 16.
+  // Expect exactly the non-overlapping total from the nested usage — not 12.
   assert.equal(result.usage?.totalTokens, 8);
   assert.equal(result.usage?.inputTokens, 5);
   assert.equal(result.usage?.outputTokens, 3);
+});
+
+test("opencode provider reads nested event.properties payloads", async () => {
+  const provider = createOpenCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-opencode-provider.mjs")],
+  });
+
+  const result = await provider.run({ prompt: "event-properties", context: {} });
+
+  assert.equal(result.output, "event properties result");
+  assert.equal(result.sessionId, "opencode-session-2");
+  assert.equal(result.usage?.totalTokens, 8);
+  assert.equal(result.usage?.inputTokens, 5);
+  assert.equal(result.usage?.outputTokens, 3);
+  assert.equal(result.usage?.cacheReadTokens, 4);
 });
 
 test("opencode provider returns text string, not tool_use object, when both appear in content", async () => {

@@ -1,5 +1,8 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createClaudeCodeAgentProvider } from "../../src/agent-providers/index.js";
 import { fixturePath } from "../helpers.js";
@@ -59,18 +62,90 @@ test("claude-code provider passes inline json schema and parses structured outpu
   });
 });
 
-test("claude-code provider sends prompt via stdin not as a positional arg", async () => {
-  // The fake fixture reads from stdin and echoes "fake claude: <stdin>" back.
-  // If the prompt were passed as a positional CLI argument it would appear in
-  // process.argv instead of stdin and the fixture would return an empty string.
+test("claude-code provider passes prompt positionally and isolates HOME", async () => {
   const provider = createClaudeCodeAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-claude-provider.mjs")],
   });
 
-  const longPrompt = "x".repeat(1000); // simulate a prompt that would stress arg limits
-  const result = await provider.run({ prompt: longPrompt, context: {} });
-  assert.equal(result.output, `fake claude: ${longPrompt}`);
+  const schema = {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      count: { type: "number" },
+    },
+    required: ["summary", "count"],
+  } as const;
+
+  const result = await provider.run({
+    prompt: "structured snapshot",
+    options: {
+      schema,
+    },
+    context: {},
+  });
+
+  const rawResponse = (result.raw as Record<string, unknown>).response as Record<string, unknown>;
+
+  assert.deepEqual(rawResponse.argv, [
+    "--bare",
+    "--output-format",
+    "json",
+    "--json-schema",
+    JSON.stringify(schema),
+    "structured snapshot",
+  ]);
+  assert.equal(typeof rawResponse.home, "string");
+  assert.match(String(rawResponse.home), /smol-wf-claude-home-/);
+  assert.notEqual(rawResponse.home, process.env.HOME);
+  assert.deepEqual(result.output, {
+    summary: "structured claude summary",
+    count: 2,
+    prompt: "structured snapshot",
+    required: ["summary", "count"],
+  });
+});
+
+test("claude-code provider ignores local .claude project state in bare mode", async () => {
+  const provider = createClaudeCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-claude-provider.mjs")],
+  });
+
+  const workspace = await mkdtemp(join(tmpdir(), "smol-wf-claude-workspace-"));
+
+  try {
+    const baseline = await provider.run({
+      prompt: "workspace state",
+      context: {
+        cwd: workspace,
+      },
+    });
+
+    await mkdir(join(workspace, ".claude"), { recursive: true });
+
+    const result = await provider.run({
+      prompt: "workspace state",
+      context: {
+        cwd: workspace,
+      },
+    });
+
+    const rawResponse = (result.raw as Record<string, unknown>).response as Record<string, unknown>;
+
+    assert.deepEqual(rawResponse.argv, [
+      "--bare",
+      "--output-format",
+      "json",
+      "workspace state",
+    ]);
+    assert.equal(rawResponse.projectState, "present");
+    assert.equal(rawResponse.bareMode, true);
+    assert.equal(result.output, baseline.output);
+    assert.equal(result.output, "fake claude: workspace state");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("claude-code provider fails on non-zero exit", async () => {

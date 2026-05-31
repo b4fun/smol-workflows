@@ -230,7 +230,7 @@ function extractOutput(raw: unknown): string | undefined {
     return content;
   }
 
-  for (const key of ["data", "item", "event"] as const) {
+  for (const key of ["data", "item", "event", "properties"] as const) {
     const value = extractOutput(record[key]);
 
     if (value) {
@@ -346,7 +346,20 @@ function extractSessionID(raw: unknown): string | undefined {
 
   const record = raw as Record<string, unknown>;
   const value = record.sessionID ?? record.sessionId ?? record.session_id;
-  return typeof value === "string" ? value : undefined;
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  for (const item of Object.values(record)) {
+    const sessionId = extractSessionID(item);
+
+    if (sessionId) {
+      return sessionId;
+    }
+  }
+
+  return undefined;
 }
 
 function extractUsage(raw: unknown): AgentUsage | undefined {
@@ -401,6 +414,15 @@ function looksLikeUsage(record: Record<string, unknown>): boolean {
     "output_tokens",
     "totalTokens",
     "total_tokens",
+    "cacheReadTokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "cacheRead",
+    "cacheWriteTokens",
+    "cache_write_tokens",
+    "cache_creation_input_tokens",
+    "cacheWrite",
   ].some((key) => typeof record[key] === "number");
 }
 
@@ -410,11 +432,24 @@ function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const cacheRecord = record.cache && typeof record.cache === "object" && !Array.isArray(record.cache)
     ? record.cache as Record<string, unknown>
     : undefined;
-  const cacheReadTokens = numberField(record, "cacheReadTokens", "cache_read_tokens", "cacheRead") ?? numberField(cacheRecord ?? {}, "read");
-  const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cache_write_tokens", "cacheWrite") ?? numberField(cacheRecord ?? {}, "write");
+  const cacheReadTokens =
+    numberField(
+      record,
+      "cacheReadTokens",
+      "cache_read_tokens",
+      "cache_read_input_tokens",
+      "cached_input_tokens",
+      "cacheRead",
+    ) ?? numberField(cacheRecord ?? {}, "read");
+  const cacheWriteTokens =
+    numberField(record, "cacheWriteTokens", "cache_write_tokens", "cache_creation_input_tokens", "cacheWrite") ??
+    numberField(cacheRecord ?? {}, "write");
+  // `input_tokens` already reflects the prompt tokens that should be counted in total.
+  // Cache-read tokens are surfaced separately for diagnostics, but they must not be
+  // added again when the provider omits an explicit total.
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
-    sumDefined(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+    sumDefined(inputTokens, outputTokens, cacheWriteTokens);
   const costRecord = record.cost && typeof record.cost === "object" ? record.cost as Record<string, unknown> : undefined;
 
   return omitUndefined({

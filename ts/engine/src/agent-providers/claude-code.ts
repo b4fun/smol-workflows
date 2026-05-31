@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { JSONValue } from "@smol-workflow/sdk";
 import type {
   AgentProvider,
@@ -32,43 +35,48 @@ async function runClaudeCode(
   input: AgentProviderRunInput,
   options: ClaudeCodeAgentProviderOptions,
 ): Promise<AgentProviderResult> {
-  const command = options.command ?? "claude";
-  const args = [
-    ...(options.subcommand ?? ["-p"]),
-    ...(options.args ?? []),
-    ...(input.options?.model ? ["--model", input.options.model] : []),
-    "--output-format",
-    "json",
-  ];
+  const homeDir = await mkdtemp(join(tmpdir(), "smol-wf-claude-home-"));
 
-  if (input.options?.schema) {
-    args.push("--json-schema", JSON.stringify(input.options.schema));
+  try {
+    const command = options.command ?? "claude";
+    const args = [
+      ...(options.subcommand ?? ["-p"]),
+      "--bare",
+      ...(options.args ?? []),
+      ...(input.options?.model ? ["--model", input.options.model] : []),
+      "--output-format",
+      "json",
+    ];
+
+    if (input.options?.schema) {
+      args.push("--json-schema", JSON.stringify(input.options.schema));
+    }
+
+    args.push(input.prompt);
+
+    const { stdout, stderr } = await runCommand(command, args, {
+      cwd: input.context.cwd ?? options.cwd,
+      env: { ...options.env, HOME: homeDir },
+      timeoutMs: options.timeoutMs,
+      signal: input.context.signal,
+    });
+    const raw = parseJSONOrText(stdout);
+    const output = extractOutput(raw, input.options?.schema !== undefined);
+
+    return {
+      output,
+      sessionId: extractSessionID(raw),
+      usage: extractUsage(raw),
+      raw: toJSONValue({ response: raw, stderr }),
+    };
+  } finally {
+    await rm(homeDir, { recursive: true, force: true });
   }
-
-  // Pass the prompt via stdin (sentinel "-") to avoid OS ARG_MAX limits for long prompts.
-  args.push("-");
-
-  const { stdout, stderr } = await runCommand(command, args, input.prompt, {
-    cwd: input.context.cwd ?? options.cwd,
-    env: options.env,
-    timeoutMs: options.timeoutMs,
-    signal: input.context.signal,
-  });
-  const raw = parseJSONOrText(stdout);
-  const output = extractOutput(raw, input.options?.schema !== undefined);
-
-  return {
-    output,
-    sessionId: extractSessionID(raw),
-    usage: extractUsage(raw),
-    raw: toJSONValue({ response: raw, stderr }),
-  };
 }
 
 async function runCommand(
   command: string,
   args: readonly string[],
-  stdin: string,
   options: {
     cwd?: string;
     env?: Record<string, string>;
@@ -80,7 +88,7 @@ async function runCommand(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       signal: options.signal,
     });
     let stdout = "";
@@ -118,7 +126,6 @@ async function runCommand(
         ),
       );
     });
-    child.stdin.end(stdin);
 
     function resolveOnce(value: { stdout: string; stderr: string }): void {
       if (settled) {
