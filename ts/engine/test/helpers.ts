@@ -6,11 +6,15 @@ export function fixturePath(name: string): string {
   return join(process.cwd(), "test", "fixtures", name);
 }
 
-export function spawnWorkflowRun(args: string[]): ChildProcessByStdio<null, Readable, Readable> {
-  return spawn(process.execPath, ["dist/cli.js", "run", ...args], {
+export function spawnWorkflowCli(args: string[]): ChildProcessByStdio<null, Readable, Readable> {
+  return spawn(process.execPath, ["dist/cli.js", ...args], {
     cwd: process.cwd(),
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+export function spawnWorkflowRun(args: string[]): ChildProcessByStdio<null, Readable, Readable> {
+  return spawnWorkflowCli(["run", ...args]);
 }
 
 export function collectProcess(

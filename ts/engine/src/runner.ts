@@ -8,16 +8,22 @@ import type {
   WorkflowContext,
 } from "@smol-workflow/sdk";
 
+type RunnerAgentMessage = { type: "agent"; id: string; prompt: string; options?: AgentRunOptions };
 type RunnerLogMessage = { type: "log"; values: unknown[] };
 type RunnerPhaseMessage = { type: "phase"; name: string; options?: unknown };
 type RunnerResultMessage = { type: "result"; result: unknown };
 type RunnerErrorMessage = { type: "error"; message: string; stack?: string };
 
 type RunnerMessage =
+  | RunnerAgentMessage
   | RunnerLogMessage
   | RunnerPhaseMessage
   | RunnerResultMessage
   | RunnerErrorMessage;
+
+type ParentMessage =
+  | { type: "agent.result"; id: string; result: unknown }
+  | { type: "agent.error"; id: string; message: string; stack?: string };
 
 type WorkflowFunction = (input?: unknown, ctx?: WorkflowContext) => unknown | Promise<unknown>;
 
@@ -26,6 +32,40 @@ type WorkflowModule = {
 };
 
 const readonlyProxyCache = new WeakMap<object, unknown>();
+const pendingAgentCalls = new Map<
+  string,
+  { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
+>();
+let nextAgentCallID = 0;
+
+process.on("message", (message: ParentMessage) => {
+  if (!message || typeof message !== "object") {
+    return;
+  }
+
+  switch (message.type) {
+    case "agent.result": {
+      const pending = pendingAgentCalls.get(message.id);
+      if (!pending) {
+        return;
+      }
+
+      pendingAgentCalls.delete(message.id);
+      pending.resolve(message.result);
+      break;
+    }
+    case "agent.error": {
+      const pending = pendingAgentCalls.get(message.id);
+      if (!pending) {
+        return;
+      }
+
+      pendingAgentCalls.delete(message.id);
+      pending.reject(new Error(message.stack ?? message.message));
+      break;
+    }
+  }
+});
 
 async function main(): Promise<void> {
   const scriptPath = process.argv[2];
@@ -41,7 +81,7 @@ async function main(): Promise<void> {
 
   const globals = {
     args: proxiedArgs,
-    agent: readonlyFunction(createEchoAgent(), "agent"),
+    agent: readonlyFunction(createAgentProxy(), "agent"),
     parallel: readonlyFunction(
       (async (tasks) => await Promise.all(tasks.map((task) => task()))) as ParallelFn,
       "parallel",
@@ -91,16 +131,19 @@ function hasDefaultExport(module: WorkflowModule): module is WorkflowModule & { 
   return Object.prototype.hasOwnProperty.call(module, "default");
 }
 
-function createEchoAgent(): AgentRunFn {
+function createAgentProxy(): AgentRunFn {
   return (async function agent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
-    if (options?.schema) {
-      return {
-        echo: prompt,
-      };
-    }
-
-    return `echo: ${prompt}`;
+    return await callParentAgent(prompt, options);
   }) as AgentRunFn;
+}
+
+async function callParentAgent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
+  const id = String(++nextAgentCallID);
+
+  return await new Promise((resolve, reject) => {
+    pendingAgentCalls.set(id, { resolve, reject });
+    send({ type: "agent", id, prompt, options });
+  });
 }
 
 function readonlyFunction<Fn extends (...args: never[]) => unknown>(fn: Fn, name: string): Fn {

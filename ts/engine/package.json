@@ -12,21 +12,28 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./backends/absurd": {
+      "types": "./dist/backends/absurd.d.ts",
+      "import": "./dist/backends/absurd.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "clean": "rm -rf dist dist-test",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "npm run build && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
   },
   "dependencies": {
-    "@smol-workflow/sdk": "file:../sdk"
+    "@absurd-sqlite/sdk": "0.2.0",
+    "@smol-workflow/sdk": "file:../sdk",
+    "better-sqlite3": "12.10.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
     "@types/node": "24.0.0",
     "typescript": "6.0.3"
   }

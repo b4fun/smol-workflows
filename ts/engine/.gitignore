@@ -1,4 +1,8 @@
 node_modules/
 dist/
 dist-test/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
 *.tsbuildinfo
