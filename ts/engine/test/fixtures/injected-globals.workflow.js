@@ -1,3 +1,9 @@
+export const meta = {
+  name: "injected-globals",
+  description: "Exercise injected workflow globals",
+  phases: [{ title: "Research", detail: "Run research agents" }],
+};
+
 export default async function workflow() {
   phase("Research", { metadata: { source: "test" } });
   log("received", args);

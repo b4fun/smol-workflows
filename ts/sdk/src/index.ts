@@ -17,20 +17,36 @@ export type Awaitable<T> = T | Promise<T>;
 /** Untyped workflow arguments injected by the isolated workflow runner. */
 export type WorkflowArgs = Record<string, unknown>;
 
-/** Metadata describing a workflow phase for display, tracing, and agent context. */
-export type WorkflowPhaseMetadata = {
-  /** Phase title. */
+/** Workflow phase metadata fields mirrored from the Dynamic Workflow reference. */
+export type DynamicWorkflowPhaseMetadata = {
+  /** Phase title. Must exactly match the corresponding `phase(...)` call. */
   title: string;
   /** Optional longer phase description. */
   detail?: string;
+  /** Optional model hint for agent work in this phase. */
+  model?: string;
 };
 
-/** Metadata optionally exported by a workflow script as `meta`. */
-export type WorkflowMetadata = {
+/** Workflow metadata fields mirrored from the Dynamic Workflow reference. */
+export type DynamicWorkflowMetadata = {
   /** Stable workflow name or identifier. */
   name: string;
   /** Workflow description for display, tracing, and agent context. */
-  description?: string;
+  description: string;
+  /** Optional hint shown when listing or selecting workflows. */
+  whenToUse?: string;
+  /** Ordered list of phases the workflow may report with `phase(...)`. */
+  phases?: readonly DynamicWorkflowPhaseMetadata[];
+};
+
+/** Metadata describing a workflow phase for display, tracing, and agent context. */
+export type WorkflowPhaseMetadata = DynamicWorkflowPhaseMetadata & {
+  /** Optional provider hint for agent work in this phase. */
+  provider?: string;
+};
+
+/** Metadata exported by a workflow script as `meta`. */
+export type WorkflowMetadata = Omit<DynamicWorkflowMetadata, "phases"> & {
   /** Ordered list of phases the workflow may report with `phase(...)`. */
   phases?: readonly WorkflowPhaseMetadata[];
 };

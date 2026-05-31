@@ -8,7 +8,7 @@ The SDK provides types for workflow scripts. Runtime values are injected by the 
 
 A workflow script is an ES module.
 
-It may export optional metadata:
+It must export metadata as `export const meta = {...}`. Metadata must include `name` and `description` and may include `whenToUse` and phase metadata. The SDK separates Dynamic Workflow metadata fields from SDK/engine-specific extensions such as phase-level `provider` hints:
 
 ```ts
 import type { WorkflowMetadata } from "@smol-workflow/sdk";
@@ -16,10 +16,11 @@ import type { WorkflowMetadata } from "@smol-workflow/sdk";
 export const meta = {
   name: "stock-investment-analysis",
   description: "Analyze stocks and synthesize an investment report",
+  whenToUse: "Use when the user wants a multi-agent stock analysis workflow",
   phases: [
     { title: "Analyze", detail: "Break the question into research dimensions" },
-    { title: "Research", detail: "Run research agents in parallel" },
-    { title: "Synthesize", detail: "Create the final report" },
+    { title: "Research", detail: "Run research agents in parallel", provider: "claude-code" },
+    { title: "Synthesize", detail: "Create the final report", model: "opus", provider: "pi" },
   ],
 } satisfies WorkflowMetadata;
 ```

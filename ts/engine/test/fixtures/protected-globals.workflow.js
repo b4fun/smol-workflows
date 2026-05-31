@@ -1,3 +1,8 @@
+export const meta = {
+  name: "protected-globals",
+  description: "Exercise immutable injected workflow globals",
+};
+
 export default async function workflow(input, ctx) {
   const blocked = [];
 
@@ -44,7 +49,7 @@ export default async function workflow(input, ctx) {
   }
 
   try {
-    globalThis.agent = async () => "mutated-global-agent";
+    globalThis.agent = () => "mutated-agent";
   } catch {
     blocked.push("global-agent-reassign");
   }

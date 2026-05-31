@@ -1,3 +1,8 @@
+export const meta = {
+  name: "parallel-errors",
+  description: "Exercise parallel error handling",
+};
+
 export default await parallel([
   () => agent('ok:first'),
   () => {

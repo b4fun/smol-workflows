@@ -1,3 +1,9 @@
+export const meta = {
+  name: "pipeline",
+  description: "Exercise pipeline stage execution",
+  phases: [{ title: "Pipeline" }],
+};
+
 export default await pipeline(
   args.items,
   async (item, originalItem, index) => {

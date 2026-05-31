@@ -86,7 +86,7 @@ ESM was chosen because it is the modern JavaScript module system, supports `impo
 
 A workflow script is expected to be an ES module with:
 
-1. an optional named `meta` export
+1. a required named `meta` export
 2. a required default export
 
 The preferred style is a top-level ESM workflow where the default export is the final workflow result:
@@ -294,20 +294,30 @@ It is intended for tracing, display, and workflow progress reporting.
 
 ## Metadata export
 
-Workflow scripts may export `meta` to describe the workflow.
+Workflow scripts must export `meta` to describe the workflow.
 
 Type:
 
 ```ts
-type WorkflowMetadata = {
+type DynamicWorkflowMetadata = {
   name: string;
-  description?: string;
-  phases?: readonly WorkflowPhaseMetadata[];
+  description: string;
+  whenToUse?: string;
+  phases?: readonly DynamicWorkflowPhaseMetadata[];
 };
 
-type WorkflowPhaseMetadata = {
+type DynamicWorkflowPhaseMetadata = {
   title: string;
   detail?: string;
+  model?: string;
+};
+
+type WorkflowPhaseMetadata = DynamicWorkflowPhaseMetadata & {
+  provider?: string;
+};
+
+type WorkflowMetadata = Omit<DynamicWorkflowMetadata, "phases"> & {
+  phases?: readonly WorkflowPhaseMetadata[];
 };
 ```
 
@@ -321,10 +331,11 @@ import type { WorkflowMetadata } from "@smol-workflow/sdk";
 export const meta = {
   name: "stock-investment-analysis",
   description: "Three-phase stock investment analysis: decompose → research → synthesize",
+  whenToUse: "Use when the user wants a multi-agent stock analysis workflow",
   phases: [
     { title: "Analyze", detail: "Decompose investment question into research dimensions" },
-    { title: "Research", detail: "Parallel agents research each stock across multiple dimensions" },
-    { title: "Synthesize", detail: "Summarize all findings into actionable investment insights" },
+    { title: "Research", detail: "Parallel agents research each stock across multiple dimensions", provider: "claude-code" },
+    { title: "Synthesize", detail: "Summarize all findings into actionable investment insights", model: "opus", provider: "pi" },
   ],
 } satisfies WorkflowMetadata;
 ```

@@ -81,6 +81,13 @@ test("runWorkflow supports top-level module-result workflows", async () => {
   assert.deepEqual(phases, [{ name: "ModuleResult", options: undefined }]);
 });
 
+test("runWorkflow rejects scripts without metadata", async () => {
+  await assert.rejects(
+    () => runWorkflow({ scriptPath: fixturePath("no-meta.workflow.js") }),
+    /Workflow script must export valid literal metadata/,
+  );
+});
+
 test("runWorkflow rejects scripts without a default export", async () => {
   await assert.rejects(
     () => runWorkflow({ scriptPath: fixturePath("missing-default.workflow.js") }),
@@ -108,6 +115,42 @@ test("runWorkflow supports pipeline without stage barriers", async () => {
     "echo: stage2:echo: stage1:a:a:0:a:0",
     null,
     "echo: stage2:echo: stage1:c:c:2:c:2",
+  ]);
+});
+
+test("runWorkflow applies phase metadata provider and model defaults to agent calls", async () => {
+  const calls: Array<{
+    prompt: string;
+    options?: { phase?: string; provider?: string; model?: string };
+  }> = [];
+
+  const result = await runWorkflow({
+    scriptPath: fixturePath("phase-provider-metadata.workflow.js"),
+    onAgent: (prompt, options) => {
+      calls.push({ prompt, options });
+      return `${options?.phase}:${options?.provider}:${options?.model}`;
+    },
+  });
+
+  assert.deepEqual(result, {
+    inherited: "Research:pi:opus",
+    explicit: "Research:debug:haiku",
+    phaseOverride: "Verify:codex:undefined",
+  });
+
+  assert.deepEqual(calls, [
+    {
+      prompt: "inherited phase defaults",
+      options: { phase: "Research", model: "opus", provider: "pi" },
+    },
+    {
+      prompt: "explicit agent options",
+      options: { provider: "debug", model: "haiku", phase: "Research" },
+    },
+    {
+      prompt: "phase override defaults",
+      options: { phase: "Verify", provider: "codex" },
+    },
   ]);
 });
 

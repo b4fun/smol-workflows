@@ -1,3 +1,9 @@
+export const meta = {
+  name: "module-result",
+  description: "Exercise top-level module-result workflows",
+  phases: [{ title: "ModuleResult" }],
+};
+
 phase("ModuleResult");
 log("module result args", args);
 
