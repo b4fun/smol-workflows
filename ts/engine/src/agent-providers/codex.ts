@@ -64,7 +64,20 @@ async function runCodex(
       signal: input.context.signal,
     });
     const events = parseJSONLines(stdout);
-    const finalMessage = await readFile(outputPath, "utf8").catch(() => stdout);
+    let finalMessage: string;
+
+    try {
+      finalMessage = await readFile(outputPath, "utf8");
+    } catch (readError) {
+      if (isENOENT(readError)) {
+        // No output file written — fall back to raw stdout.
+        finalMessage = stdout;
+      } else {
+        throw new Error(
+          `Failed to read codex output file: ${readError instanceof Error ? readError.message : String(readError)}`,
+        );
+      }
+    }
     const output = input.options?.schema
       ? parseStructuredOutput(finalMessage)
       : finalMessage.trimEnd();
@@ -177,7 +190,10 @@ function toCodexOutputSchema(schema: unknown): unknown {
   if (isObjectSchema(output)) {
     const properties = isRecord(output.properties) ? output.properties : {};
     output.properties = toCodexOutputSchema(properties);
-    output.required = Object.keys(properties);
+    // Preserve the original required list; only default to [] when the source schema omits it
+    // entirely. Unconditionally using Object.keys(properties) would silently promote all optional
+    // fields to required, misrepresenting the caller's schema contract.
+    output.required = Array.isArray(record.required) ? record.required : [];
     output.additionalProperties = false;
   }
 
@@ -406,4 +422,11 @@ function omitUndefined<T extends Record<string, unknown>>(value: T): T {
 
 function toJSONValue(value: unknown): JSONValue {
   return JSON.parse(JSON.stringify(value)) as JSONValue;
+}
+
+function isENOENT(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }

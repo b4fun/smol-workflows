@@ -94,3 +94,67 @@ test("opencode provider fails on non-zero exit", async () => {
     /OpenCode provider exited with code 7: nope/,
   );
 });
+
+test("opencode provider parses structured output from markdown code fence", async () => {
+  const provider = createOpenCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-opencode-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "code-fence prompt",
+    options: {
+      schema: {
+        type: "object",
+        properties: { summary: { type: "string" } },
+        required: ["summary"],
+      },
+    },
+    context: {},
+  });
+
+  // Fixture returns JSON in a ```json ... ``` block; provider must unwrap it.
+  assert.deepEqual((result.output as Record<string, unknown>).summary, "structured opencode summary");
+});
+
+test("opencode provider does not double-count nested usage tokens", async () => {
+  const provider = createOpenCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-opencode-provider.mjs")],
+  });
+
+  // Fixture emits usage inside data.usage; this should not be summed with a phantom top-level record.
+  const result = await provider.run({ prompt: "usage-nested", context: {} });
+
+  // Expect exactly the 8 total tokens from the nested usage — not 16.
+  assert.equal(result.usage?.totalTokens, 8);
+  assert.equal(result.usage?.inputTokens, 5);
+  assert.equal(result.usage?.outputTokens, 3);
+});
+
+test("opencode provider returns text string, not tool_use object, when both appear in content", async () => {
+  const provider = createOpenCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-opencode-provider.mjs")],
+  });
+
+  const result = await provider.run({ prompt: "tool-use-alongside-text", context: {} });
+
+  // Must be the plain text string, not a tool_use wrapper object.
+  assert.equal(typeof result.output, "string");
+  assert.equal(result.output, "tool use result text");
+});
+
+test("opencode provider normalizes cache token alias fields (cache.read / cache.write)", async () => {
+  const provider = createOpenCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-opencode-provider.mjs")],
+  });
+
+  const result = await provider.run({ prompt: "cache-alias", context: {} });
+
+  assert.equal(result.usage?.inputTokens, 10);
+  assert.equal(result.usage?.outputTokens, 4);
+  assert.equal(result.usage?.cacheReadTokens, 2);
+  assert.equal(result.usage?.cacheWriteTokens, 3);
+});

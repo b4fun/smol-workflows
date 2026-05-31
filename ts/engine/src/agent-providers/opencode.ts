@@ -379,7 +379,12 @@ function findUsageObjects(value: unknown): Array<Record<string, unknown>> {
     found.push(record.usage as Record<string, unknown>);
   }
 
-  for (const item of Object.values(record)) {
+  for (const [key, item] of Object.entries(record)) {
+    // Skip 'usage' – already handled via the shortcut push above to avoid double-counting.
+    if (key === "usage") {
+      continue;
+    }
+
     found.push(...findUsageObjects(item));
   }
 

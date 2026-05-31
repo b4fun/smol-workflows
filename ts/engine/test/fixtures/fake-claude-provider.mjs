@@ -1,7 +1,13 @@
 const args = process.argv.slice(2)
 const schemaIndex = args.indexOf('--json-schema')
 const schema = schemaIndex >= 0 ? JSON.parse(args[schemaIndex + 1]) : undefined
-const prompt = args[args.length - 1]
+
+// Prompt arrives via stdin (sentinel "-" is the last positional arg).
+let prompt = ''
+process.stdin.setEncoding('utf8')
+for await (const chunk of process.stdin) {
+  prompt += chunk
+}
 
 if (prompt.includes('fail')) {
   console.error('nope')

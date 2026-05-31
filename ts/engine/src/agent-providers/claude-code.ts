@@ -45,9 +45,10 @@ async function runClaudeCode(
     args.push("--json-schema", JSON.stringify(input.options.schema));
   }
 
-  args.push(input.prompt);
+  // Pass the prompt via stdin (sentinel "-") to avoid OS ARG_MAX limits for long prompts.
+  args.push("-");
 
-  const { stdout, stderr } = await runCommand(command, args, {
+  const { stdout, stderr } = await runCommand(command, args, input.prompt, {
     cwd: input.context.cwd ?? options.cwd,
     env: options.env,
     timeoutMs: options.timeoutMs,
@@ -67,6 +68,7 @@ async function runClaudeCode(
 async function runCommand(
   command: string,
   args: readonly string[],
+  stdin: string,
   options: {
     cwd?: string;
     env?: Record<string, string>;
@@ -78,7 +80,7 @@ async function runCommand(
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       signal: options.signal,
     });
     let stdout = "";
@@ -116,6 +118,7 @@ async function runCommand(
         ),
       );
     });
+    child.stdin.end(stdin);
 
     function resolveOnce(value: { stdout: string; stderr: string }): void {
       if (settled) {

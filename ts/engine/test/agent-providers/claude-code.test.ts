@@ -59,6 +59,20 @@ test("claude-code provider passes inline json schema and parses structured outpu
   });
 });
 
+test("claude-code provider sends prompt via stdin not as a positional arg", async () => {
+  // The fake fixture reads from stdin and echoes "fake claude: <stdin>" back.
+  // If the prompt were passed as a positional CLI argument it would appear in
+  // process.argv instead of stdin and the fixture would return an empty string.
+  const provider = createClaudeCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-claude-provider.mjs")],
+  });
+
+  const longPrompt = "x".repeat(1000); // simulate a prompt that would stress arg limits
+  const result = await provider.run({ prompt: longPrompt, context: {} });
+  assert.equal(result.output, `fake claude: ${longPrompt}`);
+});
+
 test("claude-code provider fails on non-zero exit", async () => {
   const provider = createClaudeCodeAgentProvider({
     command: process.execPath,

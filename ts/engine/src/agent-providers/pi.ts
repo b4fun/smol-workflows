@@ -9,7 +9,22 @@ import type {
 } from "./types.js";
 
 export type PiAgentProviderOptions = AgentProviderOptions & {
-  /** Command/subcommand prefix before engine-managed flags. Defaults to `["--print", "--mode", "json"]`. */
+  /**
+   * Command/subcommand prefix before engine-managed flags.
+   *
+   * Default: `["--print", "--mode", "json"]`
+   *
+   * Expected pi CLI invocation shape:
+   *   pi --print --mode json [--model <model>] <prompt>
+   *
+   * The `--print` flag requests non-interactive single-turn output.
+   * The `--mode json` flag requests JSONL-formatted streaming events.
+   * If your pi binary requires a positional subcommand before flags
+   * (e.g. `pi chat --print --mode json`) set `subcommand` accordingly,
+   * for example: `subcommand: ["chat", "--print", "--mode", "json"]`.
+   *
+   * Verify with: `pi --help`
+   */
   subcommand?: readonly string[];
   /** Extra CLI arguments inserted after the subcommand and before engine-managed flags. */
   args?: readonly string[];

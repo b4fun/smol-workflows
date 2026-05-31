@@ -55,6 +55,69 @@ test("codex provider writes schema file and parses structured output", async () 
   });
 });
 
+test("codex provider preserves subset required list in schema", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  // Schema has two properties but only one is required.
+  const result = await provider.run({
+    prompt: "partial-required",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          nickname: { type: "string" },
+        },
+        required: ["name"], // only "name" is required; "nickname" is optional
+      },
+    },
+    context: {},
+  });
+
+  // The fake provider echoes back the required array from the written schema file.
+  // It should be ["name"], NOT ["name","nickname"].
+  assert.deepEqual((result.output as Record<string, unknown>).required, ["name"]);
+});
+
+test("codex provider defaults required to empty array when schema has no required field", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "no-required",
+    options: {
+      schema: {
+        type: "object",
+        properties: {
+          value: { type: "string" },
+        },
+        // no required field
+      },
+    },
+    context: {},
+  });
+
+  assert.deepEqual((result.output as Record<string, unknown>).required, []);
+});
+
+test("codex provider propagates non-ENOENT readFile failure", async () => {
+  // Use a fixture that creates a *directory* at the output path, triggering EISDIR.
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-io-error.mjs")],
+  });
+
+  await assert.rejects(
+    () => provider.run({ prompt: "io-error", context: {} }),
+    /Failed to read codex output file:/,
+  );
+});
+
 test("codex provider fails on non-zero exit", async () => {
   const provider = createCodexAgentProvider({
     command: process.execPath,
