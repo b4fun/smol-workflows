@@ -62,7 +62,11 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 - [ ] full coverage of dynamic workflow's options
 - [ ] port engine to rust based impl + built-in durable workflows
 - [ ] isolation support
+- [ ] durable retry
+- [ ] budget
 - [ ] output schema plugins for opencode / pi
 - [ ] plugin usages support
-- [ ] durable retry
 - [ ] dashboard
+- [ ] environment abstraction
+- [ ] environment sandbox / isolation
+- [ ] remote environment support
