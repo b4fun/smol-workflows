@@ -153,7 +153,9 @@ const schema = {
 } as const satisfies JSONSchema;
 
 const result = await agent("Summarize", { schema });
-result.summary; // string
+if (result) {
+  result.summary; // string
+}
 
 export default result;
 ```
@@ -163,7 +165,7 @@ export default result;
 The runner injects these globals:
 
 - `args` — untyped workflow args
-- `agent(prompt, options?)` — AI call primitive
+- `agent(prompt, options?)` — AI call primitive; returns `null` if the run is skipped
 - `parallel(tasks)` — run tasks concurrently with a barrier; thrown tasks resolve to `null`
 - `pipeline(items, ...stages)` — run each item through stages without barriers between stages
 - `log(...values)` — write workflow logs

@@ -113,15 +113,15 @@ export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> =
 
 /** An AI capability exposed to workflow scripts. */
 export type Agent = {
-  /** Runs the agent with a prompt and returns text output by default. */
-  run(prompt: string): Promise<string>;
-  /** Runs the agent and infers structured output from the provided JSON Schema. */
+  /** Runs the agent with a prompt and returns text output by default, or `null` if skipped. */
+  run(prompt: string): Promise<string | null>;
+  /** Runs the agent and infers structured output from the provided JSON Schema, or returns `null` if skipped. */
   run<const Schema extends JSONSchema>(
     prompt: string,
     options: AgentRunOptions<Schema> & { schema: Schema },
-  ): Promise<FromSchema<Schema>>;
-  /** Runs the agent with optional per-call options and an explicit output type. */
-  run<Output = string>(prompt: string, options?: AgentRunOptions): Promise<Output>;
+  ): Promise<FromSchema<Schema> | null>;
+  /** Runs the agent with optional per-call options and an explicit output type, or returns `null` if skipped. */
+  run<Output = string>(prompt: string, options?: AgentRunOptions): Promise<Output | null>;
 };
 
 /** The global agent helper exposed to workflow scripts. */
