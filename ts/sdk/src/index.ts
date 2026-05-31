@@ -12,6 +12,7 @@ export type {
   JSONValue,
 } from "./json-schema.js";
 export type { PipelineFn, PipelineStage } from "./pipeline.js";
+export type { WorkflowToolInput } from "./tool.js";
 
 /** A value that may be returned synchronously or asynchronously. */
 export type Awaitable<T> = T | Promise<T>;

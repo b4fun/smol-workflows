@@ -161,6 +161,21 @@ if (result) {
 export default result;
 ```
 
+## Workflow tool input
+
+External Workflow tool invocations can be typed with `WorkflowToolInput`:
+
+```ts
+import type { WorkflowToolInput } from "@smol-workflow/sdk";
+
+const input: WorkflowToolInput = {
+  scriptPath: "./workflow.js",
+  args: { item: "alpha" },
+};
+```
+
+When multiple workflow sources are provided, runners should prefer `scriptPath` over `script` and `name`.
+
 ## Runtime globals
 
 The runner injects these globals:
