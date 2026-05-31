@@ -62,7 +62,7 @@ test("claude-code provider passes inline json schema and parses structured outpu
   });
 });
 
-test("claude-code provider passes prompt positionally and isolates HOME", async () => {
+test("claude-code provider passes prompt positionally and preserves HOME for auth", async () => {
   const provider = createClaudeCodeAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-claude-provider.mjs")],
@@ -88,16 +88,14 @@ test("claude-code provider passes prompt positionally and isolates HOME", async 
   const rawResponse = (result.raw as Record<string, unknown>).response as Record<string, unknown>;
 
   assert.deepEqual(rawResponse.argv, [
-    "--bare",
     "--output-format",
     "json",
     "--json-schema",
     JSON.stringify(schema),
+    "--print",
     "structured snapshot",
   ]);
-  assert.equal(typeof rawResponse.home, "string");
-  assert.match(String(rawResponse.home), /smol-wf-claude-home-/);
-  assert.notEqual(rawResponse.home, process.env.HOME);
+  assert.equal(rawResponse.home, process.env.HOME);
   assert.deepEqual(result.output, {
     summary: "structured claude summary",
     count: 2,
@@ -106,7 +104,7 @@ test("claude-code provider passes prompt positionally and isolates HOME", async 
   });
 });
 
-test("claude-code provider ignores local .claude project state in bare mode", async () => {
+test("claude-code provider does not force bare mode", async () => {
   const provider = createClaudeCodeAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-claude-provider.mjs")],
@@ -115,13 +113,6 @@ test("claude-code provider ignores local .claude project state in bare mode", as
   const workspace = await mkdtemp(join(tmpdir(), "smol-wf-claude-workspace-"));
 
   try {
-    const baseline = await provider.run({
-      prompt: "workspace state",
-      context: {
-        cwd: workspace,
-      },
-    });
-
     await mkdir(join(workspace, ".claude"), { recursive: true });
 
     const result = await provider.run({
@@ -134,15 +125,14 @@ test("claude-code provider ignores local .claude project state in bare mode", as
     const rawResponse = (result.raw as Record<string, unknown>).response as Record<string, unknown>;
 
     assert.deepEqual(rawResponse.argv, [
-      "--bare",
       "--output-format",
       "json",
+      "--print",
       "workspace state",
     ]);
     assert.equal(rawResponse.projectState, "present");
-    assert.equal(rawResponse.bareMode, true);
-    assert.equal(result.output, baseline.output);
-    assert.equal(result.output, "fake claude: workspace state");
+    assert.equal(rawResponse.bareMode, false);
+    assert.equal(result.output, "fake claude: workspace state (project state)");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

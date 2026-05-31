@@ -256,7 +256,9 @@ Requirements:
 - Add or update tests when the change affects behavior.
 - Do not modify unrelated files.
 - Run the most relevant typecheck or tests if practical, and report what you ran.
-- If an item is unsafe, ambiguous, already fixed, or cannot be applied, skip it and explain why.
+- For every provider affected by the changes, verify the demo workflow with: ./ts/engine/dist/cli.js run ./examples/hello.mjs --agent-provider <provider>
+- Reject/revert your own changes for any provider if its hello demo verification fails; report the failure in skipped instead.
+- If an item is unsafe, ambiguous, already fixed, cannot be applied, or fails verification, skip it and explain why.
 
 Action items JSON:
 ${JSON.stringify(actionItems, null, 2)}
@@ -284,6 +286,8 @@ Review scope:
 - Confirm the update addressed this iteration's action items.
 - Inspect the changed files and relevant tests.
 - Look for regressions, incomplete fixes, unsafe edits, unrelated changes, or missing verification.
+- Verify that every changed provider was checked with: ./ts/engine/dist/cli.js run ./examples/hello.mjs --agent-provider <provider>
+- Reject the update by setting approved: false if any changed provider failed the hello demo verification, or if the update report does not show that this verification was attempted.
 - Do not make additional code changes; only review and report.
 - If follow-up code changes are required, include them as findings. Leave findings empty when no follow-up changes are needed.
 

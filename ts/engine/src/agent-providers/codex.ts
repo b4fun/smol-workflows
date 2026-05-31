@@ -504,7 +504,9 @@ function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cache_write_tokens", "cacheWrite");
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
-    sumDefined(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+    // `input_tokens` already reflects the prompt tokens billed (including cache hits).
+    // cacheReadTokens must NOT be added here to avoid double-counting.
+    sumDefined(inputTokens, outputTokens, cacheWriteTokens);
   const costRecord = record.cost && typeof record.cost === "object" ? record.cost as Record<string, unknown> : undefined;
 
   return {

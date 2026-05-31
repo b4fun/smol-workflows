@@ -10,18 +10,16 @@ import type {
 
 export type PiAgentProviderOptions = AgentProviderOptions & {
   /**
-   * Command/subcommand prefix before engine-managed flags.
+   * Command/subcommand prefix placed before engine-managed flags.
    *
-   * Default: `["--print", "--mode", "json"]`
+   * Default: `[]` (empty).
    *
-   * Expected pi CLI invocation shape:
-   *   pi --print --mode json [--model <model>] <prompt>
+   * The required structured-output flags (`--print --mode json`) are injected
+   * unconditionally by the engine, after the subcommand, so overriding this
+   * option cannot accidentally drop them.
    *
-   * The `--print` flag requests non-interactive single-turn output.
-   * The `--mode json` flag requests JSONL-formatted streaming events.
-   * If your pi binary requires a positional subcommand before flags
-   * (e.g. `pi chat --print --mode json`) set `subcommand` accordingly,
-   * for example: `subcommand: ["chat", "--print", "--mode", "json"]`.
+   * If your pi binary requires a positional subcommand (e.g. `pi chat …`),
+   * set `subcommand: ["chat"]`.
    *
    * Verify with: `pi --help`
    */
@@ -50,7 +48,10 @@ async function runPi(
     ? withSchemaInstruction(input.prompt, input.options.schema)
     : input.prompt;
   const args = [
-    ...(options.subcommand ?? ["--print", "--mode", "json"]),
+    ...(options.subcommand ?? []),
+    // Required structured-output flags are injected unconditionally so that a caller
+    // overriding `subcommand` cannot accidentally lose them.
+    "--print", "--mode", "json",
     ...(options.args ?? []),
     ...(input.options?.model ? ["--model", input.options.model] : []),
     prompt,
@@ -368,7 +369,9 @@ function findUsageObjects(value: unknown): Array<Record<string, unknown>> {
   }
 
   for (const [key, item] of Object.entries(record)) {
-    if (key === "cost") {
+    if (key === "cost" || key === "usage") {
+      // 'cost' is not a usage object; 'usage' was already pushed above – skip both
+      // to avoid double-counting tokens from nested usage sub-objects.
       continue;
     }
 
@@ -398,7 +401,9 @@ function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cacheWrite", "cache_write_tokens");
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
-    sumDefined(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+    // `input_tokens` already reflects the prompt tokens billed (including cache hits).
+    // cacheReadTokens must NOT be added here to avoid double-counting.
+    sumDefined(inputTokens, outputTokens, cacheWriteTokens);
   const costRecord = record.cost && typeof record.cost === "object" ? record.cost as Record<string, unknown> : undefined;
 
   return omitUndefined({

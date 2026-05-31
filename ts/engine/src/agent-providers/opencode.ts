@@ -394,7 +394,10 @@ function findUsageObjects(value: unknown): Array<Record<string, unknown>> {
 
   for (const [key, item] of Object.entries(record)) {
     // Skip 'usage' – already handled via the shortcut push above to avoid double-counting.
-    if (key === "usage") {
+    // Skip 'cost' – cost sub-objects (e.g. {input: 0.001, output: 0.002}) contain numeric
+    // keys that pass looksLikeUsage, which would inflate token counts with dollar values.
+    // This matches the equivalent guard in pi.ts.
+    if (key === "usage" || key === "cost") {
       continue;
     }
 
@@ -472,14 +475,30 @@ function normalizeUsage(record: Record<string, unknown>): AgentUsage {
 }
 
 function mergeUsage(left: AgentUsage | undefined, right: AgentUsage): AgentUsage {
+  // opencode CLI emits per-turn delta events under --format json (each event reports
+  // only the tokens consumed in that turn, not a running total). Therefore, numeric
+  // token fields are summed across all accumulated usage objects to produce the session
+  // total. If the CLI behaviour ever changes to cumulative totals, this logic must be
+  // reverted to right-wins semantics to avoid double-counting.
+  // Non-numeric fields (cost) use right-wins since cost objects are already cumulative
+  // summaries from the provider.
   return omitUndefined({
-    inputTokens: right.inputTokens ?? left?.inputTokens,
-    outputTokens: right.outputTokens ?? left?.outputTokens,
-    cacheReadTokens: right.cacheReadTokens ?? left?.cacheReadTokens,
-    cacheWriteTokens: right.cacheWriteTokens ?? left?.cacheWriteTokens,
-    totalTokens: right.totalTokens ?? left?.totalTokens,
+    inputTokens: sumOptional(left?.inputTokens, right.inputTokens),
+    outputTokens: sumOptional(left?.outputTokens, right.outputTokens),
+    cacheReadTokens: sumOptional(left?.cacheReadTokens, right.cacheReadTokens),
+    cacheWriteTokens: sumOptional(left?.cacheWriteTokens, right.cacheWriteTokens),
+    totalTokens: sumOptional(left?.totalTokens, right.totalTokens),
     cost: right.cost ?? left?.cost,
   });
+}
+
+/** Returns the sum if at least one argument is defined; undefined otherwise. */
+function sumOptional(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined && b === undefined) {
+    return undefined;
+  }
+
+  return (a ?? 0) + (b ?? 0);
 }
 
 function numberField(record: Record<string, unknown>, ...keys: string[]): number | undefined {

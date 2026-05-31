@@ -1,7 +1,4 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { JSONValue } from "@smol-workflow/sdk";
 import type {
   AgentProvider,
@@ -12,9 +9,16 @@ import type {
 } from "./types.js";
 
 export type ClaudeCodeAgentProviderOptions = AgentProviderOptions & {
-  /** Command/subcommand prefix before engine-managed flags. Defaults to `["-p"]`. */
+  /**
+   * Command/subcommand prefix placed before all engine-managed flags.
+   *
+   * Default: `[]` (empty – the `--print` flag is injected unconditionally, immediately
+   * before the prompt, so that `-p <prompt>` are always adjacent).
+   *
+   * Do NOT include `-p` / `--print` here; it is managed by the engine.
+   */
   subcommand?: readonly string[];
-  /** Extra CLI arguments inserted before engine-managed flags. */
+  /** Extra CLI arguments inserted after the subcommand and before engine-managed flags. */
   args?: readonly string[];
 };
 
@@ -35,43 +39,42 @@ async function runClaudeCode(
   input: AgentProviderRunInput,
   options: ClaudeCodeAgentProviderOptions,
 ): Promise<AgentProviderResult> {
-  const homeDir = await mkdtemp(join(tmpdir(), "smol-wf-claude-home-"));
+  const command = options.command ?? "claude";
+  const args = [
+    ...(options.subcommand ?? []),
+    // Do not pass `--bare` yet. It currently exposes a Claude Code auth/session bug where
+    // print-mode runs can report "Not logged in" even when the normal CLI is logged in.
+    // Context: https://github.com/anthropics/claude-code/issues/51047
+    ...(options.args ?? []),
+    ...(input.options?.model ? ["--model", input.options.model] : []),
+    "--output-format",
+    "json",
+  ];
 
-  try {
-    const command = options.command ?? "claude";
-    const args = [
-      ...(options.subcommand ?? ["-p"]),
-      "--bare",
-      ...(options.args ?? []),
-      ...(input.options?.model ? ["--model", input.options.model] : []),
-      "--output-format",
-      "json",
-    ];
-
-    if (input.options?.schema) {
-      args.push("--json-schema", JSON.stringify(input.options.schema));
-    }
-
-    args.push(input.prompt);
-
-    const { stdout, stderr } = await runCommand(command, args, {
-      cwd: input.context.cwd ?? options.cwd,
-      env: { ...options.env, HOME: homeDir },
-      timeoutMs: options.timeoutMs,
-      signal: input.context.signal,
-    });
-    const raw = parseJSONOrText(stdout);
-    const output = extractOutput(raw, input.options?.schema !== undefined);
-
-    return {
-      output,
-      sessionId: extractSessionID(raw),
-      usage: extractUsage(raw),
-      raw: toJSONValue({ response: raw, stderr }),
-    };
-  } finally {
-    await rm(homeDir, { recursive: true, force: true });
+  if (input.options?.schema) {
+    args.push("--json-schema", JSON.stringify(input.options.schema));
   }
+
+  // `--print` / `-p` is a value-taking flag: place it immediately before the prompt
+  // so no intervening flag is accidentally consumed as the prompt argument.
+  args.push("--print", input.prompt);
+
+  const { stdout, stderr } = await runCommand(command, args, {
+    cwd: input.context.cwd ?? options.cwd,
+    // Preserve the user's HOME so Claude Code can find its login/session state.
+    env: options.env,
+    timeoutMs: options.timeoutMs,
+    signal: input.context.signal,
+  });
+  const raw = parseJSONOrText(stdout);
+  const output = extractOutput(raw, input.options?.schema !== undefined);
+
+  return {
+    output,
+    sessionId: extractSessionID(raw),
+    usage: extractUsage(raw),
+    raw: toJSONValue({ response: raw, stderr }),
+  };
 }
 
 async function runCommand(
@@ -348,7 +351,9 @@ function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cache_write_tokens", "cache_creation_input_tokens", "cacheWrite");
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
-    sumDefined(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
+    // `input_tokens` already reflects the prompt tokens billed (including cache hits).
+    // cacheReadTokens must NOT be added here to avoid double-counting.
+    sumDefined(inputTokens, outputTokens, cacheWriteTokens);
   const costRecord = record.cost && typeof record.cost === "object" ? record.cost as Record<string, unknown> : undefined;
   const totalCost = numberField(record, "total_cost_usd", "costUSD", "cost_usd");
 
@@ -409,6 +414,11 @@ function extractClaudeError(stdout: string): string | undefined {
 
   const record = parsed as Record<string, unknown>;
   const error = record.error;
+  const result = record.result;
+
+  if (record.is_error === true && typeof result === "string") {
+    return result;
+  }
 
   if (typeof error === "string") {
     return error;
