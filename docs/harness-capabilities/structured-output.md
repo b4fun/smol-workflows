@@ -6,11 +6,13 @@ This document is the reference for how `smol-workflows` should interact with eac
 await agent(prompt, { schema })
 ```
 
+`schema` means **JSON Schema**: a JSON-serializable schema object matching the SDK's `JSONSchema` type, intended to describe the final structured value returned from the agent call. It is not a TypeScript type, Zod schema, TypeBox builder expression, or provider-specific schema DSL, though provider implementations may translate JSON Schema into provider-specific forms internally.
+
 It focuses only on structured output: how to request it, where to read it from the harness response, what validation the engine must still perform, and what source/official documentation supports the approach.
 
 ## Objectives
 
-1. **One workflow contract:** workflow authors provide a JSON Schema through `AgentRunOptions.schema`; providers return a parsed structured value in `AgentProviderResult.output`.
+1. **One workflow contract:** workflow authors provide JSON Schema through `AgentRunOptions.schema`; providers return a parsed structured value in `AgentProviderResult.output`.
 2. **Prefer native harness support:** when a harness has a JSON Schema / structured-output API, use it instead of prompt-only JSON instructions.
 3. **Validate locally anyway:** provider-native validation is not a substitute for engine validation. The engine should validate the returned payload against the workflow schema with AJV or equivalent before returning it to workflow code.
 4. **Bounded retries:** validation failures should be retried with a clear retry limit and diagnostics.
