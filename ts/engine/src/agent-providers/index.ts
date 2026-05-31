@@ -1,4 +1,24 @@
+export { createCodexAgentProvider } from "./codex.js";
+export type { CodexAgentProviderOptions } from "./codex.js";
 export { createDebugAgentProvider, generateDebugValueFromSchema } from "./debug.js";
+
+import { createCodexAgentProvider, type CodexAgentProviderOptions } from "./codex.js";
+import { createDebugAgentProvider } from "./debug.js";
+import type { AgentProvider, AgentProviderName, AgentProviderOptions } from "./types.js";
+
+export function createAgentProvider(
+  name: AgentProviderName | string = "debug",
+  options: AgentProviderOptions = {},
+): AgentProvider {
+  switch (name) {
+    case "debug":
+      return createDebugAgentProvider();
+    case "codex":
+      return createCodexAgentProvider(options as CodexAgentProviderOptions);
+    default:
+      throw new Error(`Unknown agent provider: ${name}`);
+  }
+}
 
 export type {
   AgentProvider,

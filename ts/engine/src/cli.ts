@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { createAgentProvider } from "./agent-providers/index.js";
 import { formatLogValue, runWorkflow, type WorkflowArgs } from "./index.js";
 import {
   createAbsurdWorkflowBackendAsync,
@@ -39,6 +40,7 @@ async function runLocal(argv: string[]): Promise<void> {
     const result = await runWorkflow({
       scriptPath,
       args: options.args,
+      agentProvider: createAgentProvider(options.agentProvider),
       onLog: (...values) => {
         console.error(`[log] ${values.map(formatLogValue).join(" ")}`);
       },
@@ -53,7 +55,10 @@ async function runLocal(argv: string[]): Promise<void> {
     return;
   }
 
-  const backend = await createAbsurdWorkflowBackendAsync(options.backendOptions);
+  const backend = await createAbsurdWorkflowBackendAsync({
+    ...options.backendOptions,
+    agentProvider: createAgentProvider(options.agentProvider),
+  });
 
   try {
     await backend.init();
@@ -197,11 +202,12 @@ async function absurdWorkBatch(argv: string[]): Promise<void> {
 }
 
 async function parseRunOptions(argv: string[]): Promise<
-  | { backend: "simple"; args: WorkflowArgs }
+  | { backend: "simple"; args: WorkflowArgs; agentProvider: string }
   | {
       backend: "absurd";
       backendOptions: BackendCliOptions;
       args: WorkflowArgs;
+      agentProvider: string;
       idempotencyKey?: string;
       maxAttempts?: number;
       timeoutMs?: number;
@@ -214,9 +220,19 @@ async function parseRunOptions(argv: string[]): Promise<
   const workflowArgTokens: string[] = [];
   const backendTokens: string[] = [];
   let backendName = "simple";
+  let agentProvider = process.env.SMOL_WF_AGENT_PROVIDER ?? "debug";
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
+
+    if (token === "--agent-provider" || token.startsWith("--agent-provider=")) {
+      const parsed = parseFlagToken(token, argv[index + 1]);
+      agentProvider = String(parsed.value);
+      if (parsed.consumedNext) {
+        index += 1;
+      }
+      continue;
+    }
 
     if (token === "--backend" || token.startsWith("--backend=")) {
       const parsed = parseFlagToken(token, argv[index + 1]);
@@ -267,7 +283,7 @@ async function parseRunOptions(argv: string[]): Promise<
       throw new Error(`Backend options require --backend absurd: ${backendTokens.join(" ")}`);
     }
 
-    return { backend: "simple", args };
+    return { backend: "simple", args, agentProvider };
   }
 
   if (backendName !== "absurd") {
@@ -280,6 +296,7 @@ async function parseRunOptions(argv: string[]): Promise<
     backend: "absurd",
     backendOptions: parsed.backend,
     args,
+    agentProvider,
     idempotencyKey: stringFlag(parsed.flags["idempotency-key"]),
     maxAttempts: parseOptionalInteger(parsed.flags["max-attempts"], "--max-attempts"),
     timeoutMs: parseOptionalInteger(parsed.flags.timeout, "--timeout"),
@@ -575,7 +592,7 @@ function parseOptionalInteger(value: unknown, name: string): number | undefined 
 
 function printHelp(): void {
   console.log(`Usage:
-  smol-wf run <workflow-script> [--backend simple] [--args-<name> value] [--args-flag] [--args-<name>=value]
+  smol-wf run <workflow-script> [--backend simple] [--agent-provider debug] [--args-<name> value] [--args-flag] [--args-<name>=value]
   smol-wf run <workflow-script> --args-from-file <json-file>
   smol-wf run <workflow-script> --backend absurd [--db <workflow.db>] [--extension <extension-path>] [--args-<name> value]
 

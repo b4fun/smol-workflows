@@ -64,6 +64,22 @@ test("smol-wf run rejects unprefixed run args", async () => {
   assert.match(stderr, /Unknown option: --my-arg1/);
 });
 
+test("smol-wf run supports --agent-provider debug", async () => {
+  const child = spawnWorkflowRun([
+    fixturePath("cli-args.workflow.js"),
+    "--agent-provider",
+    "debug",
+    "--args-my-arg1",
+    "arg-value-1",
+  ]);
+
+  const { code, stdout, stderr } = await collectProcess(child);
+
+  assert.equal(code, 0, stderr);
+  assert.equal(stderr, "");
+  assert.equal(JSON.parse(stdout).result, "echo: hello arg-value-1");
+});
+
 test("smol-wf run supports --backend absurd option validation", async () => {
   const child = spawnWorkflowRun([
     fixturePath("cli-args.workflow.js"),

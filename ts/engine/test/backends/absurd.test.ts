@@ -24,7 +24,7 @@ test("runDurableAgent checkpoints agent calls by explicit key", async () => {
 
   assert.equal(first, "echo: first prompt");
   assert.equal(second, "echo: first prompt");
-  assert.deepEqual(ctx.stepCalls, ["agent:research:NVDA", "agent:research:NVDA"]);
+  assert.deepEqual(ctx.stepCalls, ["agent:debug:research:NVDA", "agent:debug:research:NVDA"]);
   assert.equal(ctx.executedSteps.length, 1);
   assert.equal(ctx.events.length, 1);
   assert.equal(ctx.events[0]?.eventName, "workflow.agent");
@@ -65,7 +65,7 @@ test("runAbsurdWorkflowTask routes workflow agent calls through durable steps", 
     },
   });
 
-  assert.deepEqual(ctx.executedSteps.sort(), ["agent:first", "agent:second"]);
+  assert.deepEqual(ctx.executedSteps.sort(), ["agent:debug:first", "agent:debug:second"]);
   assert.deepEqual(
     ctx.events.map((event) => event.eventName).sort(),
     ["workflow.agent", "workflow.agent", "workflow.log", "workflow.phase"].sort(),

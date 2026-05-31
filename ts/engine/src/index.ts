@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { inspect } from "node:util";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
-import { createDebugAgentProvider } from "./agent-providers/debug.js";
+import { createAgentProvider } from "./agent-providers/index.js";
+import type { AgentProvider } from "./agent-providers/types.js";
 
 export type WorkflowArgs = Record<string, unknown>;
 
@@ -15,6 +16,7 @@ export type WorkflowAgentHandler = (
 export type RunWorkflowOptions = {
   scriptPath: string;
   args?: WorkflowArgs;
+  agentProvider?: AgentProvider;
   onAgent?: WorkflowAgentHandler;
   onLog?: (...values: unknown[]) => void;
   onPhase?: (name: string, options?: unknown) => void;
@@ -117,7 +119,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
     async function handleAgent(
       message: Extract<RunnerMessage, { type: "agent" }>,
     ): Promise<unknown> {
-      const handler = options.onAgent ?? echoAgent;
+      const handler = options.onAgent ?? createAgentHandler(options.agentProvider);
       return await handler(message.prompt, message.options);
     }
 
@@ -129,17 +131,22 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
   });
 }
 
-async function echoAgent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
-  const result = await createDebugAgentProvider().run({
-    prompt,
-    options,
-    context: {
-      phase: options?.phase,
-      key: options?.key,
-    },
-  });
+function createAgentHandler(provider: AgentProvider = createAgentProvider("debug")): WorkflowAgentHandler {
+  return async (prompt, options) => {
+    const selectedProvider = options?.provider
+      ? createAgentProvider(options.provider)
+      : provider;
+    const result = await selectedProvider.run({
+      prompt,
+      options,
+      context: {
+        phase: options?.phase,
+        key: options?.key,
+      },
+    });
 
-  return result.output;
+    return result.output;
+  };
 }
 
 function formatExit(code: number | null, signal: NodeJS.Signals | null): string {

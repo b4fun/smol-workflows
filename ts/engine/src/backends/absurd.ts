@@ -8,7 +8,8 @@ import type {
   WorkerOptions,
 } from "@absurd-sqlite/sdk";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
-import { createDebugAgentProvider } from "../agent-providers/debug.js";
+import { createAgentProvider } from "../agent-providers/index.js";
+import type { AgentProvider } from "../agent-providers/types.js";
 import sqlite from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -34,6 +35,8 @@ export type AbsurdWorkflowBackendOptions = {
   queueName?: string;
   /** Absurd task name registered for workflow execution. Defaults to `workflow.run`. */
   taskName?: string;
+  /** Optional default agent provider. Defaults to `debug`. */
+  agentProvider?: AgentProvider;
   /** Optional logger for SQLite/worker diagnostics. */
   verbose?: (...values: unknown[]) => void;
 };
@@ -152,6 +155,7 @@ export function createAbsurdWorkflowBackend(
         { name: taskName, queue: queueName },
         async (params, ctx) =>
           await runAbsurdWorkflowTask(params, ctx, {
+            agentProvider: options.agentProvider,
             onDiagnostic: options.verbose,
           }),
       );
@@ -299,7 +303,7 @@ export async function resolveAbsurdSQLiteExtensionPathAsync(
 export async function runAbsurdWorkflowTask(
   params: AbsurdWorkflowRunParams,
   ctx: TaskContext,
-  options: { onDiagnostic?: (...values: unknown[]) => void } = {},
+  options: { agentProvider?: AgentProvider; onDiagnostic?: (...values: unknown[]) => void } = {},
 ): Promise<unknown> {
   const runOptions: RunWorkflowOptions = {
     scriptPath: params.scriptPath,
@@ -326,15 +330,26 @@ export async function runDurableAgent(
   prompt: string,
   options: AgentRunOptions | undefined,
   ctx: Pick<TaskContext, "step" | "emitEvent">,
-  runOptions: { onDiagnostic?: (...values: unknown[]) => void } = {},
+  runOptions: { agentProvider?: AgentProvider; onDiagnostic?: (...values: unknown[]) => void } = {},
 ): Promise<unknown> {
-  const key = getAgentCheckpointKey(prompt, options);
-  const checkpointName = `agent:${key}`;
+  const provider = options?.provider
+    ? createAgentProvider(options.provider)
+    : (runOptions.agentProvider ?? createAgentProvider("debug"));
+  const key = getAgentCheckpointKey(prompt, options, provider.name);
+  const checkpointName = `agent:${provider.name}:${key}`;
 
   runOptions.onDiagnostic?.("agent", checkpointName, options);
 
   return await ctx.step(checkpointName, async () => {
-    const result = await echoAgent(prompt, options);
+    const providerResult = await provider.run({
+      prompt,
+      options,
+      context: {
+        phase: options?.phase,
+        key: options?.key,
+      },
+    });
+    const result = providerResult.output;
 
     await ctx.emitEvent(
       "workflow.agent",
@@ -342,9 +357,12 @@ export async function runDurableAgent(
         key,
         checkpointName,
         phase: options?.phase,
+        provider: provider.name,
         prompt,
         options,
         result,
+        usage: providerResult.usage,
+        providerSessionId: providerResult.sessionId,
         at: Date.now(),
       }),
     );
@@ -353,25 +371,16 @@ export async function runDurableAgent(
   });
 }
 
-export function getAgentCheckpointKey(prompt: string, options?: AgentRunOptions): string {
+export function getAgentCheckpointKey(
+  prompt: string,
+  options?: AgentRunOptions,
+  provider?: string,
+): string {
   if (options?.key) {
     return sanitizeCheckpointKey(options.key);
   }
 
-  return `auto:${hashJSON({ prompt, phase: options?.phase, schema: options?.schema })}`;
-}
-
-async function echoAgent(prompt: string, options?: AgentRunOptions): Promise<unknown> {
-  const result = await createDebugAgentProvider().run({
-    prompt,
-    options,
-    context: {
-      phase: options?.phase,
-      key: options?.key,
-    },
-  });
-
-  return result.output;
+  return `auto:${hashJSON({ prompt, phase: options?.phase, provider, schema: options?.schema })}`;
 }
 
 function getConfiguredExtensionPath(extensionPath?: string): string | undefined {
