@@ -2,6 +2,8 @@
 
 This document records stable provider/harness integration findings for structured output, token usage, and budget accounting.
 
+For the provider-by-provider structured-output capability reference, see [`docs/harness-capabilities/structured-output.md`](harness-capabilities/structured-output.md).
+
 ## Goals
 
 Workflow `agent(prompt, { schema })` support should prefer native provider structured-output mechanisms when available, then validate the final payload locally. The same provider result should expose token usage when the harness makes it available so workflow `budget` accounting can remain accurate.
