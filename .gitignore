@@ -2,3 +2,7 @@
 *.db-*
 *.sqlite
 *.sqlite-*
+
+# direnv
+.direnv/
+.envrc.local
