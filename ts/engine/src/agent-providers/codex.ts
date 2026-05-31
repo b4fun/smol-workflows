@@ -44,6 +44,7 @@ async function runCodex(
     const args = [
       ...(options.subcommand ?? ["exec"]),
       ...(options.args ?? []),
+      ...(input.options?.model ? ["--model", input.options.model] : []),
       "--json",
       "--output-last-message",
       outputPath,

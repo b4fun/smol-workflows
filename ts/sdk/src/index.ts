@@ -71,23 +71,45 @@ export type PipelineFn = <Item, Result = unknown>(
   ...stages: readonly PipelineStage<unknown, Item, unknown>[]
 ) => Promise<Array<Result | null>>;
 
-/** Options for a single agent run. */
-export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
-  /** JSON Schema used to request and/or validate structured output. */
-  schema?: Schema;
+/** Agent options mirrored from the Dynamic Workflow reference. */
+export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
+  /** Optional display label for progress UIs and traces. */
+  label?: string;
   /** Optional phase name used for tracing/grouping this agent run. */
   phase?: string;
-  /** Optional stable key used for caching, deduplication, or trace correlation. */
-  key?: string;
+  /** JSON Schema used to request and/or validate structured output. */
+  schema?: Schema;
   /**
-   * Optional agent provider override for this call.
+   * Optional model override for this call.
    *
-   * If omitted, the runner's default provider is used. Runners may support
-   * built-in provider names such as `debug`, `claude-code`, `codex`,
-   * `opencode`, or `pi`, and may also register custom provider names.
+   * The accepted values are provider-specific. If omitted, the selected
+   * provider's default model is used.
    */
-  provider?: string;
+  model?: string;
+  /**
+   * Request fresh worktree isolation for providers that support file-mutating agents.
+   *
+   * TODO: implement support.
+   */
+  isolation?: "worktree";
+  /** Optional provider-specific subagent/agent type, such as `Explore` or `code-reviewer`. */
+  agentType?: string;
 };
+
+/** Options for a single agent run supported by this SDK. */
+export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> =
+  DynamicWorkflowAgentRunOptions<Schema> & {
+    /** Optional stable key used for caching, deduplication, or trace correlation. */
+    key?: string;
+    /**
+     * Optional agent provider override for this call.
+     *
+     * If omitted, the runner's default provider is used. Runners may support
+     * built-in provider names such as `debug`, `claude-code`, `codex`,
+     * `opencode`, or `pi`, and may also register custom provider names.
+     */
+    provider?: string;
+  };
 
 /** An AI capability exposed to workflow scripts. */
 export type Agent = {
