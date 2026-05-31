@@ -73,3 +73,4 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 - [ ] environment sandbox / isolation
 - [ ] remote environment support
 - [ ] pre-defined agents support
+- [ ] human in the loop / steering support
