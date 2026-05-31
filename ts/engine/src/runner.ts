@@ -5,6 +5,7 @@ import type {
   AgentRunFn,
   AgentRunOptions,
   ParallelFn,
+  PipelineFn,
   WorkflowContext,
 } from "@smol-workflow/sdk";
 
@@ -86,6 +87,7 @@ async function main(): Promise<void> {
       (async (tasks) => await Promise.all(tasks.map((task) => task()))) as ParallelFn,
       "parallel",
     ),
+    pipeline: readonlyFunction(createPipeline(), "pipeline"),
     log: readonlyFunction((...values: unknown[]) => {
       send({ type: "log", values });
     }, "log"),
@@ -97,6 +99,7 @@ async function main(): Promise<void> {
   defineWorkflowGlobal("args", globals.args);
   defineWorkflowGlobal("agent", globals.agent);
   defineWorkflowGlobal("parallel", globals.parallel);
+  defineWorkflowGlobal("pipeline", globals.pipeline);
   defineWorkflowGlobal("log", globals.log);
   defineWorkflowGlobal("phase", globals.phase);
 
@@ -104,6 +107,7 @@ async function main(): Promise<void> {
     args: globals.args,
     agent: globals.agent,
     parallel: globals.parallel,
+    pipeline: globals.pipeline,
     log: globals.log,
     phase: globals.phase,
   };
@@ -129,6 +133,26 @@ async function main(): Promise<void> {
 
 function hasDefaultExport(module: WorkflowModule): module is WorkflowModule & { default: unknown } {
   return Object.prototype.hasOwnProperty.call(module, "default");
+}
+
+function createPipeline(): PipelineFn {
+  return (async function pipeline(items, ...stages) {
+    return await Promise.all(
+      items.map(async (item, index) => {
+        let previous: unknown = item;
+
+        for (const stage of stages) {
+          try {
+            previous = await stage(previous, item, index);
+          } catch {
+            return null;
+          }
+        }
+
+        return previous;
+      }),
+    );
+  }) as PipelineFn;
 }
 
 function createAgentProxy(): AgentRunFn {

@@ -33,6 +33,7 @@ The engine injects these globals into an isolated runner:
 - `args`
 - `agent`
 - `parallel`
+- `pipeline`
 - `log`
 - `phase`
 

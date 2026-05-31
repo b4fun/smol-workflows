@@ -129,7 +129,7 @@ When the default export is a function, the runner calls it with:
 Where:
 
 - `input` is the workflow argument map supplied by the runner.
-- `ctx` contains the same runtime capabilities as the globals: `args`, `agent`, `parallel`, `log`, and `phase`.
+- `ctx` contains the same runtime capabilities as the globals: `args`, `agent`, `parallel`, `pipeline`, `log`, and `phase`.
 - `Output` is the workflow result returned to the engine.
 
 In the preferred top-level ESM style, workflow input is available through the global `args`:
@@ -193,6 +193,7 @@ The workflow runtime intentionally exposes a small primitive API:
 - `args`
 - `agent`
 - `parallel`
+- `pipeline`
 - `log`
 - `phase`
 
@@ -252,6 +253,22 @@ const [a, b] = await parallel([
 ```
 
 The SDK typing preserves tuple result types when possible.
+
+### `pipeline`
+
+`pipeline` runs each input item through all stages independently, without a barrier between stages.
+
+Example:
+
+```js
+const results = await pipeline(
+  files,
+  file => agent(`Review ${file}`, { phase: "Review" }),
+  (review, file, index) => agent(`Verify ${file} #${index}: ${review}`, { phase: "Verify" }),
+);
+```
+
+Each stage receives `(previousResult, originalItem, index)`. An item advances to the next stage as soon as that item is ready; it does not wait for other items to finish the current stage. If a stage throws, that item resolves to `null` and remaining stages for that item are skipped.
 
 ### `log`
 

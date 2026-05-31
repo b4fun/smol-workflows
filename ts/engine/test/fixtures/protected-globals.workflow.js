@@ -38,6 +38,12 @@ export default async function workflow(input, ctx) {
   }
 
   try {
+    pipeline.extra = "mutated-pipeline";
+  } catch {
+    blocked.push("pipeline-property-set");
+  }
+
+  try {
     globalThis.agent = async () => "mutated-global-agent";
   } catch {
     blocked.push("global-agent-reassign");
@@ -51,6 +57,7 @@ export default async function workflow(input, ctx) {
     nested: args.nested.value,
     agentExtra: agent.extra ?? null,
     parallelExtra: parallel.extra ?? null,
+    pipelineExtra: pipeline.extra ?? null,
     agentResult: await agent(`value: ${args["my-arg1"]}`),
   };
 }

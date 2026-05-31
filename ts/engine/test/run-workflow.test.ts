@@ -88,6 +88,21 @@ test("runWorkflow rejects scripts without a default export", async () => {
   );
 });
 
+test("runWorkflow supports pipeline without stage barriers", async () => {
+  const result = await runWorkflow({
+    scriptPath: fixturePath("pipeline.workflow.js"),
+    args: {
+      items: ["a", "bad", "c"],
+    },
+  });
+
+  assert.deepEqual(result, [
+    "echo: stage2:echo: stage1:a:a:0:a:0",
+    null,
+    "echo: stage2:echo: stage1:c:c:2:c:2",
+  ]);
+});
+
 test("workflow globals are protected from user mutation", async () => {
   const result = await runWorkflow({
     scriptPath: fixturePath("protected-globals.workflow.js"),
@@ -105,6 +120,7 @@ test("workflow globals are protected from user mutation", async () => {
       "nested-args-set",
       "agent-property-set",
       "parallel-define-property",
+      "pipeline-property-set",
       "global-agent-reassign",
     ],
     arg: "arg-value-1",
@@ -113,6 +129,7 @@ test("workflow globals are protected from user mutation", async () => {
     nested: "original-nested",
     agentExtra: null,
     parallelExtra: null,
+    pipelineExtra: null,
     agentResult: "echo: value: arg-value-1",
   });
 });

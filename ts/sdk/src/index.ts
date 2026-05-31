@@ -53,6 +53,24 @@ export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
   tasks: Tasks,
 ) => Promise<ParallelResults<Tasks>>;
 
+/** A stage in a `pipeline` call. */
+export type PipelineStage<Previous = unknown, Item = unknown, Result = unknown> = (
+  previous: Previous,
+  item: Item,
+  index: number,
+) => Awaitable<Result>;
+
+/**
+ * Runs items through sequential stages without a barrier between stages.
+ *
+ * Each item advances to its next stage as soon as that item is ready. If a stage
+ * throws for an item, that item resolves to `null` and remaining stages are skipped.
+ */
+export type PipelineFn = <Item, Result = unknown>(
+  items: readonly Item[],
+  ...stages: readonly PipelineStage<unknown, Item, unknown>[]
+) => Promise<Array<Result | null>>;
+
 /** Options for a single agent run. */
 export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
   /** JSON Schema used to request and/or validate structured output. */
@@ -93,6 +111,7 @@ export type WorkflowContext = {
   args: WorkflowArgs;
   agent: AgentRunFn;
   parallel: ParallelFn;
+  pipeline: PipelineFn;
   log: WorkflowLogFn;
   phase: PhaseFn;
 };
@@ -110,6 +129,8 @@ declare global {
   var agent: AgentRunFn;
   /** Global parallel helper injected by the isolated workflow runner. */
   var parallel: ParallelFn;
+  /** Global pipeline helper injected by the isolated workflow runner. */
+  var pipeline: PipelineFn;
   /** Global logger injected by the isolated workflow runner. */
   var log: WorkflowLogFn;
   /** Global phase helper injected by the isolated workflow runner. */

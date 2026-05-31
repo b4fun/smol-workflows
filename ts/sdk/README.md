@@ -164,7 +164,8 @@ The runner injects these globals:
 
 - `args` — untyped workflow args
 - `agent(prompt, options?)` — AI call primitive
-- `parallel(tasks)` — run tasks concurrently
+- `parallel(tasks)` — run tasks concurrently with a barrier
+- `pipeline(items, ...stages)` — run each item through stages without barriers between stages
 - `log(...values)` — write workflow logs
 - `phase(name, options?)` — mark workflow phase
 

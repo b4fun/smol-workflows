@@ -3,7 +3,7 @@ export const meta = {
   description: 'Minimal multi-phase smol-workflow example for local and Absurd-backed runs',
   phases: [
     { title: 'Prepare', detail: 'Read workflow args and decide who to greet' },
-    { title: 'Draft', detail: 'Create multiple greeting drafts in parallel' },
+    { title: 'Draft', detail: 'Create multiple greeting drafts with pipeline' },
     { title: 'Finalize', detail: 'Pick and polish the final greeting' },
   ],
 }
@@ -21,30 +21,29 @@ const plan = await agent(`Create a short greeting plan for ${name}`, {
 phase('Draft')
 log(`Creating greeting drafts for ${name}`)
 
-const [friendlyDraft, conciseDraft, enthusiasticDraft] = await parallel([
-  () => agent(`Using this plan, write a friendly greeting for ${name}: ${plan}`, {
-    key: `draft:friendly:${name}`,
+const draftStyles = ['friendly', 'concise', 'enthusiastic']
+
+const draftResults = await pipeline(
+  draftStyles,
+  (style) => agent(`Using this plan, write a ${style} greeting for ${name}: ${plan}`, {
+    key: `draft:${style}:${name}`,
     phase: 'Draft',
   }),
-  () => agent(`Using this plan, write a concise greeting for ${name}: ${plan}`, {
-    key: `draft:concise:${name}`,
+  (draft, style) => agent(`Improve this ${style} greeting for ${name}: ${draft}`, {
+    key: `improve:${style}:${name}`,
     phase: 'Draft',
   }),
-  () => agent(`Using this plan, write an enthusiastic greeting for ${name}: ${plan}`, {
-    key: `draft:enthusiastic:${name}`,
-    phase: 'Draft',
-  }),
-])
+)
+
+const drafts = Object.fromEntries(
+  draftStyles.map((style, index) => [style, draftResults[index]]),
+)
 
 phase('Finalize')
 log(`Finalizing greeting for ${name}`)
 
 const finalGreeting = await agent(
-  `Pick the best greeting for ${name} and polish it. Drafts:\n\n${JSON.stringify({
-    friendlyDraft,
-    conciseDraft,
-    enthusiasticDraft,
-  }, null, 2)}`,
+  `Pick the best greeting for ${name} and polish it. Drafts:\n\n${JSON.stringify(drafts, null, 2)}`,
   {
     key: `final:${name}`,
     phase: 'Finalize',
@@ -54,10 +53,6 @@ const finalGreeting = await agent(
 export default {
   name,
   plan,
-  drafts: {
-    friendly: friendlyDraft,
-    concise: conciseDraft,
-    enthusiastic: enthusiasticDraft,
-  },
+  drafts,
   finalGreeting,
 }
