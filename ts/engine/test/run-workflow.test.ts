@@ -88,6 +88,14 @@ test("runWorkflow rejects scripts without a default export", async () => {
   );
 });
 
+test("runWorkflow parallel converts thrown tasks to null", async () => {
+  const result = await runWorkflow({
+    scriptPath: fixturePath("parallel-errors.workflow.js"),
+  });
+
+  assert.deepEqual(result, ["echo: ok:first", null, null, "echo: ok:last"]);
+});
+
 test("runWorkflow supports pipeline without stage barriers", async () => {
   const result = await runWorkflow({
     scriptPath: fixturePath("pipeline.workflow.js"),

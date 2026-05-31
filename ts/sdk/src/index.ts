@@ -44,11 +44,11 @@ export type ParallelTask<T = unknown> = () => Awaitable<T>;
 /** Preserves the tuple result types returned by a tuple of parallel tasks. */
 export type ParallelResults<Tasks extends readonly ParallelTask[]> = {
   -readonly [Index in keyof Tasks]: Tasks[Index] extends ParallelTask<infer Result>
-    ? Awaited<Result>
+    ? Awaited<Result> | null
     : never;
 };
 
-/** Runs multiple tasks concurrently and returns their results in input order. */
+/** Runs multiple tasks concurrently and returns their results in input order. Thrown tasks resolve to `null`. */
 export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
   tasks: Tasks,
 ) => Promise<ParallelResults<Tasks>>;

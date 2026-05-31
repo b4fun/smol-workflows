@@ -241,7 +241,7 @@ Model-level options such as `temperature` and `maxTokens` are intentionally omit
 
 ### `parallel`
 
-`parallel` runs multiple tasks concurrently and returns results in input order.
+`parallel` runs multiple tasks concurrently and returns results in input order. If a task throws, that task's result is `null`; `parallel` itself does not reject because of individual task failures.
 
 Example:
 

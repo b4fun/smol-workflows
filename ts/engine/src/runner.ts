@@ -84,7 +84,16 @@ async function main(): Promise<void> {
     args: proxiedArgs,
     agent: readonlyFunction(createAgentProxy(), "agent"),
     parallel: readonlyFunction(
-      (async (tasks) => await Promise.all(tasks.map((task) => task()))) as ParallelFn,
+      (async (tasks) =>
+        await Promise.all(
+          tasks.map(async (task) => {
+            try {
+              return await task();
+            } catch {
+              return null;
+            }
+          }),
+        )) as ParallelFn,
       "parallel",
     ),
     pipeline: readonlyFunction(createPipeline(), "pipeline"),
