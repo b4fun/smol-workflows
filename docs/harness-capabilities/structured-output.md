@@ -54,8 +54,7 @@ Keep this provider deterministic. It is useful for tests, examples, and offline 
 
 ### References
 
-- Engine source: `ts/engine/src/agent-providers/debug.ts`
-- Provider contract: `ts/engine/src/agent-providers/types.ts`
+- No external harness source applies. `debug` is a deterministic local test provider, not an integration with an agent harness.
 
 ## `claude-code`
 
@@ -63,7 +62,7 @@ Keep this provider deterministic. It is useful for tests, examples, and offline 
 
 Claude Code has native structured-output support in print mode through `--json-schema`.
 
-Current engine implementation:
+Current implementation strategy:
 
 ```sh
 claude \
@@ -92,11 +91,9 @@ Implementation requirements:
 
 ### References
 
-- Engine source: `ts/engine/src/agent-providers/claude-code.ts`
 - Claude Code CLI reference: <https://code.claude.com/docs/en/cli-reference>
   - documents `--output-format`, `--print`, and `--json-schema`.
 - Claude Code structured outputs: <https://code.claude.com/docs/en/agent-sdk/structured-outputs>
-- Local note: live CLI verification was not possible in this environment because the `claude` CLI was not installed.
 
 ## `codex`
 
@@ -104,7 +101,7 @@ Implementation requirements:
 
 Codex CLI supports non-interactive structured output with `--output-schema`.
 
-Current engine implementation:
+Current implementation strategy:
 
 ```sh
 codex exec \
@@ -136,11 +133,11 @@ Implementation requirements:
 
 ### References
 
-- Engine source: `ts/engine/src/agent-providers/codex.ts`
 - Codex non-interactive docs: <https://developers.openai.com/codex/noninteractive>
   - documents `--json`, `--output-last-message`, and `--output-schema`.
-- Local CLI help verification:
-  - `codex exec --help` lists `--output-schema <FILE>`, `--json`, and `--output-last-message <FILE>`.
+- Codex source repository: <https://github.com/openai/codex>
+- Codex exec CLI flags source: <https://github.com/openai/codex/blob/main/codex-rs/exec/src/cli.rs>
+- Codex TypeScript SDK exec source: <https://github.com/openai/codex/blob/main/sdk/typescript/src/exec.ts>
 
 ## `pi`
 
@@ -148,7 +145,7 @@ Implementation requirements:
 
 Pi currently runs in JSON mode and uses prompt-only JSON instructions for `schema` calls.
 
-Current engine implementation:
+Current implementation strategy:
 
 ```sh
 pi \
@@ -160,14 +157,14 @@ pi \
 
 The provider parses JSON-lines events, extracts the last assistant output, and parses it as JSON for schema-backed calls.
 
-Research/demo found a stronger path: load a temporary extension that registers a custom terminating `structured_output` tool, enable only that tool for the run, and read the structured payload from the tool result.
+Research found a stronger path: load a temporary extension that registers a custom terminating `structured_output` tool, enable only that tool for the run, and read the structured payload from the tool result.
 
-Verified CLI pattern:
+Expected CLI pattern:
 
 ```sh
 pi \
   --no-extensions \
-  --extension examples/pi-structured-output-extension.ts \
+  --extension /tmp/smol-workflows-structured-output-extension.ts \
   --no-context-files \
   --no-skills \
   --no-prompt-templates \
@@ -175,7 +172,7 @@ pi \
   --mode json \
   --print \
   --tools structured_output \
-  --model github-copilot/gpt-5.4-mini \
+  --model <provider/model> \
   'Use the structured_output tool as your final action exactly once...'
 ```
 
@@ -211,17 +208,14 @@ Important caveat: Pi tool schemas are useful guidance and produce tool arguments
 
 ### References
 
-- Current engine source: `ts/engine/src/agent-providers/pi.ts`
-- Verified demo extension: `examples/pi-structured-output-extension.ts`
-- Verified demo runner: `examples/pi-structured-output-demo.mjs`
-- Pi extension docs in the Pi package: `docs/extensions.md`
+- Pi extension docs: <https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md>
   - custom tools are registered with `pi.registerTool()`.
-- Pi JSON event docs in the Pi package: `docs/json.md`
+- Pi JSON event docs: <https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/json.md>
   - documents `tool_execution_start`, `tool_execution_end`, `message_*`, `turn_*`, and `agent_*` JSON events.
-- Pi SDK/custom tool docs in the Pi package: `docs/sdk.md`, `docs/rpc.md`
-- Pi extension example in the Pi package: `examples/extensions/structured-output.ts`
-- Local CLI help verification:
-  - `pi --help` lists `--mode json`, `--print`, `--extension`, `--no-extensions`, and `--tools`.
+- Pi SDK/custom tool docs:
+  - <https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/sdk.md>
+  - <https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/rpc.md>
+- Pi structured-output extension example: <https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/examples/extensions/structured-output.ts>
 
 ## `opencode`
 
@@ -229,7 +223,7 @@ Important caveat: Pi tool schemas are useful guidance and produce tool arguments
 
 OpenCode currently uses prompt-only JSON instructions in the engine provider.
 
-Current engine implementation:
+Current implementation strategy:
 
 ```sh
 opencode run \
@@ -240,7 +234,7 @@ opencode run \
 
 The provider parses stdout as JSON or JSONL, extracts the final output text, and parses it as JSON for schema-backed calls.
 
-Research/demo found a stronger path through OpenCode's server/session API. A message can include:
+Research found a stronger path through OpenCode's server/session API. A message can include:
 
 ```json
 {
@@ -267,24 +261,26 @@ Implementation requirements:
 5. Validate locally against the original workflow schema.
 6. Keep prompt-only JSON as a fallback only when the server/session structured path is unavailable.
 
-Verified demo command:
+Expected server/session request shape:
 
-```sh
-node examples/opencode-session-prompt.mjs \
-  --model github-copilot/gpt-5.4-mini \
-  --prompt 'Return a tiny structured report that says the OpenCode session prompt JSON schema demo worked.'
+```json
+{
+  "parts": [{ "type": "text", "text": "Return a structured report." }],
+  "model": { "providerID": "<provider>", "modelID": "<model>" },
+  "format": {
+    "type": "json_schema",
+    "schema": { "type": "object", "properties": {}, "required": [] },
+    "retryCount": 2
+  }
+}
 ```
-
-A nested `--complex` schema was also verified.
 
 ### References
 
-- Current engine source: `ts/engine/src/agent-providers/opencode.ts`
-- Verified demo runner: `examples/opencode-session-prompt.mjs`
 - OpenCode official CLI docs: <https://opencode.ai/docs/cli>
   - documents `opencode run`, `opencode serve`, and `--model provider/model`.
 - OpenCode source repository: <https://github.com/anomalyco/opencode>
-- OpenCode structured-output source: `packages/opencode/src/session/prompt.ts`
+- OpenCode structured-output source: <https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/prompt.ts>
   - `STRUCTURED_OUTPUT_SYSTEM_PROMPT`
   - injection of `tools["StructuredOutput"]`
   - `toolChoice: "required"`
