@@ -4,8 +4,8 @@ use smol_workflow_engine::agent_providers::{
     AgentProviderSchemaMode, AgentProviderUsageMode, DebugAgentProvider,
 };
 
-#[test]
-fn debug_provider_echoes_text_when_schema_is_omitted() {
+#[tokio::test(flavor = "current_thread")]
+async fn debug_provider_echoes_text_when_schema_is_omitted() {
     let provider = DebugAgentProvider::new();
     let result = provider
         .run(AgentProviderRunInput {
@@ -13,6 +13,7 @@ fn debug_provider_echoes_text_when_schema_is_omitted() {
             options: None,
             context: AgentProviderContext::default(),
         })
+        .await
         .expect("debug provider should run");
 
     assert_eq!(provider.name(), "debug");
@@ -30,8 +31,8 @@ fn debug_provider_echoes_text_when_schema_is_omitted() {
         .is_some());
 }
 
-#[test]
-fn debug_provider_generates_structured_output_from_json_schema() {
+#[tokio::test(flavor = "current_thread")]
+async fn debug_provider_generates_structured_output_from_json_schema() {
     let provider = DebugAgentProvider::new();
     let schema = json!({
         "type": "object",
@@ -59,6 +60,7 @@ fn debug_provider_generates_structured_output_from_json_schema() {
             options: Some(json!({ "schema": schema })),
             context: AgentProviderContext::default(),
         })
+        .await
         .expect("debug provider should run");
 
     assert_eq!(
@@ -75,8 +77,8 @@ fn debug_provider_generates_structured_output_from_json_schema() {
     );
 }
 
-#[test]
-fn schema_generation_handles_const_formats_tuples_and_all_of() {
+#[tokio::test(flavor = "current_thread")]
+async fn schema_generation_handles_const_formats_tuples_and_all_of() {
     assert_eq!(
         generate_debug_value_from_schema(&json!({ "const": "fixed" })),
         json!("fixed")

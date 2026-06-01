@@ -37,8 +37,8 @@ fn schema_input(prompt: &str) -> AgentProviderRunInput {
     }
 }
 
-#[test]
-fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
+#[tokio::test(flavor = "current_thread")]
+async fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
     let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-claude-provider.mjs")],
@@ -47,6 +47,7 @@ fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
 
     let result = provider
         .run(input("hello claude"))
+        .await
         .expect("provider should run");
 
     assert_eq!(provider.name(), "claude-code");
@@ -61,8 +62,8 @@ fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
     assert_eq!(usage.cost.unwrap().total, Some(0.123));
 }
 
-#[test]
-fn claude_code_provider_parses_structured_output_and_argv() {
+#[tokio::test(flavor = "current_thread")]
+async fn claude_code_provider_parses_structured_output_and_argv() {
     let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-claude-provider.mjs")],
@@ -71,6 +72,7 @@ fn claude_code_provider_parses_structured_output_and_argv() {
 
     let result = provider
         .run(schema_input("structured snapshot"))
+        .await
         .expect("provider should run");
 
     assert_eq!(result.output["summary"], "structured claude summary");
@@ -89,8 +91,8 @@ fn claude_code_provider_parses_structured_output_and_argv() {
     );
 }
 
-#[test]
-fn claude_code_provider_derives_usage_without_double_counting_cache_reads() {
+#[tokio::test(flavor = "current_thread")]
+async fn claude_code_provider_derives_usage_without_double_counting_cache_reads() {
     let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-claude-provider.mjs")],
@@ -99,14 +101,15 @@ fn claude_code_provider_derives_usage_without_double_counting_cache_reads() {
 
     let usage = provider
         .run(input("usage-no-total"))
+        .await
         .expect("provider should run")
         .usage
         .expect("usage");
     assert_eq!(usage.total_tokens, Some(21));
 }
 
-#[test]
-fn codex_provider_reads_output_schema_and_usage() {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_provider_reads_output_schema_and_usage() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-codex-provider.mjs")],
@@ -115,6 +118,7 @@ fn codex_provider_reads_output_schema_and_usage() {
 
     let result = provider
         .run(input("hello codex"))
+        .await
         .expect("provider should run");
     assert_eq!(provider.name(), "codex");
     assert_eq!(result.output, json!("fake codex: hello codex"));
@@ -122,13 +126,14 @@ fn codex_provider_reads_output_schema_and_usage() {
 
     let structured = provider
         .run(schema_input("structured prompt"))
+        .await
         .expect("provider should run");
     assert_eq!(structured.output["summary"], "structured debug summary");
     assert_eq!(structured.output["additionalProperties"], false);
 }
 
-#[test]
-fn codex_provider_handles_fallback_and_escaped_structured_output() {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_provider_handles_fallback_and_escaped_structured_output() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-codex-provider.mjs")],
@@ -137,6 +142,7 @@ fn codex_provider_handles_fallback_and_escaped_structured_output() {
 
     let fallback = provider
         .run(input("stdout-fallback"))
+        .await
         .expect("provider should run");
     assert_eq!(fallback.output, json!("fake codex: stdout-fallback"));
 
@@ -147,13 +153,14 @@ fn codex_provider_handles_fallback_and_escaped_structured_output() {
     ] {
         let result = provider
             .run(schema_input(prompt))
+            .await
             .expect("provider should parse structured output");
         assert_eq!(result.output["prompt"], prompt);
     }
 }
 
-#[test]
-fn codex_provider_preserves_required_subset_and_cache_aliases() {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_provider_preserves_required_subset_and_cache_aliases() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-codex-provider.mjs")],
@@ -172,6 +179,7 @@ fn codex_provider_preserves_required_subset_and_cache_aliases() {
             })),
             context: Default::default(),
         })
+        .await
         .expect("provider should run");
     assert_eq!(result.output["required"], json!(["name"]));
 
@@ -186,11 +194,17 @@ fn codex_provider_preserves_required_subset_and_cache_aliases() {
             })),
             context: Default::default(),
         })
+        .await
         .expect("provider should run");
     assert_eq!(no_required.output["required"], json!([]));
     assert_eq!(no_required.output["additionalProperties"], false);
 
-    let usage = provider.run(input("cache-alias")).unwrap().usage.unwrap();
+    let usage = provider
+        .run(input("cache-alias"))
+        .await
+        .unwrap()
+        .usage
+        .unwrap();
     assert_eq!(usage.input_tokens, Some(5));
     assert_eq!(usage.output_tokens, Some(3));
     assert_eq!(usage.cache_read_tokens, Some(4));
@@ -198,8 +212,8 @@ fn codex_provider_preserves_required_subset_and_cache_aliases() {
     assert_eq!(usage.total_tokens, Some(10));
 }
 
-#[test]
-fn codex_provider_supports_skip_git_repo_check_option() {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_provider_supports_skip_git_repo_check_option() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![
@@ -211,6 +225,7 @@ fn codex_provider_supports_skip_git_repo_check_option() {
 
     let result = provider
         .run(input("hello codex"))
+        .await
         .expect("provider should run");
     let argv = result.raw.as_ref().unwrap()["events"]
         .as_array()
@@ -222,20 +237,24 @@ fn codex_provider_supports_skip_git_repo_check_option() {
     assert!(argv.iter().any(|arg| arg == "--skip-git-repo-check"));
 }
 
-#[test]
-fn codex_provider_propagates_output_file_read_errors() {
+#[tokio::test(flavor = "current_thread")]
+async fn codex_provider_propagates_output_file_read_errors() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-codex-io-error.mjs")],
         ..Default::default()
     });
 
-    let error = provider.run(input("io-error")).unwrap_err().to_string();
+    let error = provider
+        .run(input("io-error"))
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("Failed to read codex output file:"));
 }
 
-#[test]
-fn opencode_provider_supports_json_run_and_structured_server_mode() {
+#[tokio::test(flavor = "current_thread")]
+async fn opencode_provider_supports_json_run_and_structured_server_mode() {
     let provider = OpenCodeAgentProvider::new(OpenCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-opencode-provider.mjs")],
@@ -245,6 +264,7 @@ fn opencode_provider_supports_json_run_and_structured_server_mode() {
 
     let result = provider
         .run(input("hello opencode"))
+        .await
         .expect("provider should run");
     assert_eq!(provider.name(), "opencode");
     assert_eq!(result.output, json!("fake opencode: hello opencode"));
@@ -252,6 +272,7 @@ fn opencode_provider_supports_json_run_and_structured_server_mode() {
 
     let structured = provider
         .run(schema_input("structured prompt"))
+        .await
         .expect("provider should run structured mode");
     assert_eq!(structured.output["summary"], "structured opencode summary");
     assert_eq!(
@@ -269,6 +290,7 @@ fn opencode_provider_supports_json_run_and_structured_server_mode() {
 
     let tool_state = provider
         .run(schema_input("tool-state-structured"))
+        .await
         .expect("provider should extract tool state");
     assert_eq!(
         tool_state.output,
@@ -276,34 +298,42 @@ fn opencode_provider_supports_json_run_and_structured_server_mode() {
     );
 }
 
-#[test]
-fn opencode_provider_handles_nested_events_and_cache_aliases() {
+#[tokio::test(flavor = "current_thread")]
+async fn opencode_provider_handles_nested_events_and_cache_aliases() {
     let provider = OpenCodeAgentProvider::new(OpenCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-opencode-provider.mjs")],
         ..Default::default()
     });
 
-    let nested = provider.run(input("usage-nested")).unwrap();
+    let nested = provider.run(input("usage-nested")).await.unwrap();
     assert_eq!(nested.usage.unwrap().total_tokens, Some(8));
 
-    let event_properties = provider.run(input("event-properties")).unwrap();
+    let event_properties = provider.run(input("event-properties")).await.unwrap();
     assert_eq!(event_properties.output, json!("event properties result"));
     assert_eq!(
         event_properties.session_id.as_deref(),
         Some("opencode-session-2")
     );
 
-    let tool_text = provider.run(input("tool-use-alongside-text")).unwrap();
+    let tool_text = provider
+        .run(input("tool-use-alongside-text"))
+        .await
+        .unwrap();
     assert_eq!(tool_text.output, json!("tool use result text"));
 
-    let cache = provider.run(input("cache-alias")).unwrap().usage.unwrap();
+    let cache = provider
+        .run(input("cache-alias"))
+        .await
+        .unwrap()
+        .usage
+        .unwrap();
     assert_eq!(cache.cache_read_tokens, Some(2));
     assert_eq!(cache.cache_write_tokens, Some(3));
 }
 
-#[test]
-fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
+#[tokio::test(flavor = "current_thread")]
+async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
     let provider = PiAgentProvider::new(PiAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-pi-provider.mjs")],
@@ -312,6 +342,7 @@ fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
 
     let result = provider
         .run(input("hello pi"))
+        .await
         .expect("provider should run");
     assert_eq!(provider.name(), "pi");
     assert_eq!(result.output, json!("fake pi: hello pi"));
@@ -321,6 +352,7 @@ fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
     let long_prompt = format!("long prompt {}", "x".repeat(40_000));
     let long = provider
         .run(input(&long_prompt))
+        .await
         .expect("provider should run");
     assert_eq!(long.output, json!(format!("fake pi: {long_prompt}")));
 
@@ -336,6 +368,7 @@ fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
             })),
             context: Default::default(),
         })
+        .await
         .expect("provider should run");
     assert_eq!(structured.output["summary"], "structured pi summary");
     assert_eq!(structured.output["extensionRegisteredTool"], true);
@@ -352,24 +385,30 @@ fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
             })),
             context: Default::default(),
         })
+        .await
         .expect("provider should recover attempted structured output");
     assert_eq!(recovered.output["summary"], "structured pi summary");
     assert_eq!(recovered.output["extensionRegisteredTool"], true);
 
-    let cache = provider.run(input("cache-alias")).unwrap().usage.unwrap();
+    let cache = provider
+        .run(input("cache-alias"))
+        .await
+        .unwrap()
+        .usage
+        .unwrap();
     assert_eq!(cache.cache_read_tokens, Some(4));
     assert_eq!(cache.cache_write_tokens, Some(2));
     assert_eq!(cache.total_tokens, Some(10));
 }
 
-#[test]
-fn cli_provider_failures_include_stderr() {
+#[tokio::test(flavor = "current_thread")]
+async fn cli_provider_failures_include_stderr() {
     let claude = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-claude-provider.mjs")],
         ..Default::default()
     });
-    let error = claude.run(input("fail")).unwrap_err().to_string();
+    let error = claude.run(input("fail")).await.unwrap_err().to_string();
     assert!(error.contains("Claude Code provider exited with code 7: nope"));
 
     let codex = CodexAgentProvider::new(CodexAgentProviderOptions {
@@ -377,7 +416,7 @@ fn cli_provider_failures_include_stderr() {
         subcommand: vec![fixture("fake-codex-provider.mjs")],
         ..Default::default()
     });
-    let error = codex.run(input("fail")).unwrap_err().to_string();
+    let error = codex.run(input("fail")).await.unwrap_err().to_string();
     assert!(error.contains("Codex provider exited with code 7: nope"));
 
     let opencode = OpenCodeAgentProvider::new(OpenCodeAgentProviderOptions {
@@ -385,7 +424,7 @@ fn cli_provider_failures_include_stderr() {
         subcommand: vec![fixture("fake-opencode-provider.mjs")],
         ..Default::default()
     });
-    let error = opencode.run(input("fail")).unwrap_err().to_string();
+    let error = opencode.run(input("fail")).await.unwrap_err().to_string();
     assert!(error.contains("OpenCode provider exited with code 7: nope"));
 
     let pi = PiAgentProvider::new(PiAgentProviderOptions {
@@ -393,6 +432,6 @@ fn cli_provider_failures_include_stderr() {
         subcommand: vec![fixture("fake-pi-provider.mjs")],
         ..Default::default()
     });
-    let error = pi.run(input("fail")).unwrap_err().to_string();
+    let error = pi.run(input("fail")).await.unwrap_err().to_string();
     assert!(error.contains("Pi provider exited with code 7: nope"));
 }

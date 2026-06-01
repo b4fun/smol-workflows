@@ -26,6 +26,7 @@ impl PiAgentProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for PiAgentProvider {
     fn name(&self) -> &str {
         "pi"
@@ -36,14 +37,14 @@ impl AgentProvider for PiAgentProvider {
     fn usage_mode(&self) -> AgentProviderUsageMode {
         AgentProviderUsageMode::Builtin
     }
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
-        run_pi(input, &self.options)
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        run_pi(input, &self.options).await
     }
 }
 
 const MAX_PROMPT_ARG_LENGTH: usize = 32_000;
 
-fn run_pi(
+async fn run_pi(
     input: AgentProviderRunInput,
     options: &PiAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
@@ -105,7 +106,8 @@ fn run_pi(
         cwd,
         &options.env,
         options.timeout_ms,
-    )?;
+    )
+    .await?;
     let events = parse_json_lines(&stdout);
     let candidate = extract_output(&events).unwrap_or(stdout);
     let output = if has_schema {

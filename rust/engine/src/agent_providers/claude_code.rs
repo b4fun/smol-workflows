@@ -26,6 +26,7 @@ impl ClaudeCodeAgentProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for ClaudeCodeAgentProvider {
     fn name(&self) -> &str {
         "claude-code"
@@ -39,12 +40,12 @@ impl AgentProvider for ClaudeCodeAgentProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
-        run_claude_code(input, &self.options)
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        run_claude_code(input, &self.options).await
     }
 }
 
-fn run_claude_code(
+async fn run_claude_code(
     input: AgentProviderRunInput,
     options: &ClaudeCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
@@ -70,7 +71,8 @@ fn run_claude_code(
         cwd,
         &options.env,
         options.timeout_ms,
-    )?;
+    )
+    .await?;
     let raw = parse_json_or_text(&stdout);
     let structured = option_schema(&input.options).is_some();
     let output = extract_output(&raw, structured)?;

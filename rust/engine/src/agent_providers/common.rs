@@ -2,13 +2,13 @@ use super::types::{AgentUsage, AgentUsageCost};
 use anyhow::{anyhow, bail, Context};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
-pub fn run_command(
+pub async fn run_command(
     provider: &str,
     command: &str,
     args: &[String],
@@ -45,41 +45,21 @@ pub fn run_command(
         if let Some(mut child_stdin) = child.stdin.take() {
             child_stdin
                 .write_all(stdin.as_bytes())
+                .await
                 .with_context(|| format!("failed to write {provider} provider stdin"))?;
         }
     }
 
-    if let Some(timeout_ms) = timeout_ms {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let output = child.wait_with_output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                if status.success() {
-                    log::debug!(
-                        "{provider} provider CLI completed stdout={} stderr={}",
-                        stdout.len(),
-                        stderr.len()
-                    );
-                    return Ok((stdout, stderr));
-                }
-                bail!(
-                    "{provider} provider exited with {}{}",
-                    status_text(status.code()),
-                    format_command_failure(&stdout, &stderr)
-                );
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("{provider} provider timed out after {timeout_ms}ms");
-            }
-            thread::sleep(Duration::from_millis(10));
+    let output = if let Some(timeout_ms) = timeout_ms {
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+            .await
+        {
+            Ok(output) => output?,
+            Err(_) => bail!("{provider} provider timed out after {timeout_ms}ms"),
         }
-    }
-
-    let output = child.wait_with_output()?;
+    } else {
+        child.wait_with_output().await?
+    };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.status.success() {

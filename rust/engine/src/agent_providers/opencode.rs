@@ -3,12 +3,13 @@ use super::types::*;
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct OpenCodeAgentProviderOptions {
@@ -52,6 +53,7 @@ impl OpenCodeAgentProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for OpenCodeAgentProvider {
     fn name(&self) -> &str {
         "opencode"
@@ -62,16 +64,16 @@ impl AgentProvider for OpenCodeAgentProvider {
     fn usage_mode(&self) -> AgentProviderUsageMode {
         AgentProviderUsageMode::Builtin
     }
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         if option_schema(&input.options).is_some() {
-            run_opencode_structured(input, &self.options)
+            run_opencode_structured(input, &self.options).await
         } else {
-            run_opencode(input, &self.options)
+            run_opencode(input, &self.options).await
         }
     }
 }
 
-fn run_opencode(
+async fn run_opencode(
     input: AgentProviderRunInput,
     options: &OpenCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
@@ -96,7 +98,8 @@ fn run_opencode(
         cwd,
         &options.env,
         options.timeout_ms,
-    )?;
+    )
+    .await?;
     let raw = parse_output(&stdout);
     let candidate = extract_output(&raw).unwrap_or(stdout);
     Ok(AgentProviderResult {
@@ -107,12 +110,12 @@ fn run_opencode(
     })
 }
 
-fn run_opencode_structured(
+async fn run_opencode_structured(
     input: AgentProviderRunInput,
     options: &OpenCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
     let command = options.command.as_deref().unwrap_or("opencode");
-    let mut server = start_opencode_server(command, options, &input)?;
+    let mut server = start_opencode_server(command, options, &input).await?;
     let directory = input
         .context
         .cwd
@@ -130,7 +133,8 @@ fn run_opencode_structured(
         "POST",
         &[("directory", directory.to_string_lossy().to_string())],
         &session_body,
-    )?;
+    )
+    .await?;
     let session_id = extract_session_id(&session)
         .or_else(|| {
             session
@@ -167,12 +171,13 @@ fn run_opencode_structured(
         "POST",
         &[("directory", directory.to_string_lossy().to_string())],
         &body,
-    )?;
+    )
+    .await?;
     let output = extract_structured_output(&response).ok_or_else(|| {
         anyhow::anyhow!("OpenCode structured-output response did not include a structured value")
     })?;
     let logs = server.logs.clone();
-    server.stop();
+    server.stop().await;
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
@@ -189,18 +194,18 @@ struct OpenCodeServer {
     logs: String,
 }
 impl OpenCodeServer {
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    async fn stop(&mut self) {
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
     }
 }
 impl Drop for OpenCodeServer {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.child.start_kill();
     }
 }
 
-fn start_opencode_server(
+async fn start_opencode_server(
     command: &str,
     options: &OpenCodeAgentProviderOptions,
     input: &AgentProviderRunInput,
@@ -227,12 +232,13 @@ fn start_opencode_server(
     let mut child = cmd.spawn().context("failed to spawn OpenCode server")?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     spawn_reader(stdout, tx.clone());
     spawn_reader(stderr, tx);
     let deadline =
-        std::time::Instant::now() + Duration::from_millis(options.server_startup_timeout_ms);
+        tokio::time::Instant::now() + Duration::from_millis(options.server_startup_timeout_ms);
     let mut logs = String::new();
+
     loop {
         if let Some(status) = child.try_wait()? {
             bail!(
@@ -245,9 +251,9 @@ fn start_opencode_server(
                 }
             );
         }
-        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-        if timeout.is_zero() {
-            let _ = child.kill();
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let _ = child.start_kill();
             bail!(
                 "Timed out waiting for OpenCode server URL{}",
                 if logs.is_empty() {
@@ -257,19 +263,25 @@ fn start_opencode_server(
                 }
             );
         }
-        if let Ok(chunk) = rx.recv_timeout(timeout.min(Duration::from_millis(50))) {
-            logs.push_str(&chunk);
-            if let Some(url) = extract_server_url(&logs) {
-                return Ok(OpenCodeServer { child, url, logs });
+        tokio::select! {
+            Some(chunk) = rx.recv() => {
+                logs.push_str(&chunk);
+                if let Some(url) = extract_server_url(&logs) {
+                    return Ok(OpenCodeServer { child, url, logs });
+                }
             }
+            _ = tokio::time::sleep(remaining.min(Duration::from_millis(50))) => {}
         }
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(reader: R, tx: mpsc::Sender<String>) {
-    thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(Result::ok) {
+fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    tx: mpsc::UnboundedSender<String>,
+) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
             let _ = tx.send(format!("{line}\n"));
         }
     });
@@ -282,17 +294,22 @@ fn extract_server_url(logs: &str) -> Option<String> {
     Some(rest.split_whitespace().next()?.to_string())
 }
 
-fn request_json(
+async fn request_json(
     base: &str,
     path: &str,
     method: &str,
     query: &[(impl AsRef<str>, String)],
     body: &Value,
 ) -> anyhow::Result<Value> {
-    let mut url = format!("{}{}", base.trim_end_matches('/'), path);
+    if method != "POST" {
+        bail!("unsupported method {method}");
+    }
+
+    let endpoint = parse_http_base(base)?;
+    let mut request_path = path.to_string();
     if !query.is_empty() {
-        url.push('?');
-        url.push_str(
+        request_path.push('?');
+        request_path.push_str(
             &query
                 .iter()
                 .map(|(k, v)| format!("{}={}", k.as_ref(), url_encode(v)))
@@ -300,18 +317,91 @@ fn request_json(
                 .join("&"),
         );
     }
-    let response = match method {
-        "POST" => ureq::post(&url)
-            .set("content-type", "application/json")
-            .send_string(&serde_json::to_string(body)?)?,
-        _ => bail!("unsupported method {method}"),
-    };
-    let text = response.into_string()?;
-    Ok(if text.trim().is_empty() {
+
+    let body = serde_json::to_string(body)?;
+    let request = format!(
+        "POST {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        endpoint.host,
+        body.len(),
+        body
+    );
+    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    let response = String::from_utf8_lossy(&response);
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("OpenCode server returned malformed HTTP response"))?;
+    let status = headers.lines().next().unwrap_or_default();
+    if !status.contains(" 2") {
+        bail!(
+            "OpenCode server request failed: {status}: {}",
+            truncate(body, 4000)
+        );
+    }
+
+    let body = decode_http_body(headers, body)?;
+    Ok(if body.trim().is_empty() {
         Value::Null
     } else {
-        serde_json::from_str(&text)?
+        serde_json::from_str(&body)?
     })
+}
+
+struct HttpEndpoint {
+    host: String,
+    port: u16,
+}
+
+fn parse_http_base(base: &str) -> anyhow::Result<HttpEndpoint> {
+    let without_scheme = base
+        .trim_end_matches('/')
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL must use http://, got: {base}"))?;
+    let host_port = without_scheme
+        .split('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL is missing host: {base}"))?;
+    let (host, port) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL is missing port: {base}"))?;
+    Ok(HttpEndpoint {
+        host: host.to_string(),
+        port: port.parse()?,
+    })
+}
+
+fn decode_http_body(headers: &str, body: &str) -> anyhow::Result<String> {
+    if headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
+    {
+        decode_chunked_body(body)
+    } else {
+        Ok(body.to_string())
+    }
+}
+
+fn decode_chunked_body(body: &str) -> anyhow::Result<String> {
+    let mut rest = body;
+    let mut output = String::new();
+    loop {
+        let Some((size_line, after_size)) = rest.split_once("\r\n") else {
+            bail!("malformed chunked OpenCode response");
+        };
+        let size_text = size_line.split(';').next().unwrap_or(size_line).trim();
+        let size = usize::from_str_radix(size_text, 16)?;
+        if size == 0 {
+            return Ok(output);
+        }
+        if after_size.len() < size + 2 {
+            bail!("truncated chunked OpenCode response");
+        }
+        output.push_str(&after_size[..size]);
+        rest = &after_size[size + 2..];
+    }
 }
 
 fn url_encode(value: &str) -> String {

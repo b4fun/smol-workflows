@@ -13,6 +13,7 @@ impl DebugAgentProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for DebugAgentProvider {
     fn name(&self) -> &str {
         "debug"
@@ -26,7 +27,7 @@ impl AgentProvider for DebugAgentProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         log::debug!(
             "running debug provider phase={:?} key={:?} prompt_len={} schema={}",
             input.context.phase.as_deref(),

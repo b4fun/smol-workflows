@@ -8,7 +8,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -39,6 +38,7 @@ struct DynamicSchedulingProbeProvider {
     follow_up_started_while_slow_running: AtomicBool,
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for FixedUsageProvider {
     fn name(&self) -> &str {
         "fixed-usage"
@@ -52,7 +52,7 @@ impl AgentProvider for FixedUsageProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         Ok(AgentProviderResult {
             output: json!(format!("fixed: {}", input.prompt)),
             session_id: None,
@@ -94,6 +94,7 @@ impl DynamicSchedulingProbeProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for DynamicSchedulingProbeProvider {
     fn name(&self) -> &str {
         "dynamic-scheduling-probe"
@@ -107,17 +108,17 @@ impl AgentProvider for DynamicSchedulingProbeProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         self.current.fetch_add(1, Ordering::SeqCst);
         match input.prompt.as_str() {
-            "fast-parent" => thread::sleep(Duration::from_millis(25)),
-            "slow" => thread::sleep(Duration::from_millis(200)),
+            "fast-parent" => tokio::time::sleep(Duration::from_millis(25)).await,
+            "slow" => tokio::time::sleep(Duration::from_millis(200)).await,
             "follow-up" => {
                 if self.current.load(Ordering::SeqCst) > 1 {
                     self.follow_up_started_while_slow_running
                         .store(true, Ordering::SeqCst);
                 }
-                thread::sleep(Duration::from_millis(25));
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
             _ => {}
         }
@@ -131,6 +132,7 @@ impl AgentProvider for DynamicSchedulingProbeProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for ConcurrentProbeProvider {
     fn name(&self) -> &str {
         "concurrent-probe"
@@ -144,10 +146,10 @@ impl AgentProvider for ConcurrentProbeProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
         self.max.fetch_max(now, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         self.current.fetch_sub(1, Ordering::SeqCst);
         Ok(AgentProviderResult {
             output: json!(input.prompt),
@@ -158,6 +160,7 @@ impl AgentProvider for ConcurrentProbeProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for OptionsEchoProvider {
     fn name(&self) -> &str {
         "options-echo"
@@ -171,7 +174,7 @@ impl AgentProvider for OptionsEchoProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         Ok(AgentProviderResult {
             output: json!({
                 "prompt": input.prompt,

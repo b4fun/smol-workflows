@@ -317,13 +317,16 @@ impl<'a> RunState<'a> {
             agent_tasks.len() + 1,
             max_parallel
         );
-        agent_tasks.spawn_blocking(move || AgentTaskCompletion {
-            id,
-            result: run_agent_provider(
-                default_provider,
-                prepared.provider_override,
-                prepared.input,
-            ),
+        agent_tasks.spawn(async move {
+            AgentTaskCompletion {
+                id,
+                result: run_agent_provider(
+                    default_provider,
+                    prepared.provider_override,
+                    prepared.input,
+                )
+                .await,
+            }
         });
     }
 
@@ -419,15 +422,15 @@ impl<'a> RunState<'a> {
     }
 }
 
-fn run_agent_provider(
+async fn run_agent_provider(
     default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {
     if let Some(provider_override) = provider_override {
-        create_agent_provider(&provider_override)?.run(input)
+        create_agent_provider(&provider_override)?.run(input).await
     } else {
-        default_provider.run(input)
+        default_provider.run(input).await
     }
 }
 

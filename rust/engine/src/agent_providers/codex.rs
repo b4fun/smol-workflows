@@ -40,6 +40,7 @@ impl CodexAgentProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentProvider for CodexAgentProvider {
     fn name(&self) -> &str {
         "codex"
@@ -53,12 +54,12 @@ impl AgentProvider for CodexAgentProvider {
         AgentProviderUsageMode::Builtin
     }
 
-    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
-        run_codex(input, &self.options)
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        run_codex(input, &self.options).await
     }
 }
 
-fn run_codex(
+async fn run_codex(
     input: AgentProviderRunInput,
     options: &CodexAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
@@ -101,7 +102,8 @@ fn run_codex(
         cwd,
         &options.env,
         options.timeout_ms,
-    )?;
+    )
+    .await?;
     let events = parse_json_lines(&stdout);
     let final_message = read_final_message(&output_path, &events)?;
     let output = if has_schema {
