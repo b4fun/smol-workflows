@@ -81,8 +81,13 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
             WorkflowRuntimePoll::Request(request) => {
                 let id = request.id().to_string();
                 match state.handle_request(request) {
-                    Ok(value) => execution
-                        .resolve_request(&id, WorkflowRuntimeRequestResolution::Ok(value))?,
+                    Ok(value) => execution.resolve_request(
+                        &id,
+                        WorkflowRuntimeRequestResolution::OkWithBudget {
+                            value,
+                            budget: state.budget.clone(),
+                        },
+                    )?,
                     Err(error) => execution.resolve_request(
                         &id,
                         WorkflowRuntimeRequestResolution::Err {
@@ -165,8 +170,8 @@ impl RunState<'_> {
             options,
             context,
         })?;
-        if let Some(total_tokens) = result.usage.as_ref().and_then(|usage| usage.total_tokens) {
-            self.budget.spent = self.budget.spent.saturating_add(total_tokens);
+        if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
+            self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
         Ok(result.output)
     }

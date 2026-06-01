@@ -60,7 +60,7 @@ use super::{
 use anyhow::{anyhow, bail, Context as AnyhowContext};
 use rquickjs::{
     context::intrinsic,
-    object::Property,
+    object::{Accessor, Property},
     prelude::{Func, MutFn, Opt, Rest},
     promise::PromiseState,
     CatchResultExt, CaughtError, Context, Exception, Function, Module, Object, Persistent, Promise,
@@ -165,6 +165,7 @@ struct RuntimeState {
     pending_requests: HashMap<String, PendingRequest>,
     next_request_id: u64,
     current_phase: Option<String>,
+    budget: super::WorkflowBudgetSnapshot,
 }
 
 #[derive(Clone)]
@@ -264,6 +265,13 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
                 "ok": true,
                 "value": value,
             }),
+            WorkflowRuntimeRequestResolution::OkWithBudget { value, budget } => {
+                self.state.borrow_mut().budget = budget;
+                serde_json::json!({
+                    "ok": true,
+                    "value": value,
+                })
+            }
             WorkflowRuntimeRequestResolution::Err { message } => serde_json::json!({
                 "ok": false,
                 "message": message,
@@ -471,6 +479,8 @@ fn install_runtime_globals<'js>(
         sandbox: _,
     } = input;
 
+    state.borrow_mut().budget = budget;
+
     let args = rquickjs_serde::to_value(ctx.clone(), &args)
         .context("failed to convert workflow args to QuickJS value")?;
     let readonly: Function = globals
@@ -483,7 +493,7 @@ fn install_runtime_globals<'js>(
         .prop("args", Property::from(readonly_args).enumerable())
         .context("failed to install readonly workflow args global")?;
 
-    let budget = create_budget_object(ctx, budget)?;
+    let budget = create_budget_object(ctx, Rc::clone(&state))?;
     let budget = readonly_proxy(ctx, &readonly, budget.into())
         .context("failed to wrap workflow budget as readonly")?;
     globals
@@ -666,30 +676,46 @@ fn define_readonly_data_property<'js>(
 
 fn create_budget_object<'js>(
     ctx: &rquickjs::Ctx<'js>,
-    budget: super::WorkflowBudgetSnapshot,
+    state: Rc<RefCell<RuntimeState>>,
 ) -> anyhow::Result<Object<'js>> {
     let object = Object::new(ctx.clone()).context("failed to create workflow budget object")?;
-    let total = rquickjs_serde::to_value(ctx.clone(), &budget.total)
-        .context("failed to convert workflow budget total")?;
+
+    let total_state = Rc::clone(&state);
     object
-        .prop("total", Property::from(total).enumerable())
+        .prop(
+            "total",
+            Accessor::from(
+                move |ctx: rquickjs::Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+                    rquickjs_serde::to_value(ctx, &total_state.borrow().budget.total).map_err(
+                        |error| rquickjs::Error::IntoJs {
+                            from: "WorkflowBudgetSnapshot.total",
+                            to: "value",
+                            message: Some(error.to_string()),
+                        },
+                    )
+                },
+            )
+            .enumerable(),
+        )
         .context("failed to install workflow budget total")?;
 
-    let spent = budget.spent;
+    let spent_state = Rc::clone(&state);
     object
         .prop(
             "spent",
-            Property::from(Func::from(move || spent)).enumerable(),
+            Property::from(Func::from(move || spent_state.borrow().budget.spent)).enumerable(),
         )
         .context("failed to install workflow budget spent function")?;
 
-    let total = budget.total;
     object
         .prop(
             "remaining",
-            Property::from(Func::from(move || match total {
-                Some(total) => total.saturating_sub(spent) as f64,
-                None => f64::INFINITY,
+            Property::from(Func::from(move || {
+                let budget = &state.borrow().budget;
+                match budget.total {
+                    Some(total) => total.saturating_sub(budget.spent) as f64,
+                    None => f64::INFINITY,
+                }
             }))
             .enumerable(),
         )

@@ -1,5 +1,8 @@
 use serde_json::json;
-use smol_workflow_engine::agent_providers::DebugAgentProvider;
+use smol_workflow_engine::agent_providers::{
+    AgentProvider, AgentProviderResult, AgentProviderRunInput, AgentProviderSchemaMode,
+    AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
+};
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::path::PathBuf;
 
@@ -9,6 +12,36 @@ fn fixture_path(name: &str) -> PathBuf {
 
 fn example_path(name: &str) -> PathBuf {
     PathBuf::from(format!("../../examples/{name}"))
+}
+
+struct FixedUsageProvider;
+
+impl AgentProvider for FixedUsageProvider {
+    fn name(&self) -> &str {
+        "fixed-usage"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        Ok(AgentProviderResult {
+            output: json!(format!("fixed: {}", input.prompt)),
+            session_id: None,
+            usage: Some(AgentUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(7),
+                total_tokens: Some(107),
+                ..AgentUsage::default()
+            }),
+            raw: None,
+        })
+    }
 }
 
 fn run_debug(
@@ -182,8 +215,44 @@ fn applies_phase_metadata_defaults() {
 }
 
 #[test]
+fn validates_schema_fixture_with_debug_provider() {
+    let result = run_debug(fixture_path("schema-validation.workflow.js"), json!({}));
+
+    assert_eq!(result.output.result, json!({ "summary": "debug-string" }));
+    assert_eq!(result.agent_calls.len(), 1);
+}
+
+#[test]
+fn updates_live_budget_from_agent_output_token_usage() {
+    let provider = FixedUsageProvider;
+    let result = run_workflow(RunWorkflowOptions {
+        script_path: fixture_path("on-agent-usage-budget.workflow.js"),
+        args: json!({}),
+        agent_provider: &provider,
+        budget_total: Some(20),
+        budget_spent: 0,
+        nesting_depth: 0,
+    })
+    .expect("workflow should run");
+
+    assert_eq!(
+        result.output.result,
+        json!({
+            "before": 0,
+            "first": "fixed: first custom usage",
+            "afterFirst": 7,
+            "second": "fixed: second custom usage",
+            "afterSecond": 14,
+        })
+    );
+    assert_eq!(result.budget.total, Some(20));
+    assert_eq!(result.budget.spent, 14);
+}
+
+#[test]
 fn runs_existing_examples_with_debug_provider() {
     for example in [
+        "budget.mjs",
         "hello.mjs",
         "refine-agent-providers.mjs",
         "stock.mjs",

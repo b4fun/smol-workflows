@@ -46,7 +46,7 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
         script_path: PathBuf::from(script_path),
         args: Value::Object(options.args),
         agent_provider: provider.as_ref(),
-        budget_total: None,
+        budget_total: options.budget_allowance,
         budget_spent: 0,
         nesting_depth: 0,
     })?;
@@ -82,6 +82,7 @@ struct RunCliOptions {
     backend: String,
     agent_provider: String,
     args: Map<String, Value>,
+    budget_allowance: Option<u64>,
 }
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
@@ -89,6 +90,10 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut backend = "simple".to_string();
     let mut agent_provider =
         env::var("SMOL_WF_AGENT_PROVIDER").unwrap_or_else(|_| "debug".to_string());
+    let mut budget_allowance = env::var("SMOL_WF_BUDGET_ALLOWANCE")
+        .ok()
+        .map(|value| parse_non_negative_integer(&value, "SMOL_WF_BUDGET_ALLOWANCE"))
+        .transpose()?;
     let mut index = 0;
 
     while index < argv.len() {
@@ -107,6 +112,19 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         if token == "--backend" || token.starts_with("--backend=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
             backend = parsed.value;
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
+        if token == "--budget-allowance" || token.starts_with("--budget-allowance=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            budget_allowance = Some(parse_non_negative_integer(
+                &parsed.value,
+                "--budget-allowance",
+            )?);
             if parsed.consumed_next {
                 index += 1;
             }
@@ -137,6 +155,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         backend,
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
+        budget_allowance,
     })
 }
 
@@ -262,6 +281,17 @@ fn parse_flag_token(token: &str, next: Option<&str>) -> anyhow::Result<ParsedFla
     }
 }
 
+fn parse_non_negative_integer(value: &str, name: &str) -> anyhow::Result<u64> {
+    let trimmed = value.trim();
+    let parsed = trimmed
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("{name} must be a non-negative integer"))?;
+    if parsed.to_string() != trimmed {
+        anyhow::bail!("{name} must be a non-negative integer");
+    }
+    Ok(parsed)
+}
+
 fn format_log_value(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -271,6 +301,6 @@ fn format_log_value(value: &Value) -> String {
 
 fn print_help() {
     eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug] [--args-<name> value] [--args-from-file <json-file>]"
+        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug] [--budget-allowance outputTokens] [--args-<name> value] [--args-from-file <json-file>]"
     );
 }

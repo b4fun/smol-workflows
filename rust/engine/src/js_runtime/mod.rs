@@ -165,7 +165,13 @@ impl WorkflowRuntimeRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum WorkflowRuntimeRequestResolution {
     Ok(Value),
-    Err { message: String },
+    OkWithBudget {
+        value: Value,
+        budget: WorkflowBudgetSnapshot,
+    },
+    Err {
+        message: String,
+    },
 }
 
 /// Result of polling a workflow JavaScript runtime execution.

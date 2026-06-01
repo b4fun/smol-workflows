@@ -85,6 +85,70 @@ fn run_rejects_unprefixed_run_args() {
 }
 
 #[test]
+fn run_supports_budget_allowance_flag() {
+    let output = smol_wf()
+        .args([
+            "run",
+            "../../examples/budget.mjs",
+            "--budget-allowance",
+            "20",
+            "--args-topic",
+            "rust cli budget",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout["budget"]["total"], 20);
+}
+
+#[test]
+fn run_supports_budget_allowance_env() {
+    let output = smol_wf()
+        .env("SMOL_WF_BUDGET_ALLOWANCE", "15")
+        .args([
+            "run",
+            "../../examples/budget.mjs",
+            "--args-topic",
+            "rust cli budget env",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout["budget"]["total"], 15);
+}
+
+#[test]
+fn run_rejects_invalid_budget_allowance() {
+    let output = smol_wf()
+        .args([
+            "run",
+            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "--budget-allowance",
+            "-1",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--budget-allowance must be a non-negative integer"));
+}
+
+#[test]
 fn run_supports_agent_provider_debug() {
     let output = smol_wf()
         .args([
