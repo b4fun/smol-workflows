@@ -140,7 +140,13 @@ pub fn truncate(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
-        format!("{}…", &text[..max_len])
+        let end = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= max_len)
+            .last()
+            .unwrap_or(0);
+        format!("{}…", &text[..end])
     }
 }
 
