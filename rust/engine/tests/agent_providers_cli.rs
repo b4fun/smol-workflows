@@ -316,6 +316,22 @@ fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
     assert_eq!(structured.output["summary"], "structured pi summary");
     assert_eq!(structured.output["extensionRegisteredTool"], true);
 
+    let recovered = provider
+        .run(AgentProviderRunInput {
+            prompt: "structured-tool-error-with-args".into(),
+            options: Some(json!({
+                "schema": {
+                    "type": "object",
+                    "properties": { "summary": { "type": "string" } },
+                    "required": ["summary"]
+                }
+            })),
+            context: Default::default(),
+        })
+        .expect("provider should recover attempted structured output");
+    assert_eq!(recovered.output["summary"], "structured pi summary");
+    assert_eq!(recovered.output["extensionRegisteredTool"], true);
+
     let cache = provider.run(input("cache-alias")).unwrap().usage.unwrap();
     assert_eq!(cache.cache_read_tokens, Some(4));
     assert_eq!(cache.cache_write_tokens, Some(2));

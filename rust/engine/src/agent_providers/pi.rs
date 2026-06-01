@@ -354,38 +354,101 @@ fn infer_schema_type(schema: &serde_json::Map<String, Value>) -> Option<&'static
 
 fn extract_structured_tool_output(events: &[Value]) -> anyhow::Result<Value> {
     let mut output = None;
+    let mut recovered_output = None;
+    let mut started_args = HashMap::<String, Value>::new();
     let mut calls = 0;
+    let mut successes = 0;
     let mut errors = 0;
+
     for event in events {
         let Some(record) = event.as_object() else {
             continue;
         };
-        if record.get("type").and_then(Value::as_str) == Some("tool_execution_end")
-            && record.get("toolName").and_then(Value::as_str)
-                == Some("smol_workflows_structured_output")
+        if record.get("toolName").and_then(Value::as_str)
+            != Some("smol_workflows_structured_output")
         {
-            calls += 1;
-            if record.get("isError").and_then(Value::as_bool) == Some(true) {
-                errors += 1;
-                continue;
-            }
-            if let Some(details) = get_path(event, &["result", "details"]) {
-                output = Some(details.clone());
-            }
+            continue;
         }
+
+        if record.get("type").and_then(Value::as_str) == Some("tool_execution_start") {
+            if let (Some(tool_call_id), Some(args)) = (
+                record.get("toolCallId").and_then(Value::as_str),
+                record.get("args").or_else(|| record.get("parameters")),
+            ) {
+                started_args.insert(tool_call_id.to_string(), args.clone());
+            }
+            continue;
+        }
+
+        if record.get("type").and_then(Value::as_str) != Some("tool_execution_end") {
+            continue;
+        }
+
+        calls += 1;
+        if record.get("isError").and_then(Value::as_bool) == Some(true) {
+            errors += 1;
+            if recovered_output.is_none() {
+                recovered_output = recover_structured_tool_arguments(event, &started_args);
+            }
+            continue;
+        }
+
+        if let Some(details) = get_path(event, &["result", "details"]) {
+            successes += 1;
+            output = Some(details.clone());
+        }
+    }
+
+    if let Some(output) = output {
+        if errors > 0 {
+            log::debug!(
+                "Pi structured-output tool had {errors} failed attempt(s) before a successful output"
+            );
+        }
+        if successes > 1 {
+            log::debug!("Pi structured-output tool returned {successes} successful outputs; using the last one");
+        }
+        return Ok(output);
+    }
+
+    if let Some(output) = recovered_output {
+        log::debug!(
+            "Pi structured-output tool failed, but attempted tool arguments were recovered from events"
+        );
+        return Ok(output);
+    }
+
+    if calls == 0 {
+        bail!("Pi provider did not call smol_workflows_structured_output for schema output");
     }
     if errors > 0 {
         bail!("Pi smol_workflows_structured_output tool failed");
     }
-    if calls == 0 {
-        bail!("Pi provider did not call smol_workflows_structured_output for schema output");
+    bail!("Pi smol_workflows_structured_output tool did not return details")
+}
+
+fn recover_structured_tool_arguments(
+    event: &Value,
+    started_args: &HashMap<String, Value>,
+) -> Option<Value> {
+    for path in [
+        &["result", "details"][..],
+        &["result", "input"],
+        &["state", "input"],
+        &["input"],
+        &["args"],
+        &["parameters"],
+    ] {
+        if let Some(value) = get_path(event, path) {
+            return Some(value.clone());
+        }
     }
-    if calls > 1 {
-        bail!("Pi provider called smol_workflows_structured_output more than once");
-    }
-    output.ok_or_else(|| {
-        anyhow::anyhow!("Pi smol_workflows_structured_output tool did not return details")
-    })
+
+    event
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .and_then(|tool_call_id| started_args.get(tool_call_id))
+        .cloned()
 }
 
 fn extract_output(events: &[Value]) -> Option<String> {

@@ -36,17 +36,27 @@ console.log(JSON.stringify({ type: 'session', id: 'pi-session-1' }))
 if (structured) {
   const details = JSON.parse(output)
   console.log(JSON.stringify({ type: 'tool_execution_start', toolName: 'smol_workflows_structured_output', toolCallId: 'call-1', args: details }))
-  console.log(JSON.stringify({
-    type: 'tool_execution_end',
-    toolName: 'smol_workflows_structured_output',
-    toolCallId: 'call-1',
-    result: {
-      content: [{ type: 'text', text: 'Structured output captured successfully.' }],
-      details,
-      terminate: true,
-    },
-    isError: false,
-  }))
+  if (prompt.includes('structured-tool-error-with-args')) {
+    console.log(JSON.stringify({
+      type: 'tool_execution_end',
+      toolName: 'smol_workflows_structured_output',
+      toolCallId: 'call-1',
+      result: { content: [{ type: 'text', text: 'Tool validation failed.' }] },
+      isError: true,
+    }))
+  } else {
+    console.log(JSON.stringify({
+      type: 'tool_execution_end',
+      toolName: 'smol_workflows_structured_output',
+      toolCallId: 'call-1',
+      result: {
+        content: [{ type: 'text', text: 'Structured output captured successfully.' }],
+        details,
+        terminate: true,
+      },
+      isError: false,
+    }))
+  }
 } else {
   console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: output }], usage } }))
   console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: output }], usage }] }))
