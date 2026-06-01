@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use smol_workflow_engine::agent_providers::{AgentProvider, DebugAgentProvider};
+use smol_workflow_engine::agent_providers::create_agent_provider;
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::env;
 use std::fs;
@@ -68,13 +68,6 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&result.output.result)?);
     Ok(())
-}
-
-fn create_agent_provider(name: &str) -> anyhow::Result<Box<dyn AgentProvider>> {
-    match name {
-        "debug" => Ok(Box::new(DebugAgentProvider::new())),
-        other => anyhow::bail!("Unknown agent provider: {other}"),
-    }
 }
 
 #[derive(Debug)]
@@ -301,6 +294,6 @@ fn format_log_value(value: &Value) -> String {
 
 fn print_help() {
     eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug] [--budget-allowance outputTokens] [--args-<name> value] [--args-from-file <json-file>]"
+        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--args-<name> value] [--args-from-file <json-file>]"
     );
 }

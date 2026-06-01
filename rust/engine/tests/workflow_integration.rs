@@ -15,6 +15,7 @@ fn example_path(name: &str) -> PathBuf {
 }
 
 struct FixedUsageProvider;
+struct OptionsEchoProvider;
 
 impl AgentProvider for FixedUsageProvider {
     fn name(&self) -> &str {
@@ -39,6 +40,36 @@ impl AgentProvider for FixedUsageProvider {
                 total_tokens: Some(107),
                 ..AgentUsage::default()
             }),
+            raw: None,
+        })
+    }
+}
+
+impl AgentProvider for OptionsEchoProvider {
+    fn name(&self) -> &str {
+        "options-echo"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        Ok(AgentProviderResult {
+            output: json!({
+                "prompt": input.prompt,
+                "options": input.options,
+                "context": {
+                    "phase": input.context.phase,
+                    "key": input.context.key,
+                }
+            }),
+            session_id: None,
+            usage: None,
             raw: None,
         })
     }
@@ -202,16 +233,79 @@ fn rejects_nested_child_workflow_fixture() {
 
 #[test]
 fn applies_phase_metadata_defaults() {
-    let result = run_debug(
-        fixture_path("phase-provider-metadata.workflow.js"),
-        json!({}),
-    );
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("phase-defaults.workflow.js");
+    std::fs::write(
+        &script_path,
+        r#"
+export const meta = {
+  "name": "phase-defaults",
+  "description": "phase defaults",
+  "phases": [
+    { "title": "Research", "model": "opus" },
+    { "title": "Verify", "model": "sonnet" }
+  ]
+};
+phase("Research");
+const inherited = await agent("inherited phase defaults");
+const explicit = await agent("explicit agent options", { model: "haiku" });
+const phaseOverride = await agent("phase override defaults", { phase: "Verify" });
+export default { inherited, explicit, phaseOverride };
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let provider = OptionsEchoProvider;
+    let result = run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: &provider,
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+    })
+    .expect("workflow should run");
 
     assert_eq!(
-        result.output.result["inherited"],
-        json!("echo: inherited phase defaults")
+        result.output.result["inherited"]["options"],
+        json!({ "phase": "Research", "model": "opus" })
     );
-    assert_eq!(result.agent_calls.len(), 3);
+    assert_eq!(
+        result.output.result["explicit"]["options"],
+        json!({ "model": "haiku", "phase": "Research" })
+    );
+    assert_eq!(
+        result.output.result["phaseOverride"]["options"],
+        json!({ "phase": "Verify", "model": "sonnet" })
+    );
+}
+
+#[test]
+fn agent_provider_option_overrides_default_provider() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("provider-override.workflow.js");
+    std::fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "provider-override", description: "provider override" };
+export default await agent("override me", { provider: "debug" });
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let provider = FixedUsageProvider;
+    let result = run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: &provider,
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+    })
+    .expect("workflow should run");
+
+    assert_eq!(result.output.result, json!("echo: override me"));
+    assert_eq!(result.budget.spent, 5);
 }
 
 #[test]

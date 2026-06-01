@@ -1,4 +1,6 @@
-use crate::agent_providers::{AgentProvider, AgentProviderContext, AgentProviderRunInput};
+use crate::agent_providers::{
+    create_agent_provider, AgentProvider, AgentProviderContext, AgentProviderRunInput,
+};
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
     WorkflowBudgetSnapshot, WorkflowJSRuntime, WorkflowModuleInput, WorkflowModuleOutput,
@@ -165,11 +167,21 @@ impl RunState<'_> {
                 .map(ToString::to_string),
             cwd: self.script_path.parent().map(Path::to_path_buf),
         };
-        let result = self.agent_provider.run(AgentProviderRunInput {
+        let provider_override = options
+            .as_ref()
+            .and_then(|options| options.get("provider"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let input = AgentProviderRunInput {
             prompt,
             options,
             context,
-        })?;
+        };
+        let result = if let Some(provider_override) = provider_override {
+            create_agent_provider(&provider_override)?.run(input)?
+        } else {
+            self.agent_provider.run(input)?
+        };
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
