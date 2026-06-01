@@ -140,7 +140,7 @@ const result = await agent('Find likely bugs in the touched files.', {
 
 Use `.agents/workflows/<name>.mjs` for project workflows. Use `.claude/workflows/<name>.js` only when compatibility with Claude-style named workflows is important.
 
-Also create an args file for validation, for example `.agents/workflows/runs/<name>/args.json`. It must contain a JSON object.
+Also create an args file for validation next to the workflow, for example `.agents/workflows/<name>.args.json`. It must contain a JSON object.
 
 ## Validate
 

@@ -31,7 +31,7 @@ Before running, inspect or create `<args-file>`:
 
 1. If the user supplied an existing args file, read it and verify it is a JSON object.
 2. If the file does not exist, ask the user what args to write, then create it.
-3. If the user supplied JSON in the prompt instead of a file path, write it to a sensible path such as `.agents/workflows/runs/<slug>/args.json`, then use that file.
+3. If the user supplied JSON in the prompt instead of a file path, write it to a sensible path next to the workflow, such as `.agents/workflows/<name>.args.json`, then use that file.
 4. Current CLI limitation: `--args-from-file` expects a JSON object. Wrap arrays/scalars as `{ "items": [...] }` or another named field.
 
 ## Checklist
