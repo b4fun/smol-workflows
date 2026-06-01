@@ -6,8 +6,30 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const packageRoot = path.resolve(__dirname, '../..')
 const skillsDir = path.resolve(__dirname, '../plugins/smol-workflows/skills')
 const helperPath = path.resolve(skillsDir, 'scripts/smol-wf.sh')
+
+async function localSmolWfBin() {
+  if (process.env.SMOL_WF_BIN) return process.env.SMOL_WF_BIN
+  for (const candidate of [
+    path.resolve(packageRoot, 'target/release/smol-wf'),
+    path.resolve(packageRoot, 'target/debug/smol-wf'),
+    path.resolve(packageRoot, 'target/release/smol-wf.exe'),
+    path.resolve(packageRoot, 'target/debug/smol-wf.exe'),
+  ]) {
+    if (await exists(candidate)) return candidate
+  }
+  return undefined
+}
+
+async function helperEnv(overrides = {}) {
+  return {
+    ...process.env,
+    ...((await localSmolWfBin()) ? { SMOL_WF_BIN: await localSmolWfBin() } : {}),
+    ...overrides,
+  }
+}
 
 async function exists(file) {
   try {
@@ -68,7 +90,7 @@ const listWorkflowsTool = tool({
     const result = await runProcess('bash', [helperPath, 'list'], {
       cwd: context.directory,
       signal: context.abort,
-      env: process.env,
+      env: await helperEnv(),
     })
 
     if (result.code !== 0) {
@@ -106,11 +128,10 @@ const runWorkflowTool = tool({
     // Validate early for clearer errors.
     parseJsonObject(await readFile(argsPath, 'utf8'), 'args file')
 
-    const env = {
-      ...process.env,
+    const env = await helperEnv({
       ...(input.agentProvider ? { SMOL_WF_AGENT_PROVIDER: input.agentProvider } : {}),
       ...(input.maxParallelAgents ? { SMOL_WF_MAX_PARALLEL_AGENTS: String(input.maxParallelAgents) } : {}),
-    }
+    })
 
     const result = await runProcess(
       'bash',
