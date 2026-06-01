@@ -20,10 +20,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: smol-wf-linux-x86_64.tar.gz
             binary: smol-wf
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: smol-wf-macos-x86_64.tar.gz
-            binary: smol-wf
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: smol-wf-macos-aarch64.tar.gz
@@ -45,6 +41,10 @@ jobs:
 
       - name: Build CLI
         run: cargo build --release --locked -p smol-workflow-cli --target ${{ matrix.target }}
+
+      - name: Ad-hoc sign macOS binary
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - target/${{ matrix.target }}/release/${{ matrix.binary }}
 
       - name: Package Unix binary
         if: runner.os != 'Windows'
