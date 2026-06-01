@@ -5,8 +5,8 @@ use crate::agent_providers::{
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
     WorkflowBudgetSnapshot, WorkflowJSRuntime, WorkflowModuleInput, WorkflowModuleOutput,
-    WorkflowRef, WorkflowRuntimeCall, WorkflowRuntimePoll, WorkflowRuntimeRequest,
-    WorkflowRuntimeRequestResolution,
+    WorkflowRef, WorkflowRuntimeCall, WorkflowRuntimeExecution, WorkflowRuntimePoll,
+    WorkflowRuntimeRequest, WorkflowRuntimeRequestResolution,
 };
 use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
@@ -15,7 +15,8 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::task::JoinSet;
+use tokio::sync::mpsc;
+use tokio::task::{JoinSet, LocalSet};
 
 pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
 pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
@@ -49,6 +50,10 @@ pub struct WorkflowPhaseCall {
 }
 
 pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
+    LocalSet::new().run_until(run_workflow_inner(options)).await
+}
+
+async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
     log::debug!(
         "run_workflow start script={} provider={} nesting_depth={} budget_total={:?} budget_spent={}",
         options.script_path.display(),
@@ -74,7 +79,7 @@ pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<Run
     let source = fs::read_to_string(&script_path)
         .with_context(|| format!("failed to read workflow script {}", script_path.display()))?;
     let runtime = RQuickJSWorkflowRuntime::new();
-    let mut execution = runtime.start_module(WorkflowModuleInput {
+    let execution = runtime.start_module(WorkflowModuleInput {
         source,
         source_name: script_path.to_string_lossy().into_owned(),
         args: options.args,
@@ -84,6 +89,10 @@ pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<Run
         },
         sandbox: Default::default(),
     })?;
+
+    let (js_commands, js_command_rx) = mpsc::channel::<JsCommand>(64);
+    let (js_event_tx, mut js_events) = mpsc::channel::<JsEvent>(64);
+    tokio::task::spawn_local(js_runtime_actor(execution, js_command_rx, js_event_tx));
 
     let mut state = RunState {
         script_path,
@@ -107,122 +116,133 @@ pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<Run
     let mut agent_tasks = JoinSet::<AgentTaskCompletion>::new();
 
     loop {
-        let mut made_progress = false;
-
-        loop {
-            match execution.poll()? {
-                WorkflowRuntimePoll::Call(call) => {
-                    state.handle_call(call);
-                    made_progress = true;
-                }
-                WorkflowRuntimePoll::Request(request) => {
-                    log::debug!(
-                        "workflow runtime request id={} kind={}",
-                        request.id(),
-                        request.kind()
-                    );
-                    let mut requests = execution.take_pending_requests()?;
-                    if requests.is_empty() {
-                        pending_requests.push_back(request);
-                    } else {
-                        pending_requests.extend(requests.drain(..));
-                    }
-                    made_progress = true;
-                }
-                WorkflowRuntimePoll::Complete(output) => {
-                    log::debug!(
-                        "run_workflow complete script={} budget_spent={}",
-                        state.script_path.display(),
-                        state.budget.spent
-                    );
-                    return Ok(RunWorkflowResult {
-                        output,
-                        logs: state.logs,
-                        phases: state.phases,
-                        agent_calls: state.agent_calls,
-                        workflow_calls: state.workflow_calls,
-                        budget: state.budget,
-                    });
-                }
-                WorkflowRuntimePoll::Pending => break,
-            }
-        }
-
-        while state.agent_capacity_available(agent_tasks.len()) {
-            let Some(request) = pending_requests.pop_front() else {
-                break;
-            };
-
-            match request {
-                WorkflowRuntimeRequest::Agent { .. } => {
-                    let (id, prepared) = state.prepare_agent_request(request);
-                    state.spawn_agent_task(&mut agent_tasks, id, prepared);
-                    made_progress = true;
-                }
-                WorkflowRuntimeRequest::Workflow {
-                    id,
-                    workflow_ref,
-                    args,
-                } => {
-                    state.workflow_calls.push(WorkflowRuntimeRequest::Workflow {
-                        id: id.clone(),
-                        workflow_ref: workflow_ref.clone(),
-                        args: args.clone(),
-                    });
-                    let resolution = match state.handle_workflow(workflow_ref, args).await {
-                        Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
-                            value,
-                            budget: state.budget.clone(),
-                        },
-                        Err(error) => WorkflowRuntimeRequestResolution::Err {
-                            message: error.to_string(),
-                        },
-                    };
-                    execution.resolve_request(&id, resolution)?;
-                    made_progress = true;
-                }
-            }
-        }
+        state
+            .start_pending_requests(&mut pending_requests, &mut agent_tasks, &js_commands)
+            .await?;
 
         if agent_tasks.is_empty() {
-            if !made_progress {
-                // Preserve the old polling semantics for promise jobs that may be
-                // ready on the next QuickJS job drain.
-                continue;
+            let event = js_events
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("JavaScript runtime actor stopped unexpectedly"))?;
+            if let Some(result) = state.handle_js_event(event, &mut pending_requests).await? {
+                let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
+                return Ok(result);
             }
             continue;
         }
 
-        if made_progress
-            && !pending_requests.is_empty()
-            && state.agent_capacity_available(agent_tasks.len())
-        {
-            continue;
+        tokio::select! {
+            event = js_events.recv() => {
+                let event = event.ok_or_else(|| anyhow!("JavaScript runtime actor stopped unexpectedly"))?;
+                if let Some(result) = state.handle_js_event(event, &mut pending_requests).await? {
+                    let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
+                    return Ok(result);
+                }
+            }
+            completion = agent_tasks.join_next() => {
+                let completion = completion
+                    .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
+                    .map_err(|error| anyhow!("agent provider task failed: {error}"))?;
+                let id = completion.id;
+                let resolution = match completion
+                    .result
+                    .and_then(|result| state.apply_agent_result(result))
+                {
+                    Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
+                        value,
+                        budget: state.budget.clone(),
+                    },
+                    Err(error) => WorkflowRuntimeRequestResolution::Err {
+                        message: error.to_string(),
+                    },
+                };
+                send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await?;
+            }
         }
-
-        let completion = agent_tasks
-            .join_next()
-            .await
-            .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
-            .unwrap_or_else(|error| AgentTaskCompletion {
-                id: "<panicked>".to_string(),
-                result: Err(anyhow!("agent provider worker failed: {error}")),
-            });
-        let id = completion.id;
-        let resolution = match completion
-            .result
-            .and_then(|result| state.apply_agent_result(result))
-        {
-            Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
-                value,
-                budget: state.budget.clone(),
-            },
-            Err(error) => WorkflowRuntimeRequestResolution::Err {
-                message: error.to_string(),
-            },
-        };
-        execution.resolve_request(&id, resolution)?;
     }
+}
+
+enum JsCommand {
+    ResolveRequest {
+        id: String,
+        resolution: WorkflowRuntimeRequestResolution,
+    },
+    Shutdown,
+}
+
+enum JsEvent {
+    Call(WorkflowRuntimeCall),
+    Request(WorkflowRuntimeRequest),
+    Complete(WorkflowModuleOutput),
+    Error(String),
+}
+
+async fn js_runtime_actor(
+    mut execution: Box<dyn WorkflowRuntimeExecution>,
+    mut commands: mpsc::Receiver<JsCommand>,
+    events: mpsc::Sender<JsEvent>,
+) {
+    let mut outstanding_requests = 0usize;
+    loop {
+        match execution.poll() {
+            Ok(WorkflowRuntimePoll::Call(call)) => {
+                if events.send(JsEvent::Call(call)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(WorkflowRuntimePoll::Request(request)) => {
+                let requests = match execution.take_pending_requests() {
+                    Ok(requests) if requests.is_empty() => vec![request],
+                    Ok(requests) => requests,
+                    Err(error) => {
+                        let _ = events.send(JsEvent::Error(error.to_string())).await;
+                        return;
+                    }
+                };
+                outstanding_requests = outstanding_requests.saturating_add(requests.len());
+                for request in requests {
+                    if events.send(JsEvent::Request(request)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Ok(WorkflowRuntimePoll::Complete(output)) => {
+                let _ = events.send(JsEvent::Complete(output)).await;
+                return;
+            }
+            Ok(WorkflowRuntimePoll::Pending) => {
+                if outstanding_requests == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    continue;
+                }
+                match commands.recv().await {
+                    Some(JsCommand::ResolveRequest { id, resolution }) => {
+                        outstanding_requests = outstanding_requests.saturating_sub(1);
+                        if let Err(error) = execution.resolve_request(&id, resolution) {
+                            let _ = events.send(JsEvent::Error(error.to_string())).await;
+                            return;
+                        }
+                    }
+                    Some(JsCommand::Shutdown) | None => return,
+                }
+            }
+            Err(error) => {
+                let _ = events.send(JsEvent::Error(error.to_string())).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn send_js_command(
+    commands: &mpsc::Sender<JsCommand>,
+    command: JsCommand,
+) -> anyhow::Result<()> {
+    commands
+        .send(command)
+        .await
+        .map_err(|_| anyhow!("JavaScript runtime actor stopped unexpectedly"))
 }
 
 struct RunState<'a> {
@@ -251,6 +271,91 @@ struct AgentTaskCompletion {
 }
 
 impl<'a> RunState<'a> {
+    async fn handle_js_event(
+        &mut self,
+        event: JsEvent,
+        pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
+    ) -> anyhow::Result<Option<RunWorkflowResult>> {
+        match event {
+            JsEvent::Call(call) => self.handle_call(call),
+            JsEvent::Request(request) => {
+                log::debug!(
+                    "workflow runtime request id={} kind={}",
+                    request.id(),
+                    request.kind()
+                );
+                pending_requests.push_back(request);
+            }
+            JsEvent::Complete(output) => {
+                log::debug!(
+                    "run_workflow complete script={} budget_spent={}",
+                    self.script_path.display(),
+                    self.budget.spent
+                );
+                return Ok(Some(RunWorkflowResult {
+                    output,
+                    logs: std::mem::take(&mut self.logs),
+                    phases: std::mem::take(&mut self.phases),
+                    agent_calls: std::mem::take(&mut self.agent_calls),
+                    workflow_calls: std::mem::take(&mut self.workflow_calls),
+                    budget: self.budget.clone(),
+                }));
+            }
+            JsEvent::Error(message) => bail!(message),
+        }
+        Ok(None)
+    }
+
+    async fn start_pending_requests(
+        &mut self,
+        pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
+        agent_tasks: &mut JoinSet<AgentTaskCompletion>,
+        js_commands: &mpsc::Sender<JsCommand>,
+    ) -> anyhow::Result<()> {
+        loop {
+            let Some(request) = pending_requests.front() else {
+                return Ok(());
+            };
+            if matches!(request, WorkflowRuntimeRequest::Agent { .. })
+                && !self.agent_capacity_available(agent_tasks.len())
+            {
+                return Ok(());
+            }
+
+            let request = pending_requests
+                .pop_front()
+                .expect("pending request should exist");
+            match request {
+                WorkflowRuntimeRequest::Agent { .. } => {
+                    let (id, prepared) = self.prepare_agent_request(request);
+                    self.spawn_agent_task(agent_tasks, id, prepared);
+                }
+                WorkflowRuntimeRequest::Workflow {
+                    id,
+                    workflow_ref,
+                    args,
+                } => {
+                    self.workflow_calls.push(WorkflowRuntimeRequest::Workflow {
+                        id: id.clone(),
+                        workflow_ref: workflow_ref.clone(),
+                        args: args.clone(),
+                    });
+                    let resolution = match self.handle_workflow(workflow_ref, args).await {
+                        Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
+                            value,
+                            budget: self.budget.clone(),
+                        },
+                        Err(error) => WorkflowRuntimeRequestResolution::Err {
+                            message: error.to_string(),
+                        },
+                    };
+                    send_js_command(js_commands, JsCommand::ResolveRequest { id, resolution })
+                        .await?;
+                }
+            }
+        }
+    }
+
     fn handle_call(&mut self, call: WorkflowRuntimeCall) {
         match call {
             WorkflowRuntimeCall::Log { values } => {
@@ -401,7 +506,7 @@ impl<'a> RunState<'a> {
             WorkflowRef::Name(name) => resolve_named_workflow(&name)?,
         };
         log::debug!("child workflow call script={}", script_path.display());
-        let child = Box::pin(run_workflow(RunWorkflowOptions {
+        let child = Box::pin(run_workflow_inner(RunWorkflowOptions {
             script_path,
             args: args.unwrap_or(Value::Null),
             agent_provider: Arc::clone(&self.agent_provider),
