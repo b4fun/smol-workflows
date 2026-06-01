@@ -320,7 +320,11 @@ function findUsageObject(value: unknown): Record<string, unknown> | undefined {
     return record.usage as Record<string, unknown>;
   }
 
-  for (const item of Object.values(record)) {
+  for (const [key, item] of Object.entries(record)) {
+    if (key === "usage" || key === "cost") {
+      continue;
+    }
+
     const found = findUsageObject(item);
 
     if (found) {

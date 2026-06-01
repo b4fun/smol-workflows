@@ -346,7 +346,7 @@ Implementation details:
 - Child workflows receive a snapshot of the shared budget when their runner starts.
 - After each agent call or child workflow completes, the parent sends an updated budget snapshot to the runner over IPC.
 - This keeps `budget.spent()` and `budget.remaining()` live enough for workflow control flow while preserving runner isolation.
-- Custom `onAgent` handlers currently return only the agent output, so they do not contribute usage unless their implementation is later extended to report usage.
+- Custom `onAgent` handlers can contribute usage when they return `{ output, usage }`; handlers that return only an output value contribute zero spend.
 - Providers without usage reporting contribute zero spend.
 
 Follow-up: budget accounting should eventually be backed by an authoritative run/session data source rather than parent-child IPC snapshots. That would make accounting more robust for persisted runs, resume/cache behavior, provider retries, and durable backends.

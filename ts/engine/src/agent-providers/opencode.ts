@@ -9,10 +9,18 @@ import type {
 } from "./types.js";
 
 export type OpenCodeAgentProviderOptions = AgentProviderOptions & {
-  /** Command/subcommand prefix before engine-managed flags. Defaults to `["run"]`. */
+  /** Command/subcommand prefix before engine-managed run flags. Defaults to `["run"]`. */
   subcommand?: readonly string[];
-  /** Extra CLI arguments inserted after the subcommand and before engine-managed flags. */
+  /** Extra CLI arguments inserted after the run subcommand and before engine-managed flags. */
   args?: readonly string[];
+  /** Command/subcommand prefix for schema-backed server mode. Defaults to `["serve"]`. */
+  serverSubcommand?: readonly string[];
+  /** Extra CLI arguments inserted after the server subcommand and before engine-managed server flags. */
+  serverArgs?: readonly string[];
+  /** Retry count passed to OpenCode's json_schema format. Defaults to 2. */
+  structuredOutputRetryCount?: number;
+  /** Timeout for waiting for `opencode serve` to print its listening URL. Defaults to 15s. */
+  serverStartupTimeoutMs?: number;
 };
 
 export function createOpenCodeAgentProvider(
@@ -20,7 +28,7 @@ export function createOpenCodeAgentProvider(
 ): AgentProvider {
   return {
     name: "opencode",
-    schemaMode: "prompt",
+    schemaMode: "builtin",
     usageMode: "builtin",
     async run(input) {
       return await runOpenCode(input, options);
@@ -32,10 +40,12 @@ async function runOpenCode(
   input: AgentProviderRunInput,
   options: OpenCodeAgentProviderOptions,
 ): Promise<AgentProviderResult> {
+  if (input.options?.schema !== undefined) {
+    return await runOpenCodeStructured(input, options);
+  }
+
   const command = options.command ?? "opencode";
-  const prompt = input.options?.schema
-    ? withSchemaInstruction(input.prompt, input.options.schema)
-    : input.prompt;
+  const prompt = input.prompt;
   const args = [
     ...(options.subcommand ?? ["run"]),
     ...(options.args ?? []),
@@ -54,9 +64,7 @@ async function runOpenCode(
   });
   const raw = parseOutput(stdout);
   const candidate = extractOutput(raw) ?? stdout;
-  const output = input.options?.schema
-    ? parseStructuredOutput(String(candidate))
-    : String(candidate).trimEnd();
+  const output = String(candidate).trimEnd();
 
   return {
     output,
@@ -143,13 +151,231 @@ async function runCommand(
   });
 }
 
-function withSchemaInstruction(prompt: string, schema: unknown): string {
-  return [
-    prompt,
-    "",
-    "Return ONLY valid JSON matching this JSON Schema. Do not include markdown fences or explanatory text.",
-    JSON.stringify(schema, null, 2),
-  ].join("\n");
+async function runOpenCodeStructured(
+  input: AgentProviderRunInput,
+  options: OpenCodeAgentProviderOptions,
+): Promise<AgentProviderResult> {
+  const command = options.command ?? "opencode";
+  const server = await startOpenCodeServer(command, options, input);
+
+  try {
+    const directory = input.context.cwd ?? options.cwd ?? process.cwd();
+    const session = await request(server.url, "/session", {
+      method: "POST",
+      query: { directory },
+      body: {
+        title: "smol-workflows structured output",
+        ...(input.options?.agentType ? { agent: input.options.agentType } : {}),
+      },
+      signal: input.context.signal,
+    });
+    const sessionId = extractSessionID(session) ?? (isRecord(session) && typeof session.id === "string" ? session.id : undefined);
+
+    if (!sessionId) {
+      throw new Error(`OpenCode create-session response did not include a session id: ${JSON.stringify(session)}`);
+    }
+
+    const response = await request(server.url, `/session/${encodeURIComponent(sessionId)}/message`, {
+      method: "POST",
+      query: { directory },
+      body: {
+        ...(input.options?.model ? { model: splitModel(input.options.model) } : {}),
+        ...(input.options?.agentType ? { agent: input.options.agentType } : {}),
+        parts: [{ type: "text", text: input.prompt }],
+        format: {
+          type: "json_schema",
+          schema: input.options?.schema,
+          retryCount: options.structuredOutputRetryCount ?? 2,
+        },
+      },
+      signal: input.context.signal,
+    });
+    const output = extractStructuredOutput(response);
+
+    if (output === undefined) {
+      throw new Error("OpenCode structured-output response did not include a structured value");
+    }
+
+    return {
+      output,
+      sessionId,
+      usage: extractUsage(response),
+      raw: toJSONValue({ session, response, serverLogs: server.logs() }),
+    };
+  } finally {
+    server.stop();
+  }
+}
+
+async function startOpenCodeServer(
+  command: string,
+  options: OpenCodeAgentProviderOptions,
+  input: AgentProviderRunInput,
+): Promise<{ url: string; stop(): void; logs(): string }> {
+  const args = [
+    ...(options.serverSubcommand ?? ["serve"]),
+    ...(options.serverArgs ?? []),
+    "--hostname", "127.0.0.1",
+    "--port", "0",
+    "--pure",
+  ];
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: input.context.cwd ?? options.cwd,
+      env: { ...process.env, ...options.env },
+      stdio: ["ignore", "pipe", "pipe"],
+      signal: input.context.signal,
+    });
+    let logs = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      rejectOnce(new Error(`Timed out waiting for OpenCode server URL${logs ? `: ${truncate(logs, 4000)}` : ""}`));
+      child.kill("SIGTERM");
+    }, options.serverStartupTimeoutMs ?? 15_000);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on("data", (chunk: string) => {
+        logs += chunk;
+        const match = logs.match(/opencode server listening on (http:\/\/[^\s]+)/);
+
+        if (match?.[1]) {
+          resolveOnce({
+            url: match[1],
+            stop() {
+              child.kill("SIGTERM");
+            },
+            logs() {
+              return logs;
+            },
+          });
+        }
+      });
+    }
+
+    child.on("error", rejectOnce);
+    child.on("close", (code, signal) => {
+      if (!settled) {
+        rejectOnce(new Error(`OpenCode server exited before it was ready with ${signal ? `signal ${signal}` : `code ${code}`}${logs ? `: ${truncate(logs, 4000)}` : ""}`));
+      }
+    });
+
+    function resolveOnce(value: { url: string; stop(): void; logs(): string }): void {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    }
+
+    function rejectOnce(error: unknown): void {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    }
+  });
+}
+
+async function request(
+  baseUrl: string,
+  path: string,
+  options: {
+    method: string;
+    query?: Record<string, unknown>;
+    body?: unknown;
+    signal?: AbortSignal;
+  },
+): Promise<unknown> {
+  const url = new URL(path, baseUrl);
+
+  for (const [key, value] of Object.entries(options.query ?? {})) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const response = await fetch(url, {
+    method: options.method,
+    headers: { "content-type": "application/json" },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    signal: options.signal,
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) as unknown : undefined;
+
+  if (!response.ok) {
+    throw new Error(`${options.method} ${url} failed with ${response.status}: ${text}`);
+  }
+
+  return data;
+}
+
+function splitModel(model: string): { providerID: string; modelID: string } {
+  const index = model.indexOf("/");
+
+  if (index <= 0 || index === model.length - 1) {
+    throw new Error(`OpenCode model must use provider/model form for structured output, got: ${model}`);
+  }
+
+  return {
+    providerID: model.slice(0, index),
+    modelID: model.slice(index + 1),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function extractStructuredOutput(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractStructuredOutput(item);
+
+      if (found !== undefined) {
+        return found;
+      }
+    }
+
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  for (const key of ["structured", "structured_output", "structuredOutput"] as const) {
+    if (Object.hasOwn(value, key)) {
+      return value[key];
+    }
+  }
+
+  if (value.type === "tool" && value.tool === "StructuredOutput") {
+    const state = value.state;
+
+    if (isRecord(state) && state.input !== undefined) {
+      return state.input;
+    }
+  }
+
+  for (const item of Object.values(value)) {
+    const found = extractStructuredOutput(item);
+
+    if (found !== undefined) {
+      return found;
+    }
+  }
+
+  return undefined;
 }
 
 function parseOutput(stdout: string): JSONValue | JSONValue[] | string {
@@ -253,75 +479,6 @@ function extractText(value: unknown): string | undefined {
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     return extractText(record.text ?? record.content ?? record.message);
-  }
-
-  return undefined;
-}
-
-function parseStructuredOutput(text: string): unknown {
-  return parseStructuredOutputText(text, new Set());
-}
-
-function parseStructuredOutputText(text: string, seen: Set<string>): unknown {
-  const trimmed = text.trim();
-
-  if (seen.has(trimmed)) {
-    throw new Error("OpenCode provider did not return valid JSON for schema output");
-  }
-
-  seen.add(trimmed);
-
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    // Continue with common provider output shapes below.
-  }
-
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-
-  if (fenced?.[1]) {
-    return parseStructuredOutputText(fenced[1], seen);
-  }
-
-  const unescaped = tryUnescapeJSONLikeText(trimmed);
-
-  if (unescaped !== undefined) {
-    return parseStructuredOutputText(unescaped, seen);
-  }
-
-  const objectText = extractLikelyJSONObjectText(trimmed);
-
-  if (objectText !== undefined) {
-    return parseStructuredOutputText(objectText, seen);
-  }
-
-  throw new Error("OpenCode provider did not return valid JSON for schema output");
-}
-
-function tryUnescapeJSONLikeText(text: string): string | undefined {
-  if (!text.includes("\\n") && !text.includes('\\"')) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(`"${text}"`) as string;
-  } catch {
-    return text.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"');
-  }
-}
-
-function extractLikelyJSONObjectText(text: string): string | undefined {
-  const objectStart = text.indexOf("{");
-  const objectEnd = text.lastIndexOf("}");
-  const arrayStart = text.indexOf("[");
-  const arrayEnd = text.lastIndexOf("]");
-
-  if (objectStart >= 0 && objectEnd > objectStart) {
-    return text.slice(objectStart, objectEnd + 1);
-  }
-
-  if (arrayStart >= 0 && arrayEnd > arrayStart) {
-    return text.slice(arrayStart, arrayEnd + 1);
   }
 
   return undefined;

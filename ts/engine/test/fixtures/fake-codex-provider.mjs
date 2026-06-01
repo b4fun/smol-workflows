@@ -47,4 +47,9 @@ if (shouldWriteOutputFile) {
     message: { role: 'assistant', content: [{ type: 'text', text: finalMessage }] },
   }))
 }
-console.log(JSON.stringify({ type: 'turn_complete', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }))
+console.log(JSON.stringify({
+  type: 'turn_complete',
+  usage: stdin.includes('cache-alias')
+    ? { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 4, cache_creation_input_tokens: 2 }
+    : { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
+}))

@@ -22,8 +22,9 @@ test("runDurableAgent checkpoints agent calls by explicit key", async () => {
     ctx,
   );
 
-  assert.equal(first, "echo: first prompt");
-  assert.equal(second, "echo: first prompt");
+  assert.equal(first.output, "echo: first prompt");
+  assert.equal(second.output, "echo: first prompt");
+  assert.equal(first.usage?.outputTokens, second.usage?.outputTokens);
   assert.deepEqual(ctx.stepCalls, ["agent:debug:research:NVDA", "agent:debug:research:NVDA"]);
   assert.equal(ctx.executedSteps.length, 1);
   assert.equal(ctx.events.length, 1);

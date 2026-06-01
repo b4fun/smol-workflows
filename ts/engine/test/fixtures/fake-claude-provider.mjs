@@ -31,12 +31,19 @@ console.log(JSON.stringify({
   home: process.env.HOME,
   projectState,
   bareMode: args.includes('--bare'),
-  usage: {
-    input_tokens: 11,
-    output_tokens: 6,
-    cache_read_input_tokens: 3,
-    cache_creation_input_tokens: 4,
-    total_tokens: 24,
-  },
+  usage: prompt.includes('usage-no-total')
+    ? {
+        input_tokens: 11,
+        output_tokens: 6,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 4,
+      }
+    : {
+        input_tokens: 11,
+        output_tokens: 6,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 4,
+        total_tokens: 24,
+      },
   total_cost_usd: 0.123,
 }))

@@ -33,6 +33,24 @@ test("claude-code provider invokes claude print mode", async () => {
   });
 });
 
+test("claude-code provider derives totals without double-counting cache reads", async () => {
+  const provider = createClaudeCodeAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-claude-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "usage-no-total",
+    context: {},
+  });
+
+  assert.equal(result.usage?.inputTokens, 11);
+  assert.equal(result.usage?.outputTokens, 6);
+  assert.equal(result.usage?.cacheReadTokens, 3);
+  assert.equal(result.usage?.cacheWriteTokens, 4);
+  assert.equal(result.usage?.totalTokens, 21);
+});
+
 test("claude-code provider passes inline json schema and parses structured output", async () => {
   const provider = createClaudeCodeAgentProvider({
     command: process.execPath,

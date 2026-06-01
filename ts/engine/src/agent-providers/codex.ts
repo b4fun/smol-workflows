@@ -473,7 +473,11 @@ function findUsageObject(value: unknown): Record<string, unknown> | undefined {
     return record.usage as Record<string, unknown>;
   }
 
-  for (const item of Object.values(record)) {
+  for (const [key, item] of Object.entries(record)) {
+    if (key === "usage" || key === "cost") {
+      continue;
+    }
+
     const found = findUsageObject(item);
 
     if (found) {
@@ -494,14 +498,28 @@ function looksLikeUsage(record: Record<string, unknown>): boolean {
     "output_tokens",
     "totalTokens",
     "total_tokens",
+    "cacheReadTokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "cacheWriteTokens",
+    "cache_write_tokens",
+    "cache_creation_input_tokens",
   ].some((key) => typeof record[key] === "number");
 }
 
 function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const inputTokens = numberField(record, "inputTokens", "input_tokens", "input");
   const outputTokens = numberField(record, "outputTokens", "output_tokens", "output");
-  const cacheReadTokens = numberField(record, "cacheReadTokens", "cache_read_tokens", "cached_input_tokens", "cacheRead");
-  const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cache_write_tokens", "cacheWrite");
+  const cacheRecord = record.cache && typeof record.cache === "object" && !Array.isArray(record.cache)
+    ? record.cache as Record<string, unknown>
+    : undefined;
+  const cacheReadTokens =
+    numberField(record, "cacheReadTokens", "cache_read_tokens", "cache_read_input_tokens", "cached_input_tokens", "cacheRead") ??
+    numberField(cacheRecord ?? {}, "read");
+  const cacheWriteTokens =
+    numberField(record, "cacheWriteTokens", "cache_write_tokens", "cache_creation_input_tokens", "cacheWrite") ??
+    numberField(cacheRecord ?? {}, "write");
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
     // `input_tokens` already reflects the prompt tokens billed (including cache hits).

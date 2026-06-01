@@ -5,13 +5,20 @@ import { inspect } from "node:util";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
 import { createAgentProvider } from "./agent-providers/index.js";
 import type { AgentProvider, AgentProviderResult, AgentUsage } from "./agent-providers/types.js";
+import {
+  formatStructuredOutputValidationError,
+  validateStructuredOutput,
+  withStructuredOutputRetryPrompt,
+} from "./schema-validation.js";
 
 export type WorkflowArgs = Record<string, unknown>;
+
+export type WorkflowAgentHandlerResult = unknown | AgentProviderResult;
 
 export type WorkflowAgentHandler = (
   prompt: string,
   options?: AgentRunOptions,
-) => unknown | Promise<unknown>;
+) => WorkflowAgentHandlerResult | Promise<WorkflowAgentHandlerResult>;
 
 export type RunWorkflowOptions = {
   scriptPath: string;
@@ -175,7 +182,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
       message: Extract<RunnerMessage, { type: "agent" }>,
     ): Promise<AgentProviderResult> {
       if (options.onAgent) {
-        return { output: await options.onAgent(message.prompt, message.options) };
+        return await runAgentWithSchemaValidation(message.prompt, message.options, async (prompt) =>
+          normalizeAgentHandlerResult(await options.onAgent!(prompt, message.options)),
+        );
       }
 
       return await runProviderAgent(message.prompt, message.options, options.agentProvider);
@@ -208,6 +217,24 @@ function isWorkflowArgs(value: unknown): value is WorkflowArgs {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function normalizeAgentHandlerResult(value: WorkflowAgentHandlerResult): AgentProviderResult {
+  if (isAgentProviderResultLike(value)) {
+    return value;
+  }
+
+  return { output: value };
+}
+
+function isAgentProviderResultLike(value: unknown): value is AgentProviderResult {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      "output" in value &&
+      ("usage" in value || "sessionId" in value || "raw" in value),
+  );
+}
+
 async function runProviderAgent(
   prompt: string,
   options?: AgentRunOptions,
@@ -216,14 +243,48 @@ async function runProviderAgent(
   const selectedProvider = options?.provider
     ? createAgentProvider(options.provider)
     : provider;
-  return await selectedProvider.run({
-    prompt,
+
+  return await runAgentWithSchemaValidation(prompt, options, async (attemptPrompt) => selectedProvider.run({
+    prompt: attemptPrompt,
     options,
     context: {
       phase: options?.phase,
       key: options?.key,
     },
-  });
+  }));
+}
+
+async function runAgentWithSchemaValidation(
+  prompt: string,
+  options: AgentRunOptions | undefined,
+  run: (prompt: string) => Promise<AgentProviderResult>,
+): Promise<AgentProviderResult> {
+  const schema = options?.schema;
+
+  if (schema === undefined) {
+    return await run(prompt);
+  }
+
+  const maxAttempts = 2;
+  let attemptPrompt = prompt;
+  let lastErrors: readonly string[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await run(attemptPrompt);
+    const validation = validateStructuredOutput(schema, result.output);
+
+    if (validation.valid) {
+      return result;
+    }
+
+    lastErrors = validation.errors;
+
+    if (attempt < maxAttempts) {
+      attemptPrompt = withStructuredOutputRetryPrompt(prompt, validation.errors);
+    }
+  }
+
+  throw new Error(formatStructuredOutputValidationError(lastErrors));
 }
 
 function getOutputTokenSpend(usage: AgentUsage | undefined): number {
