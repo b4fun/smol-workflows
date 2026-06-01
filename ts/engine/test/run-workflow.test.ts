@@ -210,6 +210,34 @@ test("runWorkflow applies phase metadata provider and model defaults to agent ca
   ]);
 });
 
+test("runWorkflow validates schema-backed agent output and retries once", async () => {
+  const prompts: string[] = [];
+
+  const result = await runWorkflow({
+    scriptPath: fixturePath("schema-validation.workflow.js"),
+    onAgent: (prompt) => {
+      prompts.push(prompt);
+      return prompts.length === 1 ? { wrong: true } : { summary: "valid after retry" };
+    },
+  });
+
+  assert.deepEqual(result, { summary: "valid after retry" });
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0], "produce schema result");
+  assert.match(prompts[1], /Previous structured output failed JSON Schema validation/);
+  assert.match(prompts[1], /required property/);
+});
+
+test("runWorkflow rejects invalid schema-backed agent output after retry", async () => {
+  await assert.rejects(
+    () => runWorkflow({
+      scriptPath: fixturePath("schema-validation.workflow.js"),
+      onAgent: () => ({ wrong: true }),
+    }),
+    /Structured output did not match JSON Schema/,
+  );
+});
+
 test("workflow globals are protected from user mutation", async () => {
   const result = await runWorkflow({
     scriptPath: fixturePath("protected-globals.workflow.js"),

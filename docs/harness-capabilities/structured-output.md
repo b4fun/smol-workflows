@@ -272,7 +272,6 @@ Fallback requirements:
 - retry with validation errors included in the retry prompt;
 - return a provider-neutral structured-output error after retries are exhausted.
 
-## Implementation TODOs
+## Engine validation and retry
 
-- Add engine-level AJV validation for all `agent(prompt, { schema })` outputs.
-- Add bounded schema retry behavior.
+The engine validates every `agent(prompt, { schema })` result against the original JSON Schema with AJV before returning it to workflow code. If validation fails, the engine retries once with the validation errors appended to the prompt, then raises a provider-neutral structured-output validation error if the retry also fails.
