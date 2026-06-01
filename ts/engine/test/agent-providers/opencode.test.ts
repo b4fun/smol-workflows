@@ -16,7 +16,7 @@ test("opencode provider invokes opencode run with json format", async () => {
   });
 
   assert.equal(provider.name, "opencode");
-  assert.equal(provider.schemaMode, "prompt");
+  assert.equal(provider.schemaMode, "builtin");
   assert.equal(provider.usageMode, "builtin");
   assert.equal(result.output, "fake opencode: hello opencode");
   assert.deepEqual(result.usage, {
@@ -26,10 +26,11 @@ test("opencode provider invokes opencode run with json format", async () => {
   });
 });
 
-test("opencode provider prompts for schema output and parses JSON", async () => {
+test("opencode provider uses session json_schema format for schema output", async () => {
   const provider = createOpenCodeAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-opencode-provider.mjs")],
+    serverSubcommand: [fixturePath("fake-opencode-provider.mjs"), "serve"],
   });
 
   const result = await provider.run({
@@ -48,24 +49,31 @@ test("opencode provider prompts for schema output and parses JSON", async () => 
 
   assert.deepEqual(result.output, {
     summary: "structured opencode summary",
-    prompt: `structured prompt\n\nReturn ONLY valid JSON matching this JSON Schema. Do not include markdown fences or explanatory text.\n${JSON.stringify({
-      type: "object",
-      properties: {
-        summary: { type: "string" },
-      },
-      required: ["summary"],
-    }, null, 2)}`,
+    prompt: "structured prompt",
+  });
+  assert.equal(result.sessionId, "opencode-session-structured");
+  assert.equal(result.usage?.totalTokens, 19);
+  const raw = result.raw as { response?: { request?: { format?: { type?: string; schema?: unknown; retryCount?: number } } } };
+  assert.equal(raw.response?.request?.format?.type, "json_schema");
+  assert.equal(raw.response?.request?.format?.retryCount, 2);
+  assert.deepEqual(raw.response?.request?.format?.schema, {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+    },
+    required: ["summary"],
   });
 });
 
-test("opencode provider parses escaped JSON text", async () => {
+test("opencode provider extracts structured output from StructuredOutput tool state", async () => {
   const provider = createOpenCodeAgentProvider({
     command: process.execPath,
     subcommand: [fixturePath("fake-opencode-provider.mjs")],
+    serverSubcommand: [fixturePath("fake-opencode-provider.mjs"), "serve"],
   });
 
   const result = await provider.run({
-    prompt: "escaped-json",
+    prompt: "tool-state-structured",
     options: {
       schema: {
         type: "object",
@@ -93,28 +101,6 @@ test("opencode provider fails on non-zero exit", async () => {
     () => provider.run({ prompt: "fail", context: {} }),
     /OpenCode provider exited with code 7: nope/,
   );
-});
-
-test("opencode provider parses structured output from markdown code fence", async () => {
-  const provider = createOpenCodeAgentProvider({
-    command: process.execPath,
-    subcommand: [fixturePath("fake-opencode-provider.mjs")],
-  });
-
-  const result = await provider.run({
-    prompt: "code-fence prompt",
-    options: {
-      schema: {
-        type: "object",
-        properties: { summary: { type: "string" } },
-        required: ["summary"],
-      },
-    },
-    context: {},
-  });
-
-  // Fixture returns JSON in a ```json ... ``` block; provider must unwrap it.
-  assert.deepEqual((result.output as Record<string, unknown>).summary, "structured opencode summary");
 });
 
 test("opencode provider does not double-count nested usage tokens", async () => {
