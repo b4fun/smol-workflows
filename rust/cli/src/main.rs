@@ -1,11 +1,13 @@
 use log::{LevelFilter, Log, Metadata, Record};
 use serde_json::{Map, Value};
 use smol_workflow_engine::agent_providers::create_agent_provider;
+use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -31,7 +33,145 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
 
     match command.as_str() {
         "run" => run_command(args.collect()).await,
+        "llm" => llm_command(args.collect()).await,
         other => anyhow::bail!("Unknown command: {other}"),
+    }
+}
+
+async fn llm_command(argv: Vec<String>) -> anyhow::Result<()> {
+    let mut args = argv.into_iter();
+    let Some(command) = args.next() else {
+        print_llm_help();
+        return Ok(());
+    };
+
+    if command == "--help" || command == "-h" {
+        print_llm_help();
+        return Ok(());
+    }
+
+    match command.as_str() {
+        "list-workflows" => list_workflows_command(args.collect()).await,
+        other => anyhow::bail!("Unknown llm command: {other}"),
+    }
+}
+
+async fn list_workflows_command(argv: Vec<String>) -> anyhow::Result<()> {
+    if !argv.is_empty() {
+        anyhow::bail!("llm list-workflows does not accept options yet");
+    }
+
+    let cwd = env::current_dir()?;
+    let repo_root = find_repo_root(&cwd).unwrap_or(cwd);
+    let workflows = discover_workflows(&repo_root)?;
+    print_workflows_table(&workflows);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct DiscoveredWorkflow {
+    path: String,
+    metadata: WorkflowMetadata,
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let root = stdout.trim();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn discover_workflows(repo_root: &Path) -> anyhow::Result<Vec<DiscoveredWorkflow>> {
+    let mut workflows = Vec::new();
+    for relative_dir in [".agents/workflows", ".claude/workflows"] {
+        let dir = repo_root.join(relative_dir);
+        collect_workflows_in_dir(repo_root, &dir, &mut workflows)?;
+    }
+    workflows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(workflows)
+}
+
+fn collect_workflows_in_dir(
+    repo_root: &Path,
+    dir: &Path,
+    workflows: &mut Vec<DiscoveredWorkflow>,
+) -> anyhow::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_workflows_in_dir(repo_root, &path, workflows)?;
+            continue;
+        }
+        if !file_type.is_file() || !is_workflow_script_path(&path) {
+            continue;
+        }
+        let Some(metadata) = read_workflow_metadata(&path)? else {
+            continue;
+        };
+        workflows.push(DiscoveredWorkflow {
+            path: relative_display_path(repo_root, &path),
+            metadata,
+        });
+    }
+    Ok(())
+}
+
+fn is_workflow_script_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "mjs")
+    )
+}
+
+fn relative_display_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn print_workflows_table(workflows: &[DiscoveredWorkflow]) {
+    let name_width = workflows
+        .iter()
+        .map(|workflow| workflow.metadata.name.chars().count())
+        .chain(["NAME".len()])
+        .max()
+        .unwrap_or("NAME".len());
+    let path_width = workflows
+        .iter()
+        .map(|workflow| workflow.path.chars().count())
+        .chain(["PATH".len()])
+        .max()
+        .unwrap_or("PATH".len());
+
+    println!(
+        "{:<name_width$}  {:<path_width$}  DESCRIPTION",
+        "NAME", "PATH"
+    );
+    for workflow in workflows {
+        println!(
+            "{:<name_width$}  {:<path_width$}  {}",
+            workflow.metadata.name, workflow.path, workflow.metadata.description
+        );
     }
 }
 
@@ -448,6 +588,10 @@ fn format_log_value(value: &Value) -> String {
 
 fn print_help() {
     eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]"
+        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]\n  smol-wf llm list-workflows"
     );
+}
+
+fn print_llm_help() {
+    eprintln!("smol-wf llm\n\nUSAGE:\n  smol-wf llm list-workflows");
 }

@@ -1,0 +1,17 @@
+{
+  "name": "smol-workflows",
+  "description": "Skills for writing and running smol-wf workflows from Claude Code and GitHub Copilot CLI",
+  "version": "0.1.0",
+  "author": {
+    "name": "b4fun"
+  },
+  "homepage": "https://github.com/b4fun/smol-workflows",
+  "repository": "https://github.com/b4fun/smol-workflows",
+  "license": "MIT",
+  "keywords": [
+    "workflows",
+    "multi-agent",
+    "orchestration",
+    "smol-wf"
+  ]
+}
