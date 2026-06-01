@@ -15,6 +15,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
+pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
+pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
+
 pub struct RunWorkflowOptions<'a> {
     pub script_path: PathBuf,
     pub args: Value,
@@ -23,8 +26,8 @@ pub struct RunWorkflowOptions<'a> {
     pub budget_spent: u64,
     pub nesting_depth: usize,
     pub max_parallel_agent_requests: Option<usize>,
-    pub on_log: Option<&'a dyn Fn(&[Value])>,
-    pub on_phase: Option<&'a dyn Fn(&WorkflowPhaseCall)>,
+    pub on_log: Option<WorkflowLogCallback<'a>>,
+    pub on_phase: Option<WorkflowPhaseCallback<'a>>,
 }
 
 #[derive(Debug)]
@@ -146,8 +149,8 @@ struct RunState<'a> {
     budget: WorkflowBudgetSnapshot,
     nesting_depth: usize,
     max_parallel_agent_requests: Option<usize>,
-    on_log: Option<&'a dyn Fn(&[Value])>,
-    on_phase: Option<&'a dyn Fn(&WorkflowPhaseCall)>,
+    on_log: Option<WorkflowLogCallback<'a>>,
+    on_phase: Option<WorkflowPhaseCallback<'a>>,
 }
 
 struct PreparedAgentRun {
