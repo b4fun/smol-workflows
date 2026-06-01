@@ -213,7 +213,7 @@ async fn codex_provider_preserves_required_subset_and_cache_aliases() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn codex_provider_supports_skip_git_repo_check_option() {
+async fn codex_provider_preserves_explicit_skip_git_repo_check_arg() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![

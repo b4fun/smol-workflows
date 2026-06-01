@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
@@ -230,8 +229,14 @@ async fn start_opencode_server(
     }
     cmd.envs(&options.env);
     let mut child = cmd.spawn().context("failed to spawn OpenCode server")?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture OpenCode server stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture OpenCode server stderr")?;
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     spawn_reader(stdout, tx.clone());
     spawn_reader(stderr, tx);
@@ -305,103 +310,34 @@ async fn request_json(
         bail!("unsupported method {method}");
     }
 
-    let endpoint = parse_http_base(base)?;
-    let mut request_path = path.to_string();
+    let url = build_url(base, path, query);
+    let response = reqwest::Client::new()
+        .post(url)
+        .json(body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let text = response.text().await?;
+    Ok(if text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text)?
+    })
+}
+
+fn build_url(base: &str, path: &str, query: &[(impl AsRef<str>, String)]) -> String {
+    let mut url = format!("{}{}", base.trim_end_matches('/'), path);
     if !query.is_empty() {
-        request_path.push('?');
-        request_path.push_str(
+        url.push('?');
+        url.push_str(
             &query
                 .iter()
-                .map(|(k, v)| format!("{}={}", k.as_ref(), url_encode(v)))
+                .map(|(key, value)| format!("{}={}", key.as_ref(), url_encode(value)))
                 .collect::<Vec<_>>()
                 .join("&"),
         );
     }
-
-    let body = serde_json::to_string(body)?;
-    let request = format!(
-        "POST {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        endpoint.host,
-        body.len(),
-        body
-    );
-    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await?;
-    stream.write_all(request.as_bytes()).await?;
-
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
-    let response = String::from_utf8_lossy(&response);
-    let (headers, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("OpenCode server returned malformed HTTP response"))?;
-    let status = headers.lines().next().unwrap_or_default();
-    if !status.contains(" 2") {
-        bail!(
-            "OpenCode server request failed: {status}: {}",
-            truncate(body, 4000)
-        );
-    }
-
-    let body = decode_http_body(headers, body)?;
-    Ok(if body.trim().is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_str(&body)?
-    })
-}
-
-struct HttpEndpoint {
-    host: String,
-    port: u16,
-}
-
-fn parse_http_base(base: &str) -> anyhow::Result<HttpEndpoint> {
-    let without_scheme = base
-        .trim_end_matches('/')
-        .strip_prefix("http://")
-        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL must use http://, got: {base}"))?;
-    let host_port = without_scheme
-        .split('/')
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL is missing host: {base}"))?;
-    let (host, port) = host_port
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("OpenCode server URL is missing port: {base}"))?;
-    Ok(HttpEndpoint {
-        host: host.to_string(),
-        port: port.parse()?,
-    })
-}
-
-fn decode_http_body(headers: &str, body: &str) -> anyhow::Result<String> {
-    if headers
-        .lines()
-        .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
-    {
-        decode_chunked_body(body)
-    } else {
-        Ok(body.to_string())
-    }
-}
-
-fn decode_chunked_body(body: &str) -> anyhow::Result<String> {
-    let mut rest = body;
-    let mut output = String::new();
-    loop {
-        let Some((size_line, after_size)) = rest.split_once("\r\n") else {
-            bail!("malformed chunked OpenCode response");
-        };
-        let size_text = size_line.split(';').next().unwrap_or(size_line).trim();
-        let size = usize::from_str_radix(size_text, 16)?;
-        if size == 0 {
-            return Ok(output);
-        }
-        if after_size.len() < size + 2 {
-            bail!("truncated chunked OpenCode response");
-        }
-        output.push_str(&after_size[..size]);
-        rest = &after_size[size + 2..];
-    }
+    url
 }
 
 fn url_encode(value: &str) -> String {

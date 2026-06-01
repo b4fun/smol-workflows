@@ -38,6 +38,7 @@ pub async fn run_command(
     }
 
     let mut child = child
+        .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("failed to spawn {provider} provider command `{command}`"))?;
 
