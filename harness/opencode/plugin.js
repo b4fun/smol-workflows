@@ -1,8 +1,7 @@
 import { tool } from '@opencode-ai/plugin'
 import { spawn } from 'node:child_process'
-import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -62,18 +61,6 @@ function parseJsonObject(text, label) {
   return value
 }
 
-async function resolveArgsFile(input, context) {
-  if (input.argsFile) {
-    return path.resolve(context.directory, input.argsFile)
-  }
-
-  const argsObject = input.argsJson ? parseJsonObject(input.argsJson, 'argsJson') : {}
-  const dir = await mkdtemp(path.join(tmpdir(), 'smol-wf-opencode-'))
-  const argsPath = path.join(dir, 'args.json')
-  await writeFile(argsPath, `${JSON.stringify(argsObject, null, 2)}\n`, 'utf8')
-  return argsPath
-}
-
 const listWorkflowsTool = tool({
   description: 'List smol-wf workflows discovered from .agents/workflows and .claude/workflows.',
   args: {},
@@ -101,8 +88,7 @@ const runWorkflowTool = tool({
   description: 'Run a smol-wf workflow script. Use only when the user explicitly asks to run a workflow.',
   args: {
     path: tool.schema.string().describe('Workflow script path, relative to the project directory or absolute'),
-    argsFile: tool.schema.string().optional().describe('Path to a JSON object args file'),
-    argsJson: tool.schema.string().optional().describe('Inline JSON object args. Used only when argsFile is not provided'),
+    argsFile: tool.schema.string().describe('Path to a JSON object args file'),
     tokenBudget: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe('Output-token budget. Use 0, none, or - to omit'),
     agentProvider: tool.schema.enum(['pi', 'claude-code', 'codex', 'opencode']).optional().describe('Agent provider to pass to smol-wf'),
     maxParallelAgents: tool.schema.number().optional().describe('Concurrency cap; defaults to 4'),
@@ -113,7 +99,10 @@ const runWorkflowTool = tool({
       throw new Error(`Workflow script does not exist: ${input.path}`)
     }
 
-    const argsPath = await resolveArgsFile(input, context)
+    const argsPath = path.resolve(context.directory, input.argsFile)
+    if (!(await exists(argsPath))) {
+      throw new Error(`Args file does not exist: ${input.argsFile}`)
+    }
     // Validate early for clearer errors.
     parseJsonObject(await readFile(argsPath, 'utf8'), 'args file')
 
