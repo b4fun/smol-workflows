@@ -2,5 +2,5 @@
   "name": "smol-workflows",
   "version": "0.1.0",
   "type": "module",
-  "main": "harness/opencode.js"
+  "main": "harness/opencode/plugin.js"
 }
