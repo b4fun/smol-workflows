@@ -189,6 +189,8 @@ pub enum WorkflowRuntimePoll {
 pub trait WorkflowRuntimeExecution {
     fn poll(&mut self) -> anyhow::Result<WorkflowRuntimePoll>;
 
+    fn take_pending_requests(&mut self) -> anyhow::Result<Vec<WorkflowRuntimeRequest>>;
+
     fn resolve_request(
         &mut self,
         id: &str,

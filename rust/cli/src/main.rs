@@ -87,6 +87,7 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
         budget_total: options.budget_allowance,
         budget_spent: 0,
         nesting_depth: 0,
+        max_parallel_agent_requests: options.max_parallel_agent_requests,
         on_log: Some(&on_log),
         on_phase: Some(&on_phase),
     })?;
@@ -101,6 +102,7 @@ struct RunCliOptions {
     agent_provider: String,
     args: Map<String, Value>,
     budget_allowance: Option<u64>,
+    max_parallel_agent_requests: Option<usize>,
     log_level: LevelFilter,
 }
 
@@ -118,6 +120,10 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         .map(|value| parse_log_level(&value, "SMOL_WF_LOG"))
         .transpose()?
         .unwrap_or(LevelFilter::Off);
+    let mut max_parallel_agent_requests = env::var("SMOL_WF_MAX_PARALLEL_AGENTS")
+        .ok()
+        .map(|value| parse_positive_usize(&value, "SMOL_WF_MAX_PARALLEL_AGENTS"))
+        .transpose()?;
     let mut index = 0;
 
     while index < argv.len() {
@@ -166,6 +172,19 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
             continue;
         }
 
+        if token == "--max-parallel-agents" || token.starts_with("--max-parallel-agents=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            max_parallel_agent_requests = Some(parse_positive_usize(
+                &parsed.value,
+                "--max-parallel-agents",
+            )?);
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
         if token == "--debug" {
             log_level = LevelFilter::Debug;
             index += 1;
@@ -196,6 +215,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
+        max_parallel_agent_requests,
         log_level,
     })
 }
@@ -333,6 +353,14 @@ fn parse_non_negative_integer(value: &str, name: &str) -> anyhow::Result<u64> {
     Ok(parsed)
 }
 
+fn parse_positive_usize(value: &str, name: &str) -> anyhow::Result<usize> {
+    let parsed = parse_non_negative_integer(value, name)?;
+    if parsed == 0 {
+        anyhow::bail!("{name} must be greater than zero");
+    }
+    usize::try_from(parsed).map_err(|_| anyhow::anyhow!("{name} is too large"))
+}
+
 fn parse_log_level(value: &str, name: &str) -> anyhow::Result<LevelFilter> {
     match value.trim().to_ascii_lowercase().as_str() {
         "off" | "none" | "quiet" => Ok(LevelFilter::Off),
@@ -416,6 +444,6 @@ fn format_log_value(value: &Value) -> String {
 
 fn print_help() {
     eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]"
+        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]"
     );
 }

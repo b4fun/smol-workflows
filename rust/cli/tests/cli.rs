@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::fs;
 use std::process::Command;
 
 fn smol_wf() -> Command {
@@ -199,4 +200,49 @@ fn run_supports_dim_debug_logging() {
     assert!(stderr.contains("\x1b[2m[debug]"));
     assert!(stderr.contains("cli run script="));
     assert!(stderr.contains("run_workflow start"));
+}
+
+#[test]
+fn run_applies_max_parallel_agents_flag() {
+    let path = std::env::temp_dir().join(format!(
+        "smol-wf-cli-parallel-{}-{}.mjs",
+        std::process::id(),
+        "limit"
+    ));
+    fs::write(
+        &path,
+        r#"
+export const meta = { name: "cli-parallel", description: "CLI parallel limit" };
+export default await parallel([
+  () => agent("first"),
+  () => agent("second"),
+]);
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let output = smol_wf()
+        .args([
+            "run",
+            path.to_str().expect("path should be utf8"),
+            "--log-level",
+            "debug",
+            "--max-parallel-agents",
+            "1",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_file(&path);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should remain JSON");
+    assert_eq!(stdout, json!(["echo: first", "echo: second"]));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("running agent request batch in parallel size=2 max_parallel=1"));
 }

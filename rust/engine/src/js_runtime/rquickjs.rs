@@ -263,6 +263,11 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
         })
     }
 
+    fn take_pending_requests(&mut self) -> anyhow::Result<Vec<WorkflowRuntimeRequest>> {
+        self.drain_jobs();
+        Ok(self.state.borrow_mut().requests.drain(..).collect())
+    }
+
     fn resolve_request(
         &mut self,
         id: &str,
