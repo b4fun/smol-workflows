@@ -186,11 +186,30 @@ pub enum WorkflowRuntimePoll {
 }
 
 /// Resumable workflow JavaScript execution.
+///
+/// Runtime executions are expected to be owned by a single scheduler/actor and
+/// accessed serially. Implementations are not required to be `Send` or safe for
+/// concurrent access. The workflow coordinator should keep JavaScript-engine
+/// calls isolated from provider tasks and communicate through this polling and
+/// request-resolution boundary.
 pub trait WorkflowRuntimeExecution {
+    /// Poll the JavaScript runtime for the next call, request, completion, or
+    /// pending state.
     fn poll(&mut self) -> anyhow::Result<WorkflowRuntimePoll>;
 
+    /// Drain all currently queued unresolved runtime requests.
+    ///
+    /// Call this after [`poll`](Self::poll) returns
+    /// [`WorkflowRuntimePoll::Request`] when the caller wants to schedule all
+    /// JavaScript-created host requests concurrently. Draining removes requests
+    /// from the runtime's event queue, but their JavaScript promises remain
+    /// pending and must later be completed with [`resolve_request`](Self::resolve_request).
+    ///
+    /// If callers repeatedly poll after a request is observed without draining
+    /// or resolving it, implementations may report the same request again.
     fn take_pending_requests(&mut self) -> anyhow::Result<Vec<WorkflowRuntimeRequest>>;
 
+    /// Resolve or reject a previously emitted runtime request by id.
     fn resolve_request(
         &mut self,
         id: &str,

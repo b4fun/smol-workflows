@@ -1,15 +1,22 @@
 // Temporary bootstrap helper. Rust captures this function during runtime setup
 // and then removes globalThis.__readonly before user workflow code runs.
 globalThis.__readonly = (() => {
+  const cache = new WeakMap();
+
   function readonly(value) {
     if (typeof value !== 'object' || value === null) return value;
-    return new Proxy(value, {
+    const cached = cache.get(value);
+    if (cached) return cached;
+
+    const proxy = new Proxy(value, {
       get(target, property, receiver) { return readonly(Reflect.get(target, property, receiver)); },
       set() { throw new TypeError('Cannot modify workflow value'); },
       defineProperty() { throw new TypeError('Cannot modify workflow value'); },
       deleteProperty() { throw new TypeError('Cannot modify workflow value'); },
       setPrototypeOf() { throw new TypeError('Cannot modify workflow value'); },
     });
+    cache.set(value, proxy);
+    return proxy;
   }
 
   return readonly;

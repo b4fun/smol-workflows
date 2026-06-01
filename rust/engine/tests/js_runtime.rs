@@ -5,6 +5,7 @@ use smol_workflow_engine::js_runtime::{
     WorkflowRuntimePoll, WorkflowRuntimeRequest, WorkflowRuntimeRequestResolution,
 };
 use std::fs;
+use std::time::Duration;
 
 #[derive(Default, Debug)]
 struct RunTrace {
@@ -133,6 +134,7 @@ const blockedGlobalNames = [
   'eval',
   'Function',
   'AsyncFunction',
+  'Date',
   'fetch',
   'XMLHttpRequest',
   'WebSocket',
@@ -170,6 +172,7 @@ export default {
         "eval",
         "Function",
         "AsyncFunction",
+        "Date",
         "fetch",
         "XMLHttpRequest",
         "WebSocket",
@@ -355,6 +358,79 @@ export default await parallel([
         }
     };
     assert_eq!(output.result, json!(["one", "two"]));
+}
+
+#[test]
+fn rquickjs_readonly_proxy_preserves_identity() {
+    let mut execution = RQuickJSWorkflowRuntime::new()
+        .start_module(WorkflowModuleInput::new(
+            r#"
+export const meta = { name: "readonly-identity", description: "readonly identity" };
+export default {
+  sameNestedObject: args.nested === args.nested,
+  sameNestedArray: args.items === args.items,
+};
+"#,
+            "readonly-identity.workflow.js",
+            json!({ "nested": { "value": 1 }, "items": [1, 2] }),
+        ))
+        .expect("workflow should start");
+
+    let output = loop {
+        match execution.poll().expect("workflow should poll") {
+            WorkflowRuntimePoll::Complete(output) => break output,
+            WorkflowRuntimePoll::Pending => continue,
+            other => panic!("expected completion, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        output.result,
+        json!({ "sameNestedObject": true, "sameNestedArray": true })
+    );
+}
+
+#[test]
+fn rquickjs_timeout_is_refreshed_after_host_request_wait() {
+    let mut input = WorkflowModuleInput::new(
+        r#"
+export const meta = { name: "timeout-refresh", description: "timeout refresh" };
+const value = await agent("wait");
+export default { value, afterWait: true };
+"#,
+        "timeout-refresh.workflow.js",
+        json!({}),
+    );
+    input.sandbox.timeout = Duration::from_millis(10);
+
+    let mut execution = RQuickJSWorkflowRuntime::new()
+        .start_module(input)
+        .expect("workflow should start");
+
+    let request = loop {
+        match execution.poll().expect("workflow should poll") {
+            WorkflowRuntimePoll::Request(request) => break request,
+            WorkflowRuntimePoll::Pending => continue,
+            other => panic!("expected request, got {other:?}"),
+        }
+    };
+    std::thread::sleep(Duration::from_millis(30));
+    execution
+        .resolve_request(
+            request.id(),
+            WorkflowRuntimeRequestResolution::Ok(json!("done")),
+        )
+        .expect("request should resolve after host wait");
+
+    let output = loop {
+        match execution.poll().expect("workflow should poll") {
+            WorkflowRuntimePoll::Complete(output) => break output,
+            WorkflowRuntimePoll::Pending => continue,
+            other => panic!("expected completion, got {other:?}"),
+        }
+    };
+
+    assert_eq!(output.result, json!({ "value": "done", "afterWait": true }));
 }
 
 #[test]

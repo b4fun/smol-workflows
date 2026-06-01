@@ -9,7 +9,7 @@
 //!    workflow code runs. Node/browser/host globals are not provided and a second
 //!    hardening pass replaces or hides known escape hatches such as `eval`,
 //!    `Function`, `Date`,
-//!    host IO globals, and `Math.random`.
+//!    host IO globals, `Date`, and `Math.random`.
 //! 2. Evaluate `sandbox_prelude.js`. The prelude intentionally contains only the
 //!    small JS-native pieces that are easier to express in JavaScript: the
 //!    readonly `Proxy` factory plus pure helper globals like `parallel` and
@@ -70,7 +70,8 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::Rc,
-    time::Instant,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 type WorkflowIntrinsics = (
@@ -86,6 +87,7 @@ const BLOCKED_GLOBALS: &[&str] = &[
     "eval",
     "Function",
     "AsyncFunction",
+    "Date",
     "fetch",
     "XMLHttpRequest",
     "WebSocket",
@@ -133,8 +135,13 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
         runtime.set_memory_limit(input.sandbox.memory_limit_bytes);
         runtime.set_max_stack_size(input.sandbox.max_stack_size_bytes);
 
-        let deadline = Instant::now() + input.sandbox.timeout;
-        runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+        let timeout = input.sandbox.timeout;
+        let deadline = Arc::new(Mutex::new(Instant::now() + timeout));
+        let interrupt_deadline = Arc::clone(&deadline);
+        runtime.set_interrupt_handler(Some(Box::new(move || match interrupt_deadline.lock() {
+            Ok(deadline) => Instant::now() >= *deadline,
+            Err(_) => true,
+        })));
 
         let context = Context::custom::<WorkflowIntrinsics>(&runtime)
             .context("failed to create restricted QuickJS context")?;
@@ -147,6 +154,8 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
             readonly: None,
             context,
             runtime,
+            deadline,
+            timeout,
         };
         execution.start(input)?;
         Ok(Box::new(execution))
@@ -163,6 +172,8 @@ struct RQuickJSWorkflowExecution {
     context: Context,
     #[allow(dead_code)]
     runtime: Runtime,
+    deadline: Arc<Mutex<Instant>>,
+    timeout: Duration,
 }
 
 #[derive(Default)]
@@ -221,20 +232,25 @@ impl RQuickJSWorkflowExecution {
         Ok(())
     }
 
-    fn drain_jobs(&self) {
+    fn refresh_deadline(&self) -> anyhow::Result<()> {
+        let mut deadline = self
+            .deadline
+            .lock()
+            .map_err(|_| anyhow!("QuickJS interrupt deadline lock was poisoned"))?;
+        *deadline = Instant::now() + self.timeout;
+        Ok(())
+    }
+
+    fn drain_jobs(&self) -> anyhow::Result<()> {
+        self.refresh_deadline()?;
         self.context.with(|ctx| while ctx.execute_pending_job() {});
+        Ok(())
     }
 }
 
 impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
     fn poll(&mut self) -> anyhow::Result<WorkflowRuntimePoll> {
-        // TODO(async): expose all newly queued long-running requests in a batch so
-        // `parallel([...agent(...)])` can run providers concurrently instead of
-        // requiring the core to resolve one request before observing the next.
-        // TODO(polling): document/enforce that callers should not repeatedly poll
-        // while an unresolved request is outstanding; otherwise the same request
-        // can be observed more than once.
-        self.drain_jobs();
+        self.drain_jobs()?;
 
         let context = self.context.clone();
         context.with(|ctx| -> anyhow::Result<WorkflowRuntimePoll> {
@@ -264,7 +280,7 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
     }
 
     fn take_pending_requests(&mut self) -> anyhow::Result<Vec<WorkflowRuntimeRequest>> {
-        self.drain_jobs();
+        self.drain_jobs()?;
         Ok(self.state.borrow_mut().requests.drain(..).collect())
     }
 
@@ -291,6 +307,7 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
             }),
         };
 
+        self.refresh_deadline()?;
         self.context.with(|ctx| -> anyhow::Result<()> {
             let pending = self
                 .state
@@ -414,8 +431,8 @@ impl RQuickJSWorkflowExecution {
         match promise.state() {
             PromiseState::Pending => Ok(WorkflowRuntimePoll::Pending),
             PromiseState::Rejected => {
-                let result = promise.result::<Value<'_>>();
-                bail!("workflow module rejected: {result:?}")
+                let _ = promise.result::<Value<'_>>();
+                bail!("workflow module rejected: {}", js_exception_message(ctx))
             }
             PromiseState::Resolved => {
                 let result = promise
@@ -459,7 +476,7 @@ fn evaluate_sandbox_prelude(ctx: &rquickjs::Ctx<'_>) -> anyhow::Result<()> {
 
     while promise.state() == PromiseState::Pending {
         if !ctx.execute_pending_job() {
-            return Ok(());
+            bail!("sandbox prelude did not complete");
         }
     }
 
