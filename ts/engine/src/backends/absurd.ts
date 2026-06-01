@@ -9,7 +9,7 @@ import type {
 } from "@absurd-sqlite/sdk";
 import type { AgentRunOptions } from "@smol-workflow/sdk";
 import { createAgentProvider } from "../agent-providers/index.js";
-import type { AgentProvider } from "../agent-providers/types.js";
+import type { AgentProvider, AgentProviderResult } from "../agent-providers/types.js";
 import sqlite from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -52,6 +52,8 @@ export type AbsurdWorkflowRunParams = {
   workflowVersion?: string;
   /** Optional script content hash captured by callers for idempotency/audit. */
   scriptHash?: string;
+  /** Optional shared output-token budget target. */
+  budgetTotal?: number | null;
 };
 
 export type SubmitWorkflowOptions = Omit<SpawnOptions, "queue"> & {
@@ -308,6 +310,7 @@ export async function runAbsurdWorkflowTask(
   const runOptions: RunWorkflowOptions = {
     scriptPath: params.scriptPath,
     args: params.args ?? {},
+    budgetTotal: params.budgetTotal ?? null,
     onAgent: async (prompt, agentOptions) =>
       await runDurableAgent(prompt, agentOptions, ctx, options),
     onLog: (...values) => {
@@ -331,7 +334,7 @@ export async function runDurableAgent(
   options: AgentRunOptions | undefined,
   ctx: Pick<TaskContext, "step" | "emitEvent">,
   runOptions: { agentProvider?: AgentProvider; onDiagnostic?: (...values: unknown[]) => void } = {},
-): Promise<unknown> {
+): Promise<AgentProviderResult> {
   const provider = options?.provider
     ? createAgentProvider(options.provider)
     : (runOptions.agentProvider ?? createAgentProvider("debug"));
@@ -367,7 +370,7 @@ export async function runDurableAgent(
       }),
     );
 
-    return result;
+    return providerResult;
   });
 }
 

@@ -49,6 +49,7 @@ async function runLocal(argv: string[]): Promise<void> {
           phaseOptions === undefined ? "" : ` ${formatLogValue(phaseOptions)}`;
         console.error(`[phase] ${name}${suffix}`);
       },
+      budgetTotal: options.budgetAllowance,
     });
 
     console.log(JSON.stringify(result ?? null, null, 2));
@@ -67,6 +68,7 @@ async function runLocal(argv: string[]): Promise<void> {
       {
         scriptPath,
         args: options.args,
+        budgetTotal: options.budgetAllowance,
       },
       {
         idempotencyKey: options.idempotencyKey,
@@ -202,12 +204,13 @@ async function absurdWorkBatch(argv: string[]): Promise<void> {
 }
 
 async function parseRunOptions(argv: string[]): Promise<
-  | { backend: "simple"; args: WorkflowArgs; agentProvider: string }
+  | { backend: "simple"; args: WorkflowArgs; agentProvider: string; budgetAllowance?: number }
   | {
       backend: "absurd";
       backendOptions: BackendCliOptions;
       args: WorkflowArgs;
       agentProvider: string;
+      budgetAllowance?: number;
       idempotencyKey?: string;
       maxAttempts?: number;
       timeoutMs?: number;
@@ -221,6 +224,7 @@ async function parseRunOptions(argv: string[]): Promise<
   const backendTokens: string[] = [];
   let backendName = "simple";
   let agentProvider = process.env.SMOL_WF_AGENT_PROVIDER ?? "debug";
+  let budgetAllowance = parseOptionalNonNegativeInteger(process.env.SMOL_WF_BUDGET_ALLOWANCE, "SMOL_WF_BUDGET_ALLOWANCE");
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -228,6 +232,15 @@ async function parseRunOptions(argv: string[]): Promise<
     if (token === "--agent-provider" || token.startsWith("--agent-provider=")) {
       const parsed = parseFlagToken(token, argv[index + 1]);
       agentProvider = String(parsed.value);
+      if (parsed.consumedNext) {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (token === "--budget-allowance" || token.startsWith("--budget-allowance=")) {
+      const parsed = parseFlagToken(token, argv[index + 1]);
+      budgetAllowance = parseOptionalNonNegativeInteger(parsed.value, "--budget-allowance");
       if (parsed.consumedNext) {
         index += 1;
       }
@@ -283,7 +296,7 @@ async function parseRunOptions(argv: string[]): Promise<
       throw new Error(`Backend options require --backend absurd: ${backendTokens.join(" ")}`);
     }
 
-    return { backend: "simple", args, agentProvider };
+    return { backend: "simple", args, agentProvider, budgetAllowance };
   }
 
   if (backendName !== "absurd") {
@@ -297,6 +310,7 @@ async function parseRunOptions(argv: string[]): Promise<
     backendOptions: parsed.backend,
     args,
     agentProvider,
+    budgetAllowance,
     idempotencyKey: stringFlag(parsed.flags["idempotency-key"]),
     maxAttempts: parseOptionalInteger(parsed.flags["max-attempts"], "--max-attempts"),
     timeoutMs: parseOptionalInteger(parsed.flags.timeout, "--timeout"),
@@ -572,6 +586,24 @@ function stringFlag(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function parseOptionalNonNegativeInteger(value: unknown, name: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a number`);
+  }
+
+  const parsed = Number.parseInt(value, 10);
+
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || String(parsed) !== value.trim()) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
 function parseOptionalInteger(value: unknown, name: string): number | undefined {
   if (value === undefined) {
     return undefined;
@@ -592,7 +624,7 @@ function parseOptionalInteger(value: unknown, name: string): number | undefined 
 
 function printHelp(): void {
   console.log(`Usage:
-  smol-wf run <workflow-script> [--backend simple] [--agent-provider debug] [--args-<name> value] [--args-flag] [--args-<name>=value]
+  smol-wf run <workflow-script> [--backend simple] [--agent-provider debug] [--budget-allowance outputTokens] [--args-<name> value] [--args-flag] [--args-<name>=value]
   smol-wf run <workflow-script> --args-from-file <json-file>
   smol-wf run <workflow-script> --backend absurd [--db <workflow.db>] [--extension <extension-path>] [--args-<name> value]
 
@@ -604,6 +636,7 @@ function printHelp(): void {
 Examples:
   smol-wf run user-script.js --args-my-arg1 "arg-value-1" --args-my-arg2 "arg-value-2"
   smol-wf run user-script.js --args-from-file args.json
+  smol-wf run examples/budget.mjs --budget-allowance 200 --args-topic "structured output reliability"
   smol-wf run examples/hello.mjs --backend absurd --db workflow.db --extension ./libabsurd_sqlite_extension.dylib --args-name Ada
 
   smol-wf absurd init --db workflow.db --extension ./libabsurd_sqlite_extension.dylib

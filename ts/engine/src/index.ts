@@ -13,10 +13,12 @@ import {
 
 export type WorkflowArgs = Record<string, unknown>;
 
+export type WorkflowAgentHandlerResult = unknown | AgentProviderResult;
+
 export type WorkflowAgentHandler = (
   prompt: string,
   options?: AgentRunOptions,
-) => unknown | Promise<unknown>;
+) => WorkflowAgentHandlerResult | Promise<WorkflowAgentHandlerResult>;
 
 export type RunWorkflowOptions = {
   scriptPath: string;
@@ -180,9 +182,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
       message: Extract<RunnerMessage, { type: "agent" }>,
     ): Promise<AgentProviderResult> {
       if (options.onAgent) {
-        return await runAgentWithSchemaValidation(message.prompt, message.options, async (prompt) => ({
-          output: await options.onAgent!(prompt, message.options),
-        }));
+        return await runAgentWithSchemaValidation(message.prompt, message.options, async (prompt) =>
+          normalizeAgentHandlerResult(await options.onAgent!(prompt, message.options)),
+        );
       }
 
       return await runProviderAgent(message.prompt, message.options, options.agentProvider);
@@ -213,6 +215,24 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<unknown>
 
 function isWorkflowArgs(value: unknown): value is WorkflowArgs {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeAgentHandlerResult(value: WorkflowAgentHandlerResult): AgentProviderResult {
+  if (isAgentProviderResultLike(value)) {
+    return value;
+  }
+
+  return { output: value };
+}
+
+function isAgentProviderResultLike(value: unknown): value is AgentProviderResult {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      "output" in value &&
+      ("usage" in value || "sessionId" in value || "raw" in value),
+  );
 }
 
 async function runProviderAgent(

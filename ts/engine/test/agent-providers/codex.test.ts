@@ -26,6 +26,24 @@ test("codex provider invokes codex exec and reads output-last-message", async ()
   });
 });
 
+test("codex provider normalizes cache token aliases without double-counting reads", async () => {
+  const provider = createCodexAgentProvider({
+    command: process.execPath,
+    subcommand: [fixturePath("fake-codex-provider.mjs")],
+  });
+
+  const result = await provider.run({
+    prompt: "cache-alias",
+    context: {},
+  });
+
+  assert.equal(result.usage?.inputTokens, 5);
+  assert.equal(result.usage?.outputTokens, 3);
+  assert.equal(result.usage?.cacheReadTokens, 4);
+  assert.equal(result.usage?.cacheWriteTokens, 2);
+  assert.equal(result.usage?.totalTokens, 10);
+});
+
 test("codex provider writes schema file and parses structured output", async () => {
   const provider = createCodexAgentProvider({
     command: process.execPath,

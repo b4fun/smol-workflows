@@ -49,15 +49,22 @@ async function runPi(
   const command = options.command ?? "pi";
   const hasSchema = input.options !== undefined && input.options.schema !== undefined;
   const schema = input.options?.schema;
-  const tempDir = hasSchema ? await mkdtemp(join(tmpdir(), "smol-wf-pi-")) : undefined;
-  const extensionPath = tempDir ? join(tempDir, "structured-output-extension.ts") : undefined;
+  const prompt = hasSchema ? withStructuredOutputToolInstruction(input.prompt) : input.prompt;
+  const usePromptFile = shouldPassPromptViaFile(prompt);
+  const tempDir = hasSchema || usePromptFile ? await mkdtemp(join(tmpdir(), "smol-wf-pi-")) : undefined;
+  const extensionPath = tempDir && hasSchema ? join(tempDir, "structured-output-extension.ts") : undefined;
+  const promptPath = tempDir && usePromptFile ? join(tempDir, "prompt.md") : undefined;
 
   try {
     if (hasSchema && extensionPath) {
       await writeFile(extensionPath, buildStructuredOutputExtension(schema));
     }
 
-    const prompt = hasSchema ? withStructuredOutputToolInstruction(input.prompt) : input.prompt;
+    if (promptPath) {
+      await writeFile(promptPath, prompt);
+    }
+
+    const promptArg = promptPath ? `@${promptPath}` : prompt;
     const args = [
       ...(options.subcommand ?? []),
       ...(options.args ?? []),
@@ -66,7 +73,7 @@ async function runPi(
       // overriding `subcommand` cannot accidentally lose them.
       "--print", "--mode", "json",
       ...(input.options?.model ? ["--model", input.options.model] : []),
-      prompt,
+      promptArg,
     ];
 
     const { stdout, stderr } = await runCommand(command, args, {
@@ -90,6 +97,12 @@ async function runPi(
       await rm(tempDir, { recursive: true, force: true });
     }
   }
+}
+
+const MAX_PROMPT_ARG_LENGTH = 32_000;
+
+function shouldPassPromptViaFile(prompt: string): boolean {
+  return prompt.length > MAX_PROMPT_ARG_LENGTH;
 }
 
 function withStructuredOutputToolInstruction(prompt: string): string {
@@ -566,14 +579,30 @@ function looksLikeUsage(record: Record<string, unknown>): boolean {
     "input_tokens",
     "output_tokens",
     "total_tokens",
+    "cacheReadTokens",
+    "cacheRead",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cached_input_tokens",
+    "cacheWriteTokens",
+    "cacheWrite",
+    "cache_write_tokens",
+    "cache_creation_input_tokens",
   ].some((key) => typeof record[key] === "number");
 }
 
 function normalizeUsage(record: Record<string, unknown>): AgentUsage {
   const inputTokens = numberField(record, "inputTokens", "input_tokens", "input");
   const outputTokens = numberField(record, "outputTokens", "output_tokens", "output");
-  const cacheReadTokens = numberField(record, "cacheReadTokens", "cacheRead", "cache_read_tokens");
-  const cacheWriteTokens = numberField(record, "cacheWriteTokens", "cacheWrite", "cache_write_tokens");
+  const cacheRecord = record.cache && typeof record.cache === "object" && !Array.isArray(record.cache)
+    ? record.cache as Record<string, unknown>
+    : undefined;
+  const cacheReadTokens =
+    numberField(record, "cacheReadTokens", "cacheRead", "cache_read_tokens", "cache_read_input_tokens", "cached_input_tokens") ??
+    numberField(cacheRecord ?? {}, "read");
+  const cacheWriteTokens =
+    numberField(record, "cacheWriteTokens", "cacheWrite", "cache_write_tokens", "cache_creation_input_tokens") ??
+    numberField(cacheRecord ?? {}, "write");
   const totalTokens =
     numberField(record, "totalTokens", "total_tokens", "total") ??
     // `input_tokens` already reflects the prompt tokens billed (including cache hits).

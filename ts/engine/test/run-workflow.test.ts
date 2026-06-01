@@ -210,6 +210,25 @@ test("runWorkflow applies phase metadata provider and model defaults to agent ca
   ]);
 });
 
+test("runWorkflow accounts for usage returned by custom onAgent handlers", async () => {
+  const result = await runWorkflow({
+    scriptPath: fixturePath("on-agent-usage-budget.workflow.js"),
+    budgetTotal: 20,
+    onAgent: (prompt) => ({
+      output: `custom: ${prompt}`,
+      usage: { outputTokens: 7, totalTokens: 7 },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    before: 0,
+    first: "custom: first custom usage",
+    afterFirst: 7,
+    second: "custom: second custom usage",
+    afterSecond: 14,
+  });
+});
+
 test("runWorkflow validates schema-backed agent output and retries once", async () => {
   const prompts: string[] = [];
 

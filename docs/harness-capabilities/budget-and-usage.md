@@ -180,15 +180,15 @@ Expected usage extraction:
 
 ## Custom `onAgent` handlers
 
-Custom `onAgent` handlers are useful for tests and host integrations. For budget accuracy, they should be able to report both output and usage.
+Custom `onAgent` handlers are useful for tests and host integrations. For budget accuracy, they can report both output and usage.
 
-Current minimal handler shape often returns only the output value:
+Minimal handler shape returns only the output value:
 
 ```ts
 (prompt, options) => output
 ```
 
-Recommended future-compatible shape:
+Usage-reporting shape:
 
 ```ts
 (prompt, options) => ({
@@ -201,7 +201,13 @@ Recommended future-compatible shape:
 })
 ```
 
-If a custom handler returns only an output value, budget spend should be zero for that call unless the host supplies usage through another channel.
+If a custom handler returns only an output value, budget spend is zero for that call unless the host supplies usage through another channel.
+
+## Durable usage records
+
+Durable backends should persist the full provider result for each checkpointed agent step, including output, provider session ID, raw diagnostics, and normalized usage. Replaying a checkpoint should return the persisted provider result rather than only the output value, so budget accounting remains consistent for resumed workflows.
+
+The Absurd backend records agent usage in `workflow.agent` events and checkpoints the provider result for durable agent steps.
 
 ## Known limitations
 
@@ -209,10 +215,4 @@ If a custom handler returns only an output value, budget spend should be zero fo
 - Providers may omit usage or report it differently across versions/models.
 - Cache-read/cache-write semantics vary by provider and should be treated as diagnostic unless provider docs define billing behavior clearly.
 - Session resume/cache behavior can make per-call usage harder to interpret.
-- Durable workflows should eventually store authoritative per-agent run usage records rather than relying only on live IPC snapshots.
-
-## Implementation TODOs
-
-- Extend custom `onAgent` handler support so hosts can return `{ output, usage }` directly.
-- Back budget accounting with an authoritative persisted run/session usage store.
-- Add provider/version-specific tests for cache token aliases and cumulative-vs-delta usage semantics.
+- Cross-run aggregate budget reporting should eventually read from persisted per-agent usage records rather than only live IPC snapshots.
