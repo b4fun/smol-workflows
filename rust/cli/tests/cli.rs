@@ -244,5 +244,5 @@ export default await parallel([
     assert_eq!(stdout, json!(["echo: first", "echo: second"]));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("running agent request batch in parallel size=2 max_parallel=1"));
+    assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
 }

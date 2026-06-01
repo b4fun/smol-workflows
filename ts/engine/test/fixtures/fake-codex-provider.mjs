@@ -16,6 +16,8 @@ if (stdin.includes('fail')) {
   process.exit(7)
 }
 
+console.log(JSON.stringify({ type: 'argv', argv: args }))
+
 const schema = schemaPath ? JSON.parse(readFileSync(schemaPath, 'utf8')) : undefined
 const output = schema
   ? {

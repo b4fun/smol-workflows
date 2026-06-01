@@ -69,6 +69,10 @@ fn run_codex(
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());
     args.extend(options.args.clone());
+    if cfg!(feature = "integration-test") && !args.iter().any(|arg| arg == "--skip-git-repo-check")
+    {
+        args.push("--skip-git-repo-check".into());
+    }
     if let Some(model) = option_str(&input.options, "model") {
         args.extend(["--model".into(), model]);
     }

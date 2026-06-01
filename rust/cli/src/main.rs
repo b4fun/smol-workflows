@@ -7,15 +7,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-fn main() {
-    if let Err(error) = run_cli(env::args().skip(1).collect()) {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run_cli(env::args().skip(1).collect()).await {
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
 
-fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
+async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
     let mut args = argv.into_iter();
     let Some(command) = args.next() else {
         print_help();
@@ -28,12 +30,12 @@ fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
     }
 
     match command.as_str() {
-        "run" => run_command(args.collect()),
+        "run" => run_command(args.collect()).await,
         other => anyhow::bail!("Unknown command: {other}"),
     }
 }
 
-fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
+async fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
     let mut args = argv.into_iter();
     let Some(script_path) = args.next() else {
         anyhow::bail!("Missing workflow script path");
@@ -52,7 +54,8 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
         anyhow::bail!("Unsupported backend: {}", options.backend);
     }
 
-    let provider = create_agent_provider(&options.agent_provider)?;
+    let provider: Arc<dyn smol_workflow_engine::agent_providers::AgentProvider> =
+        Arc::from(create_agent_provider(&options.agent_provider)?);
     let on_phase = |phase: &smol_workflow_engine::workflow::WorkflowPhaseCall| {
         let mut stderr = io::stderr().lock();
         match &phase.options {
@@ -83,14 +86,15 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
     let result = run_workflow(RunWorkflowOptions {
         script_path: PathBuf::from(script_path),
         args: Value::Object(options.args),
-        agent_provider: provider.as_ref(),
+        agent_provider: provider,
         budget_total: options.budget_allowance,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: options.max_parallel_agent_requests,
         on_log: Some(&on_log),
         on_phase: Some(&on_phase),
-    })?;
+    })
+    .await?;
 
     println!("{}", serde_json::to_string_pretty(&result.output.result)?);
     Ok(())

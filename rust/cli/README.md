@@ -26,14 +26,14 @@ Run it explicitly with:
 ```sh
 SMOL_WF_E2E_AGENT_PROVIDERS=pi,claude-code,codex,opencode \
 SMOL_WF_E2E_MAX_PARALLEL_AGENTS=2 \
-cargo test -p smol-workflow-cli --test e2e_real_agents -- --ignored --test-threads=1
+cargo test -p smol-workflow-cli --features integration-test --test e2e_real_agents -- --ignored --test-threads=1
 ```
 
 For a single provider:
 
 ```sh
 SMOL_WF_E2E_AGENT_PROVIDER=pi \
-cargo test -p smol-workflow-cli --test e2e_real_agents -- --ignored --test-threads=1
+cargo test -p smol-workflow-cli --features integration-test --test e2e_real_agents -- --ignored --test-threads=1
 ```
 
 Environment variables:

@@ -4,8 +4,10 @@ use smol_workflow_engine::agent_providers::{
     AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
 };
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -17,11 +19,24 @@ fn example_path(name: &str) -> PathBuf {
     PathBuf::from(format!("../../examples/{name}"))
 }
 
+fn block_on<T>(future: impl Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime should be created")
+        .block_on(future)
+}
+
 struct FixedUsageProvider;
 struct OptionsEchoProvider;
 struct ConcurrentProbeProvider {
     current: AtomicUsize,
     max: AtomicUsize,
+}
+
+struct DynamicSchedulingProbeProvider {
+    current: AtomicUsize,
+    follow_up_started_while_slow_running: AtomicBool,
 }
 
 impl AgentProvider for FixedUsageProvider {
@@ -62,6 +77,57 @@ impl ConcurrentProbeProvider {
 
     fn max_concurrent(&self) -> usize {
         self.max.load(Ordering::SeqCst)
+    }
+}
+
+impl DynamicSchedulingProbeProvider {
+    fn new() -> Self {
+        Self {
+            current: AtomicUsize::new(0),
+            follow_up_started_while_slow_running: AtomicBool::new(false),
+        }
+    }
+
+    fn follow_up_started_while_slow_running(&self) -> bool {
+        self.follow_up_started_while_slow_running
+            .load(Ordering::SeqCst)
+    }
+}
+
+impl AgentProvider for DynamicSchedulingProbeProvider {
+    fn name(&self) -> &str {
+        "dynamic-scheduling-probe"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        self.current.fetch_add(1, Ordering::SeqCst);
+        match input.prompt.as_str() {
+            "fast-parent" => thread::sleep(Duration::from_millis(25)),
+            "slow" => thread::sleep(Duration::from_millis(200)),
+            "follow-up" => {
+                if self.current.load(Ordering::SeqCst) > 1 {
+                    self.follow_up_started_while_slow_running
+                        .store(true, Ordering::SeqCst);
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            _ => {}
+        }
+        self.current.fetch_sub(1, Ordering::SeqCst);
+        Ok(AgentProviderResult {
+            output: json!(input.prompt),
+            session_id: None,
+            usage: None,
+            raw: None,
+        })
     }
 }
 
@@ -126,18 +192,18 @@ fn run_debug(
     script_path: PathBuf,
     args: serde_json::Value,
 ) -> smol_workflow_engine::workflow::RunWorkflowResult {
-    let provider = DebugAgentProvider::new();
-    run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(DebugAgentProvider::new());
+    block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args,
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run")
 }
 
@@ -185,34 +251,34 @@ fn runs_module_result_fixture_with_debug_provider() {
 
 #[test]
 fn rejects_missing_metadata_and_missing_default_export() {
-    let provider = DebugAgentProvider::new();
-    let no_meta = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(DebugAgentProvider::new());
+    let no_meta = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("no-meta.workflow.js"),
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .unwrap_err();
     assert!(no_meta
         .to_string()
         .contains("Workflow script must export valid literal metadata"));
 
-    let missing_default = run_workflow(RunWorkflowOptions {
+    let missing_default = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("missing-default.workflow.js"),
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .unwrap_err();
     assert!(missing_default
         .to_string()
@@ -270,18 +336,18 @@ fn runs_child_workflow_fixture() {
 
 #[test]
 fn rejects_nested_child_workflow_fixture() {
-    let provider = DebugAgentProvider::new();
-    let error = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(DebugAgentProvider::new());
+    let error = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("nested-parent.workflow.js"),
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .unwrap_err();
 
     assert!(
@@ -314,18 +380,18 @@ export default { inherited, explicit, phaseOverride };
     )
     .expect("workflow fixture should be written");
 
-    let provider = OptionsEchoProvider;
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(OptionsEchoProvider);
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(
@@ -355,18 +421,18 @@ export default await agent("override me", { provider: "debug" });
     )
     .expect("workflow fixture should be written");
 
-    let provider = FixedUsageProvider;
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(FixedUsageProvider);
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(result.output.result, json!("echo: override me"));
@@ -390,24 +456,64 @@ export default await parallel([
     )
     .expect("workflow fixture should be written");
 
-    let provider = ConcurrentProbeProvider::new();
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(ConcurrentProbeProvider::new());
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(result.output.result, json!(["first", "second", "third"]));
     assert!(
         provider.max_concurrent() > 1,
         "agent provider should have been called concurrently"
+    );
+}
+
+#[test]
+fn starts_follow_up_agent_requests_when_capacity_frees() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("dynamic-parallel-agents.workflow.js");
+    std::fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "dynamic-parallel-agents", description: "dynamic parallel agents" };
+export default await parallel([
+  async () => {
+    await agent("fast-parent");
+    return await agent("follow-up");
+  },
+  () => agent("slow"),
+]);
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let provider = Arc::new(DynamicSchedulingProbeProvider::new());
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider.clone(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: Some(2),
+        on_log: None,
+        on_phase: None,
+    }))
+    .expect("workflow should run");
+
+    assert_eq!(result.output.result, json!(["follow-up", "slow"]));
+    assert!(
+        provider.follow_up_started_while_slow_running(),
+        "follow-up request should start before the slow sibling finishes"
     );
 }
 
@@ -429,18 +535,18 @@ export default await parallel([
     )
     .expect("workflow fixture should be written");
 
-    let provider = ConcurrentProbeProvider::new();
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(ConcurrentProbeProvider::new());
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: Some(2),
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(
@@ -467,18 +573,18 @@ export default await parallel([
     )
     .expect("workflow fixture should be written");
 
-    let provider = ConcurrentProbeProvider::new();
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(ConcurrentProbeProvider::new());
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: Some(1),
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(result.output.result, json!(["first", "second", "third"]));
@@ -495,18 +601,18 @@ fn validates_schema_fixture_with_debug_provider() {
 
 #[test]
 fn updates_live_budget_from_agent_output_token_usage() {
-    let provider = FixedUsageProvider;
-    let result = run_workflow(RunWorkflowOptions {
+    let provider = Arc::new(FixedUsageProvider);
+    let result = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("on-agent-usage-budget.workflow.js"),
         args: json!({}),
-        agent_provider: &provider,
+        agent_provider: provider.clone(),
         budget_total: Some(20),
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         on_log: None,
         on_phase: None,
-    })
+    }))
     .expect("workflow should run");
 
     assert_eq!(

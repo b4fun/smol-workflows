@@ -11,9 +11,11 @@ use crate::js_runtime::{
 use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
 pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
 pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
@@ -21,7 +23,7 @@ pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
 pub struct RunWorkflowOptions<'a> {
     pub script_path: PathBuf,
     pub args: Value,
-    pub agent_provider: &'a dyn AgentProvider,
+    pub agent_provider: Arc<dyn AgentProvider>,
     pub budget_total: Option<u64>,
     pub budget_spent: u64,
     pub nesting_depth: usize,
@@ -46,7 +48,7 @@ pub struct WorkflowPhaseCall {
     pub options: Option<Value>,
 }
 
-pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
+pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
     log::debug!(
         "run_workflow start script={} provider={} nesting_depth={} budget_total={:?} budget_spent={}",
         options.script_path.display(),
@@ -101,47 +103,132 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
         on_phase: options.on_phase,
     };
 
+    let mut pending_requests = VecDeque::<WorkflowRuntimeRequest>::new();
+    let mut agent_tasks = JoinSet::<AgentTaskCompletion>::new();
+
     loop {
-        match execution.poll()? {
-            WorkflowRuntimePoll::Call(call) => state.handle_call(call),
-            WorkflowRuntimePoll::Request(request) => {
-                log::debug!(
-                    "workflow runtime request id={} kind={}",
-                    request.id(),
-                    request.kind()
-                );
-                let mut requests = execution.take_pending_requests()?;
-                if requests.is_empty() {
-                    requests.push(request);
+        let mut made_progress = false;
+
+        loop {
+            match execution.poll()? {
+                WorkflowRuntimePoll::Call(call) => {
+                    state.handle_call(call);
+                    made_progress = true;
                 }
-                for (id, resolution) in state.handle_requests(requests) {
-                    execution.resolve_request(&id, resolution)?;
+                WorkflowRuntimePoll::Request(request) => {
+                    log::debug!(
+                        "workflow runtime request id={} kind={}",
+                        request.id(),
+                        request.kind()
+                    );
+                    let mut requests = execution.take_pending_requests()?;
+                    if requests.is_empty() {
+                        pending_requests.push_back(request);
+                    } else {
+                        pending_requests.extend(requests.drain(..));
+                    }
+                    made_progress = true;
                 }
+                WorkflowRuntimePoll::Complete(output) => {
+                    log::debug!(
+                        "run_workflow complete script={} budget_spent={}",
+                        state.script_path.display(),
+                        state.budget.spent
+                    );
+                    return Ok(RunWorkflowResult {
+                        output,
+                        logs: state.logs,
+                        phases: state.phases,
+                        agent_calls: state.agent_calls,
+                        workflow_calls: state.workflow_calls,
+                        budget: state.budget,
+                    });
+                }
+                WorkflowRuntimePoll::Pending => break,
             }
-            WorkflowRuntimePoll::Complete(output) => {
-                log::debug!(
-                    "run_workflow complete script={} budget_spent={}",
-                    state.script_path.display(),
-                    state.budget.spent
-                );
-                return Ok(RunWorkflowResult {
-                    output,
-                    logs: state.logs,
-                    phases: state.phases,
-                    agent_calls: state.agent_calls,
-                    workflow_calls: state.workflow_calls,
-                    budget: state.budget,
-                });
-            }
-            WorkflowRuntimePoll::Pending => continue,
         }
+
+        while state.agent_capacity_available(agent_tasks.len()) {
+            let Some(request) = pending_requests.pop_front() else {
+                break;
+            };
+
+            match request {
+                WorkflowRuntimeRequest::Agent { .. } => {
+                    let (id, prepared) = state.prepare_agent_request(request);
+                    state.spawn_agent_task(&mut agent_tasks, id, prepared);
+                    made_progress = true;
+                }
+                WorkflowRuntimeRequest::Workflow {
+                    id,
+                    workflow_ref,
+                    args,
+                } => {
+                    state.workflow_calls.push(WorkflowRuntimeRequest::Workflow {
+                        id: id.clone(),
+                        workflow_ref: workflow_ref.clone(),
+                        args: args.clone(),
+                    });
+                    let resolution = match state.handle_workflow(workflow_ref, args).await {
+                        Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
+                            value,
+                            budget: state.budget.clone(),
+                        },
+                        Err(error) => WorkflowRuntimeRequestResolution::Err {
+                            message: error.to_string(),
+                        },
+                    };
+                    execution.resolve_request(&id, resolution)?;
+                    made_progress = true;
+                }
+            }
+        }
+
+        if agent_tasks.is_empty() {
+            if !made_progress {
+                // Preserve the old polling semantics for promise jobs that may be
+                // ready on the next QuickJS job drain.
+                continue;
+            }
+            continue;
+        }
+
+        if made_progress
+            && !pending_requests.is_empty()
+            && state.agent_capacity_available(agent_tasks.len())
+        {
+            continue;
+        }
+
+        let completion = agent_tasks
+            .join_next()
+            .await
+            .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
+            .unwrap_or_else(|error| AgentTaskCompletion {
+                id: "<panicked>".to_string(),
+                result: Err(anyhow!("agent provider worker failed: {error}")),
+            });
+        let id = completion.id;
+        let resolution = match completion
+            .result
+            .and_then(|result| state.apply_agent_result(result))
+        {
+            Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
+                value,
+                budget: state.budget.clone(),
+            },
+            Err(error) => WorkflowRuntimeRequestResolution::Err {
+                message: error.to_string(),
+            },
+        };
+        execution.resolve_request(&id, resolution)?;
     }
 }
 
 struct RunState<'a> {
     script_path: PathBuf,
     metadata: WorkflowMetadata,
-    agent_provider: &'a dyn AgentProvider,
+    agent_provider: Arc<dyn AgentProvider>,
     logs: Vec<Vec<Value>>,
     phases: Vec<WorkflowPhaseCall>,
     agent_calls: Vec<WorkflowRuntimeRequest>,
@@ -156,6 +243,11 @@ struct RunState<'a> {
 struct PreparedAgentRun {
     provider_override: Option<String>,
     input: AgentProviderRunInput,
+}
+
+struct AgentTaskCompletion {
+    id: String,
+    result: anyhow::Result<AgentProviderResult>,
 }
 
 impl<'a> RunState<'a> {
@@ -177,145 +269,62 @@ impl<'a> RunState<'a> {
         }
     }
 
-    fn handle_requests(
-        &mut self,
-        requests: Vec<WorkflowRuntimeRequest>,
-    ) -> Vec<(String, WorkflowRuntimeRequestResolution)> {
-        if requests.len() > 1
-            && requests
-                .iter()
-                .all(|request| matches!(request, WorkflowRuntimeRequest::Agent { .. }))
-        {
-            return self.handle_agent_requests_parallel(requests);
-        }
-
-        requests
-            .into_iter()
-            .map(|request| {
-                let id = request.id().to_string();
-                let resolution = match self.handle_request(request) {
-                    Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
-                        value,
-                        budget: self.budget.clone(),
-                    },
-                    Err(error) => WorkflowRuntimeRequestResolution::Err {
-                        message: error.to_string(),
-                    },
-                };
-                (id, resolution)
-            })
-            .collect()
-    }
-
-    fn handle_request(&mut self, request: WorkflowRuntimeRequest) -> anyhow::Result<Value> {
-        match &request {
-            WorkflowRuntimeRequest::Agent {
-                prompt, options, ..
-            } => {
-                self.agent_calls.push(request.clone());
-                self.handle_agent(prompt.clone(), options.clone())
-            }
-            WorkflowRuntimeRequest::Workflow {
-                workflow_ref, args, ..
-            } => {
-                self.workflow_calls.push(request.clone());
-                self.handle_workflow(workflow_ref.clone(), args.clone())
-            }
-        }
-    }
-
-    fn handle_agent(&mut self, prompt: String, options: Option<Value>) -> anyhow::Result<Value> {
-        let prepared = self.prepare_agent_run(prompt, options);
-        let result = run_agent_provider(
-            self.agent_provider,
-            prepared.provider_override,
-            prepared.input,
-        )?;
-        self.apply_agent_result(result)
-    }
-
-    fn handle_agent_requests_parallel(
-        &mut self,
-        requests: Vec<WorkflowRuntimeRequest>,
-    ) -> Vec<(String, WorkflowRuntimeRequestResolution)> {
+    fn agent_capacity_available(&self, in_flight: usize) -> bool {
         let max_parallel = self
             .max_parallel_agent_requests
             .filter(|value| *value > 0)
-            .unwrap_or(requests.len());
+            .unwrap_or(usize::MAX);
+        in_flight < max_parallel
+    }
+
+    fn prepare_agent_request(
+        &mut self,
+        request: WorkflowRuntimeRequest,
+    ) -> (String, PreparedAgentRun) {
+        match request {
+            WorkflowRuntimeRequest::Agent {
+                id,
+                prompt,
+                options,
+            } => {
+                self.agent_calls.push(WorkflowRuntimeRequest::Agent {
+                    id: id.clone(),
+                    prompt: prompt.clone(),
+                    options: options.clone(),
+                });
+                (id, self.prepare_agent_run(prompt, options))
+            }
+            WorkflowRuntimeRequest::Workflow { .. } => {
+                unreachable!("prepare_agent_request only accepts agent requests")
+            }
+        }
+    }
+
+    fn spawn_agent_task(
+        &self,
+        agent_tasks: &mut JoinSet<AgentTaskCompletion>,
+        id: String,
+        prepared: PreparedAgentRun,
+    ) {
+        let default_provider = Arc::clone(&self.agent_provider);
+        let max_parallel = self
+            .max_parallel_agent_requests
+            .filter(|value| *value > 0)
+            .unwrap_or(usize::MAX);
         log::debug!(
-            "running agent request batch in parallel size={} max_parallel={}",
-            requests.len(),
+            "starting agent request id={} in_flight_after_start={} max_parallel={}",
+            id,
+            agent_tasks.len() + 1,
             max_parallel
         );
-
-        let jobs = requests
-            .into_iter()
-            .map(|request| match request {
-                WorkflowRuntimeRequest::Agent {
-                    id,
-                    prompt,
-                    options,
-                } => {
-                    self.agent_calls.push(WorkflowRuntimeRequest::Agent {
-                        id: id.clone(),
-                        prompt: prompt.clone(),
-                        options: options.clone(),
-                    });
-                    (id, self.prepare_agent_run(prompt, options))
-                }
-                WorkflowRuntimeRequest::Workflow { .. } => {
-                    unreachable!("handle_agent_requests_parallel only accepts agent requests")
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let mut results = Vec::with_capacity(jobs.len());
-        for chunk in jobs.chunks(max_parallel) {
-            results.extend(thread::scope(|scope| {
-                let handles = chunk
-                    .iter()
-                    .map(|(id, prepared)| {
-                        let id = id.clone();
-                        let provider_override = prepared.provider_override.clone();
-                        let input = prepared.input.clone();
-                        let default_provider = self.agent_provider;
-                        scope.spawn(move || {
-                            let result =
-                                run_agent_provider(default_provider, provider_override, input);
-                            (id, result)
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            (
-                                "<panicked>".to_string(),
-                                Err(anyhow!("agent provider worker panicked")),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            }));
-        }
-
-        results
-            .into_iter()
-            .map(|(id, result)| {
-                let resolution = match result.and_then(|result| self.apply_agent_result(result)) {
-                    Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
-                        value,
-                        budget: self.budget.clone(),
-                    },
-                    Err(error) => WorkflowRuntimeRequestResolution::Err {
-                        message: error.to_string(),
-                    },
-                };
-                (id, resolution)
-            })
-            .collect()
+        agent_tasks.spawn_blocking(move || AgentTaskCompletion {
+            id,
+            result: run_agent_provider(
+                default_provider,
+                prepared.provider_override,
+                prepared.input,
+            ),
+        });
     }
 
     fn prepare_agent_run(&self, prompt: String, options: Option<Value>) -> PreparedAgentRun {
@@ -374,7 +383,7 @@ impl<'a> RunState<'a> {
         Ok(result.output)
     }
 
-    fn handle_workflow(
+    async fn handle_workflow(
         &mut self,
         workflow_ref: WorkflowRef,
         args: Option<Value>,
@@ -389,17 +398,18 @@ impl<'a> RunState<'a> {
             WorkflowRef::Name(name) => resolve_named_workflow(&name)?,
         };
         log::debug!("child workflow call script={}", script_path.display());
-        let child = run_workflow(RunWorkflowOptions {
+        let child = Box::pin(run_workflow(RunWorkflowOptions {
             script_path,
             args: args.unwrap_or(Value::Null),
-            agent_provider: self.agent_provider,
+            agent_provider: Arc::clone(&self.agent_provider),
             budget_total: self.budget.total,
             budget_spent: self.budget.spent,
             nesting_depth: self.nesting_depth + 1,
             max_parallel_agent_requests: self.max_parallel_agent_requests,
             on_log: self.on_log,
             on_phase: self.on_phase,
-        })?;
+        }))
+        .await?;
         self.budget = child.budget;
         self.logs.extend(child.logs);
         self.phases.extend(child.phases);
@@ -410,7 +420,7 @@ impl<'a> RunState<'a> {
 }
 
 fn run_agent_provider(
-    default_provider: &dyn AgentProvider,
+    default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {

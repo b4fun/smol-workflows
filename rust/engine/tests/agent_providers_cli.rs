@@ -199,6 +199,30 @@ fn codex_provider_preserves_required_subset_and_cache_aliases() {
 }
 
 #[test]
+fn codex_provider_supports_skip_git_repo_check_option() {
+    let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
+        command: Some(node()),
+        subcommand: vec![
+            fixture("fake-codex-provider.mjs"),
+            "--skip-git-repo-check".into(),
+        ],
+        ..Default::default()
+    });
+
+    let result = provider
+        .run(input("hello codex"))
+        .expect("provider should run");
+    let argv = result.raw.as_ref().unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "argv")
+        .and_then(|event| event["argv"].as_array())
+        .expect("fake provider should emit argv");
+    assert!(argv.iter().any(|arg| arg == "--skip-git-repo-check"));
+}
+
+#[test]
 fn codex_provider_propagates_output_file_read_errors() {
     let provider = CodexAgentProvider::new(CodexAgentProviderOptions {
         command: Some(node()),
