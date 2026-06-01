@@ -53,7 +53,7 @@ smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|openc
 
 The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`.
 
-See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities/structured-output.md) for provider-specific structured-output behavior and [`docs/harness-integration.md`](docs/harness-integration.md) for broader harness research notes.
+See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities/structured-output.md) for provider-specific structured-output behavior and [`docs/harness-capabilities/budget-and-usage.md`](docs/harness-capabilities/budget-and-usage.md) for budget/usage tracking behavior.
 
 ## Durable backends
 
