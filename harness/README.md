@@ -20,6 +20,22 @@ codex plugin marketplace add ./harness
 codex plugin add smol-workflows@smol-workflows-marketplace
 ```
 
+## Pi
+
+Install the package from a checkout:
+
+```sh
+pi install ./
+```
+
+Or try it for one session:
+
+```sh
+pi -e ./
+```
+
+The Pi package registers `smol_workflows_list` and `smol_workflows_run` tools plus the bundled skills.
+
 ## OpenCode
 
 From a checkout of this repository, add the root package as an OpenCode plugin:
