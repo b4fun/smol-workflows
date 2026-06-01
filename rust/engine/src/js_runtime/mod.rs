@@ -150,6 +150,13 @@ impl WorkflowRuntimeRequest {
             Self::Agent { id, .. } | Self::Workflow { id, .. } => id,
         }
     }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Agent { .. } => "agent",
+            Self::Workflow { .. } => "workflow",
+        }
+    }
 }
 
 /// Response used to resume a pending long-running runtime request.

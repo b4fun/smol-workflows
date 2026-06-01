@@ -171,3 +171,32 @@ fn run_supports_agent_provider_debug() {
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(stdout["result"], "echo: hello provider");
 }
+
+#[test]
+fn run_supports_dim_debug_logging() {
+    let output = smol_wf()
+        .args([
+            "run",
+            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "--log-level",
+            "debug",
+            "--args-my-arg1",
+            "logging",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should remain JSON");
+    assert_eq!(stdout["result"], "echo: hello logging");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("\x1b[2m[debug]"));
+    assert!(stderr.contains("cli run script="));
+    assert!(stderr.contains("run_workflow start"));
+}

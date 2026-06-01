@@ -27,6 +27,17 @@ impl AgentProvider for DebugAgentProvider {
     }
 
     fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        log::debug!(
+            "running debug provider phase={:?} key={:?} prompt_len={} schema={}",
+            input.context.phase.as_deref(),
+            input.context.key.as_deref(),
+            input.prompt.len(),
+            input
+                .options
+                .as_ref()
+                .and_then(|options| options.get("schema"))
+                .is_some()
+        );
         let output = input
             .options
             .as_ref()

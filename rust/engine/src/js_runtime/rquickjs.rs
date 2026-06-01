@@ -118,6 +118,13 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
         &self,
         input: WorkflowModuleInput,
     ) -> anyhow::Result<Box<dyn WorkflowRuntimeExecution>> {
+        log::debug!(
+            "quickjs start_module source={} args_type={} budget_total={:?} budget_spent={}",
+            input.source_name,
+            json_value_type(&input.args),
+            input.budget.total,
+            input.budget.spent
+        );
         if input.sandbox.import_policy != ImportPolicy::DenyAll {
             bail!("unsupported workflow import policy");
         }
@@ -197,6 +204,7 @@ impl RQuickJSWorkflowExecution {
         source_name: String,
         source: String,
     ) -> anyhow::Result<()> {
+        log::debug!("quickjs evaluate_module source={source_name}");
         let module = Module::declare(ctx.clone(), source_name, source)
             .catch(ctx)
             .map_err(|error| anyhow!("failed to declare workflow module: {error:?}"))?;
@@ -417,6 +425,17 @@ impl RQuickJSWorkflowExecution {
                 }))
             }
         }
+    }
+}
+
+fn json_value_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -878,6 +897,7 @@ fn create_pending_request<'js>(
     state.next_request_id += 1;
     let id = state.next_request_id.to_string();
     let request = make_request(id.clone(), &mut state);
+    log::debug!("quickjs queued request id={} kind={}", id, request.kind());
     state.pending_requests.insert(
         id,
         PendingRequest {

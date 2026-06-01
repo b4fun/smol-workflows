@@ -1,9 +1,12 @@
+use log::{LevelFilter, Log, Metadata, Record};
 use serde_json::{Map, Value};
 use smol_workflow_engine::agent_providers::create_agent_provider;
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() {
     if let Err(error) = run_cli(env::args().skip(1).collect()) {
@@ -37,11 +40,46 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
     };
 
     let options = parse_run_options(args.collect())?;
+    init_logging(options.log_level);
+    log::debug!(
+        "cli run script={} backend={} agent_provider={} budget_allowance={:?}",
+        script_path,
+        options.backend,
+        options.agent_provider,
+        options.budget_allowance
+    );
     if options.backend != "simple" {
         anyhow::bail!("Unsupported backend: {}", options.backend);
     }
 
     let provider = create_agent_provider(&options.agent_provider)?;
+    let on_phase = |phase: &smol_workflow_engine::workflow::WorkflowPhaseCall| {
+        let mut stderr = io::stderr().lock();
+        match &phase.options {
+            Some(options) => {
+                let _ = writeln!(
+                    stderr,
+                    "[phase] {} {}",
+                    phase.name,
+                    format_log_value(options)
+                );
+            }
+            None => {
+                let _ = writeln!(stderr, "[phase] {}", phase.name);
+            }
+        }
+        let _ = stderr.flush();
+    };
+    let on_log = |values: &[Value]| {
+        let values = values
+            .iter()
+            .map(format_log_value)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(stderr, "[log] {values}");
+        let _ = stderr.flush();
+    };
     let result = run_workflow(RunWorkflowOptions {
         script_path: PathBuf::from(script_path),
         args: Value::Object(options.args),
@@ -49,22 +87,9 @@ fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
         budget_total: options.budget_allowance,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: Some(&on_log),
+        on_phase: Some(&on_phase),
     })?;
-
-    for phase in &result.phases {
-        match &phase.options {
-            Some(options) => eprintln!("[phase] {} {}", phase.name, format_log_value(options)),
-            None => eprintln!("[phase] {}", phase.name),
-        }
-    }
-    for values in &result.logs {
-        let values = values
-            .iter()
-            .map(format_log_value)
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!("[log] {values}");
-    }
 
     println!("{}", serde_json::to_string_pretty(&result.output.result)?);
     Ok(())
@@ -76,6 +101,7 @@ struct RunCliOptions {
     agent_provider: String,
     args: Map<String, Value>,
     budget_allowance: Option<u64>,
+    log_level: LevelFilter,
 }
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
@@ -87,6 +113,11 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         .ok()
         .map(|value| parse_non_negative_integer(&value, "SMOL_WF_BUDGET_ALLOWANCE"))
         .transpose()?;
+    let mut log_level = env::var("SMOL_WF_LOG")
+        .ok()
+        .map(|value| parse_log_level(&value, "SMOL_WF_LOG"))
+        .transpose()?
+        .unwrap_or(LevelFilter::Off);
     let mut index = 0;
 
     while index < argv.len() {
@@ -125,6 +156,22 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
             continue;
         }
 
+        if token == "--log-level" || token.starts_with("--log-level=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            log_level = parse_log_level(&parsed.value, "--log-level")?;
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
+        if token == "--debug" {
+            log_level = LevelFilter::Debug;
+            index += 1;
+            continue;
+        }
+
         if is_workflow_arg_token(token) {
             workflow_arg_tokens.push(token.clone());
             if !token.contains('=') {
@@ -149,6 +196,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
+        log_level,
     })
 }
 
@@ -285,6 +333,80 @@ fn parse_non_negative_integer(value: &str, name: &str) -> anyhow::Result<u64> {
     Ok(parsed)
 }
 
+fn parse_log_level(value: &str, name: &str) -> anyhow::Result<LevelFilter> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "quiet" => Ok(LevelFilter::Off),
+        "error" => Ok(LevelFilter::Error),
+        "warn" | "warning" => Ok(LevelFilter::Warn),
+        "info" => Ok(LevelFilter::Info),
+        "debug" => Ok(LevelFilter::Debug),
+        "trace" => Ok(LevelFilter::Trace),
+        _ => anyhow::bail!("{name} must be one of off, error, warn, info, debug, trace"),
+    }
+}
+
+static LOGGER: DimStderrLogger = DimStderrLogger;
+static LOGGER_LEVEL: AtomicUsize = AtomicUsize::new(0);
+
+struct DimStderrLogger;
+
+impl Log for DimStderrLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level().to_level_filter() <= current_log_level()
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "\x1b[2m[{}] {}\x1b[0m",
+            record.level().to_string().to_ascii_lowercase(),
+            record.args()
+        );
+        let _ = stderr.flush();
+    }
+
+    fn flush(&self) {
+        let _ = io::stderr().flush();
+    }
+}
+
+fn init_logging(level: LevelFilter) {
+    LOGGER_LEVEL.store(level_to_usize(level), Ordering::Relaxed);
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(LevelFilter::Trace);
+    }
+}
+
+fn current_log_level() -> LevelFilter {
+    usize_to_level(LOGGER_LEVEL.load(Ordering::Relaxed))
+}
+
+fn level_to_usize(level: LevelFilter) -> usize {
+    match level {
+        LevelFilter::Off => 0,
+        LevelFilter::Error => 1,
+        LevelFilter::Warn => 2,
+        LevelFilter::Info => 3,
+        LevelFilter::Debug => 4,
+        LevelFilter::Trace => 5,
+    }
+}
+
+fn usize_to_level(value: usize) -> LevelFilter {
+    match value {
+        1 => LevelFilter::Error,
+        2 => LevelFilter::Warn,
+        3 => LevelFilter::Info,
+        4 => LevelFilter::Debug,
+        5 => LevelFilter::Trace,
+        _ => LevelFilter::Off,
+    }
+}
+
 fn format_log_value(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -294,6 +416,6 @@ fn format_log_value(value: &Value) -> String {
 
 fn print_help() {
     eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--args-<name> value] [--args-from-file <json-file>]"
+        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]"
     );
 }

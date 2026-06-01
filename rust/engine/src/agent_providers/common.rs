@@ -17,6 +17,13 @@ pub fn run_command(
     env: &HashMap<String, String>,
     timeout_ms: Option<u64>,
 ) -> anyhow::Result<(String, String)> {
+    log::debug!(
+        "running {provider} provider CLI: {} cwd={:?} stdin={} timeout_ms={:?}",
+        format_command_invocation(command, args),
+        cwd,
+        stdin.map(|value| value.len()).unwrap_or(0),
+        timeout_ms
+    );
     let mut child = Command::new(command);
     child.args(args);
     if let Some(cwd) = cwd {
@@ -50,6 +57,11 @@ pub fn run_command(
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 if status.success() {
+                    log::debug!(
+                        "{provider} provider CLI completed stdout={} stderr={}",
+                        stdout.len(),
+                        stderr.len()
+                    );
                     return Ok((stdout, stderr));
                 }
                 bail!(
@@ -71,6 +83,11 @@ pub fn run_command(
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.status.success() {
+        log::debug!(
+            "{provider} provider CLI completed stdout={} stderr={}",
+            stdout.len(),
+            stderr.len()
+        );
         Ok((stdout, stderr))
     } else {
         bail!(
@@ -78,6 +95,24 @@ pub fn run_command(
             status_text(output.status.code()),
             format_command_failure(&stdout, &stderr)
         )
+    }
+}
+
+fn format_command_invocation(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(command.to_string());
+    parts.extend(args.iter().map(|arg| format_arg_for_log(arg)));
+    truncate(&parts.join(" "), 1000)
+}
+
+fn format_arg_for_log(arg: &str) -> String {
+    let arg = truncate(arg, 200);
+    if arg.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '@')
+    }) {
+        arg
+    } else {
+        format!("{:?}", arg)
     }
 }
 

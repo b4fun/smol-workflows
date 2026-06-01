@@ -20,6 +20,8 @@ pub struct RunWorkflowOptions<'a> {
     pub budget_total: Option<u64>,
     pub budget_spent: u64,
     pub nesting_depth: usize,
+    pub on_log: Option<&'a dyn Fn(&[Value])>,
+    pub on_phase: Option<&'a dyn Fn(&WorkflowPhaseCall)>,
 }
 
 #[derive(Debug)]
@@ -39,6 +41,14 @@ pub struct WorkflowPhaseCall {
 }
 
 pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
+    log::debug!(
+        "run_workflow start script={} provider={} nesting_depth={} budget_total={:?} budget_spent={}",
+        options.script_path.display(),
+        options.agent_provider.name(),
+        options.nesting_depth,
+        options.budget_total,
+        options.budget_spent
+    );
     let script_path = fs::canonicalize(&options.script_path).with_context(|| {
         format!(
             "failed to resolve workflow script {}",
@@ -48,6 +58,11 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
     let metadata = read_workflow_metadata(&script_path)?.ok_or_else(|| {
         anyhow!("Workflow script must export valid literal metadata as `export const meta = {{ name, description, ... }}`")
     })?;
+    log::debug!(
+        "workflow metadata loaded name={} phases={}",
+        metadata.name,
+        metadata.phases.len()
+    );
     let source = fs::read_to_string(&script_path)
         .with_context(|| format!("failed to read workflow script {}", script_path.display()))?;
     let runtime = RQuickJSWorkflowRuntime::new();
@@ -75,12 +90,19 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
             spent: options.budget_spent,
         },
         nesting_depth: options.nesting_depth,
+        on_log: options.on_log,
+        on_phase: options.on_phase,
     };
 
     loop {
         match execution.poll()? {
             WorkflowRuntimePoll::Call(call) => state.handle_call(call),
             WorkflowRuntimePoll::Request(request) => {
+                log::debug!(
+                    "workflow runtime request id={} kind={}",
+                    request.id(),
+                    request.kind()
+                );
                 let id = request.id().to_string();
                 match state.handle_request(request) {
                     Ok(value) => execution.resolve_request(
@@ -99,6 +121,11 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
                 }
             }
             WorkflowRuntimePoll::Complete(output) => {
+                log::debug!(
+                    "run_workflow complete script={} budget_spent={}",
+                    state.script_path.display(),
+                    state.budget.spent
+                );
                 return Ok(RunWorkflowResult {
                     output,
                     logs: state.logs,
@@ -106,7 +133,7 @@ pub fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkfl
                     agent_calls: state.agent_calls,
                     workflow_calls: state.workflow_calls,
                     budget: state.budget,
-                })
+                });
             }
             WorkflowRuntimePoll::Pending => continue,
         }
@@ -123,14 +150,25 @@ struct RunState<'a> {
     workflow_calls: Vec<WorkflowRuntimeRequest>,
     budget: WorkflowBudgetSnapshot,
     nesting_depth: usize,
+    on_log: Option<&'a dyn Fn(&[Value])>,
+    on_phase: Option<&'a dyn Fn(&WorkflowPhaseCall)>,
 }
 
 impl RunState<'_> {
     fn handle_call(&mut self, call: WorkflowRuntimeCall) {
         match call {
-            WorkflowRuntimeCall::Log { values } => self.logs.push(values),
+            WorkflowRuntimeCall::Log { values } => {
+                if let Some(on_log) = self.on_log {
+                    on_log(&values);
+                }
+                self.logs.push(values);
+            }
             WorkflowRuntimeCall::Phase { name, options } => {
-                self.phases.push(WorkflowPhaseCall { name, options });
+                let phase = WorkflowPhaseCall { name, options };
+                if let Some(on_phase) = self.on_phase {
+                    on_phase(&phase);
+                }
+                self.phases.push(phase);
             }
         }
     }
@@ -172,6 +210,19 @@ impl RunState<'_> {
             .and_then(|options| options.get("provider"))
             .and_then(Value::as_str)
             .map(ToString::to_string);
+        log::debug!(
+            "agent call provider={} phase={:?} key={:?} model={:?} prompt_len={}",
+            provider_override
+                .as_deref()
+                .unwrap_or_else(|| self.agent_provider.name()),
+            context.phase.as_deref(),
+            context.key.as_deref(),
+            options
+                .as_ref()
+                .and_then(|options| options.get("model"))
+                .and_then(Value::as_str),
+            prompt.len()
+        );
         let input = AgentProviderRunInput {
             prompt,
             options,
@@ -185,6 +236,12 @@ impl RunState<'_> {
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
+        log::debug!(
+            "agent call complete session_id={:?} output_tokens={:?} budget_spent={}",
+            result.session_id,
+            result.usage.as_ref().and_then(|usage| usage.output_tokens),
+            self.budget.spent
+        );
         Ok(result.output)
     }
 
@@ -202,6 +259,7 @@ impl RunState<'_> {
             }
             WorkflowRef::Name(name) => resolve_named_workflow(&name)?,
         };
+        log::debug!("child workflow call script={}", script_path.display());
         let child = run_workflow(RunWorkflowOptions {
             script_path,
             args: args.unwrap_or(Value::Null),
@@ -209,6 +267,8 @@ impl RunState<'_> {
             budget_total: self.budget.total,
             budget_spent: self.budget.spent,
             nesting_depth: self.nesting_depth + 1,
+            on_log: self.on_log,
+            on_phase: self.on_phase,
         })?;
         self.budget = child.budget;
         self.logs.extend(child.logs);

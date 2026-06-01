@@ -593,6 +593,7 @@ name = "smol-workflow-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "serde_json",
  "smol-workflow-engine",
 ]
@@ -602,6 +603,7 @@ name = "smol-workflow-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "rquickjs",
  "rquickjs-serde",
  "serde",

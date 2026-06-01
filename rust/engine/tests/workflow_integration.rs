@@ -87,6 +87,8 @@ fn run_debug(
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .expect("workflow should run")
 }
@@ -143,6 +145,8 @@ fn rejects_missing_metadata_and_missing_default_export() {
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .unwrap_err();
     assert!(no_meta
@@ -156,6 +160,8 @@ fn rejects_missing_metadata_and_missing_default_export() {
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .unwrap_err();
     assert!(missing_default
@@ -222,6 +228,8 @@ fn rejects_nested_child_workflow_fixture() {
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .unwrap_err();
 
@@ -263,6 +271,8 @@ export default { inherited, explicit, phaseOverride };
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .expect("workflow should run");
 
@@ -301,6 +311,8 @@ export default await agent("override me", { provider: "debug" });
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .expect("workflow should run");
 
@@ -326,6 +338,8 @@ fn updates_live_budget_from_agent_output_token_usage() {
         budget_total: Some(20),
         budget_spent: 0,
         nesting_depth: 0,
+        on_log: None,
+        on_phase: None,
     })
     .expect("workflow should run");
 
