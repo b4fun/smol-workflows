@@ -1,5 +1,6 @@
 export const meta = {
   name: 'refine-agent-providers-impl',
+  description: 'Review and refine agent provider implementations across available providers',
   phases: [
     { title: 'Review', detail: 'Review individual agent provider implementation' },
     { title: 'Synthesize', detail: 'Summarize findings and list action items' },

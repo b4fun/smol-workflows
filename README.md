@@ -7,7 +7,8 @@ The workflow scripting syntax is based on [Claude Code's dynamic workflows](http
 ## What is in this repo
 
 - `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
-- `ts/engine` — CLI and isolated runner (`@smol-workflow/engine`).
+- `ts/engine` — TypeScript CLI and isolated runner (`@smol-workflow/engine`).
+- `rust/engine` and `rust/cli` — Rust workflow engine, sandboxed QuickJS runner, built-in providers, and `smol-wf` CLI.
 - `examples` — runnable workflow scripts.
 - `docs` — design notes, workflow API reference, and harness integration findings.
 
@@ -47,6 +48,7 @@ export default { greeting }
 smol-wf run <workflow-script> [--args-<name> value]
 smol-wf run <workflow-script> --args-from-file <args.json>
 smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
+smol-wf run <workflow-script> --max-parallel-agents <count>
 ```
 
 ### Agent providers
@@ -65,10 +67,9 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 
 - [ ] back budget accounting with an authoritative run/session data source instead of parent-child IPC snapshots
 - [ ] full coverage of dynamic workflow options and resume semantics
-- [ ] port engine to Rust-based implementation + built-in durable workflows
+- [ ] built-in durable workflows in the Rust implementation
 - [ ] isolation support for file-mutating agents
 - [ ] durable retry policies
-- [ ] concurrency limits and controls
 - [ ] dashboard
 - [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data
 - [ ] environment abstraction

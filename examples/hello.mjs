@@ -55,4 +55,9 @@ export default {
   plan,
   drafts,
   finalGreeting,
+  budget: {
+    total: budget.total,
+    spent: budget.spent(),
+    remaining: budget.total === null ? null : budget.remaining(),
+  },
 }

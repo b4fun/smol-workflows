@@ -7,3 +7,21 @@ edition.workspace = true
 [lib]
 name = "smol_workflow_engine"
 path = "src/lib.rs"
+
+[features]
+default = []
+# Enables provider conveniences needed by real integration tests in temporary workspaces.
+integration-test = []
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+log = "0.4"
+rquickjs = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rquickjs-serde = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+ureq = { version = "2", features = ["json"] }

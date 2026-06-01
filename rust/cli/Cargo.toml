@@ -1,0 +1,21 @@
+[package]
+name = "smol-workflow-cli"
+description = "CLI for the smol-workflows Rust engine."
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "smol-wf"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enables provider conveniences needed by real integration tests in temporary workspaces.
+integration-test = ["smol-workflow-engine/integration-test"]
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde_json = "1"
+smol-workflow-engine = { path = "../engine" }
+tokio = { version = "1", features = ["macros", "rt"] }
