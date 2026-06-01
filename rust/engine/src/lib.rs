@@ -4,6 +4,7 @@
 //! `ts/engine` will be ported here incrementally.
 
 pub mod agent_providers;
+pub mod durable;
 pub mod js_runtime;
 pub mod metadata;
 pub mod workflow;
