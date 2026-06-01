@@ -246,3 +246,49 @@ export default await parallel([
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
 }
+
+#[test]
+fn run_supports_sqlite_backend() {
+    let dir = std::env::temp_dir().join(format!(
+        "smol-wf-cli-sqlite-{}-{}",
+        std::process::id(),
+        "backend"
+    ));
+    fs::create_dir_all(&dir).expect("tempdir should be created");
+    let script_path = dir.join("sqlite.workflow.mjs");
+    let db_path = dir.join("workflow.db");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "cli-sqlite", description: "CLI SQLite backend" };
+export default { result: await agent("sqlite") };
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let output = smol_wf()
+        .args([
+            "run",
+            script_path.to_str().expect("path should be utf8"),
+            "--backend",
+            "sqlite",
+            "--db",
+            db_path.to_str().expect("db path should be utf8"),
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout, json!({ "result": "echo: sqlite" }));
+    assert!(
+        db_path.exists(),
+        "sqlite backend should create a database file"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

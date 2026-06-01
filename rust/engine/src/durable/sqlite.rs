@@ -1,13 +1,12 @@
 //! SQLite durable workflow store infrastructure.
 //!
 //! This module owns database opening, pragmatic SQLite setup, and schema
-//! migrations. The migration shape follows the Absurd SQLite extension pattern:
-//! numbered SQL files are embedded at compile time, applied inside one immediate
-//! transaction, and recorded in a migrations table.
+//! migrations. Numbered SQL files are embedded at compile time, applied inside
+//! one immediate transaction, and recorded in a migrations table.
 
 use anyhow::{anyhow, bail, Context};
 use rusqlite::{params, Connection};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod embedded_migrations {
@@ -33,6 +32,7 @@ pub struct MigrationRecord {
 /// SQLite-backed durable workflow store.
 pub struct SqliteDurableStore {
     connection: Connection,
+    path: Option<PathBuf>,
 }
 
 impl SqliteDurableStore {
@@ -45,7 +45,10 @@ impl SqliteDurableStore {
             )
         })?;
         configure_connection(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            path: Some(path.as_ref().to_path_buf()),
+        })
     }
 
     /// Create an in-memory durable store. Useful for tests.
@@ -53,7 +56,15 @@ impl SqliteDurableStore {
         let connection = Connection::open_in_memory()
             .context("failed to open in-memory durable SQLite database")?;
         configure_connection(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            path: None,
+        })
+    }
+
+    /// Return the durable database path when this store was opened from a file.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// Borrow the underlying SQLite connection.
@@ -242,11 +253,15 @@ fn applied_migration_ids(
     Ok(ids)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+pub(crate) fn new_id(prefix: &str) -> String {
+    format!("{prefix}_{}", ulid::Ulid::new())
 }
 
 #[cfg(test)]

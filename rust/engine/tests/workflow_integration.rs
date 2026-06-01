@@ -204,6 +204,7 @@ fn run_debug(
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -263,6 +264,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -279,6 +281,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -348,6 +351,7 @@ fn rejects_nested_child_workflow_fixture() {
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -392,6 +396,7 @@ export default { inherited, explicit, phaseOverride };
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -433,6 +438,7 @@ export default await agent("override me", { provider: "debug" });
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -468,6 +474,7 @@ export default await parallel([
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -508,6 +515,7 @@ export default await parallel([
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: Some(2),
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -547,6 +555,7 @@ export default await parallel([
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: Some(2),
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -585,6 +594,7 @@ export default await parallel([
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: Some(1),
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))
@@ -613,6 +623,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
         budget_spent: 0,
         nesting_depth: 0,
         max_parallel_agent_requests: None,
+        agent_runner: None,
         on_log: None,
         on_phase: None,
     }))

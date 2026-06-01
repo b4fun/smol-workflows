@@ -21,6 +21,31 @@ use tokio::task::{JoinSet, LocalSet};
 pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
 pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
 
+#[async_trait::async_trait]
+pub trait WorkflowAgentRunner: Send + Sync {
+    async fn run_agent(
+        &self,
+        default_provider: Arc<dyn AgentProvider>,
+        provider_override: Option<String>,
+        input: AgentProviderRunInput,
+    ) -> anyhow::Result<AgentProviderResult>;
+}
+
+#[derive(Debug, Default)]
+pub struct DirectWorkflowAgentRunner;
+
+#[async_trait::async_trait]
+impl WorkflowAgentRunner for DirectWorkflowAgentRunner {
+    async fn run_agent(
+        &self,
+        default_provider: Arc<dyn AgentProvider>,
+        provider_override: Option<String>,
+        input: AgentProviderRunInput,
+    ) -> anyhow::Result<AgentProviderResult> {
+        run_agent_provider(default_provider, provider_override, input).await
+    }
+}
+
 pub struct RunWorkflowOptions<'a> {
     pub script_path: PathBuf,
     pub args: Value,
@@ -29,6 +54,7 @@ pub struct RunWorkflowOptions<'a> {
     pub budget_spent: u64,
     pub nesting_depth: usize,
     pub max_parallel_agent_requests: Option<usize>,
+    pub agent_runner: Option<Arc<dyn WorkflowAgentRunner>>,
     pub on_log: Option<WorkflowLogCallback<'a>>,
     pub on_phase: Option<WorkflowPhaseCallback<'a>>,
 }
@@ -108,6 +134,9 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
         },
         nesting_depth: options.nesting_depth,
         max_parallel_agent_requests: options.max_parallel_agent_requests,
+        agent_runner: options
+            .agent_runner
+            .unwrap_or_else(|| Arc::new(DirectWorkflowAgentRunner)),
         on_log: options.on_log,
         on_phase: options.on_phase,
     };
@@ -256,6 +285,7 @@ struct RunState<'a> {
     budget: WorkflowBudgetSnapshot,
     nesting_depth: usize,
     max_parallel_agent_requests: Option<usize>,
+    agent_runner: Arc<dyn WorkflowAgentRunner>,
     on_log: Option<WorkflowLogCallback<'a>>,
     on_phase: Option<WorkflowPhaseCallback<'a>>,
 }
@@ -412,6 +442,7 @@ impl<'a> RunState<'a> {
         prepared: PreparedAgentRun,
     ) {
         let default_provider = Arc::clone(&self.agent_provider);
+        let agent_runner = Arc::clone(&self.agent_runner);
         let max_parallel = self
             .max_parallel_agent_requests
             .filter(|value| *value > 0)
@@ -425,12 +456,9 @@ impl<'a> RunState<'a> {
         agent_tasks.spawn(async move {
             AgentTaskCompletion {
                 id,
-                result: run_agent_provider(
-                    default_provider,
-                    prepared.provider_override,
-                    prepared.input,
-                )
-                .await,
+                result: agent_runner
+                    .run_agent(default_provider, prepared.provider_override, prepared.input)
+                    .await,
             }
         });
     }
@@ -514,6 +542,7 @@ impl<'a> RunState<'a> {
             budget_spent: self.budget.spent,
             nesting_depth: self.nesting_depth + 1,
             max_parallel_agent_requests: self.max_parallel_agent_requests,
+            agent_runner: Some(Arc::clone(&self.agent_runner)),
             on_log: self.on_log,
             on_phase: self.on_phase,
         }))
