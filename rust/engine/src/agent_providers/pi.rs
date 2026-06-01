@@ -407,7 +407,7 @@ fn extract_output_from_event(event: &Value) -> Option<String> {
         Some("agent_end") => record
             .get("messages")
             .and_then(Value::as_array)
-            .and_then(|messages| messages.iter().filter(|m| is_assistant_message(m)).last())
+            .and_then(|messages| messages.iter().rev().find(|m| is_assistant_message(m)))
             .and_then(extract_assistant_message_text),
         Some("message_update") => record
             .get("message")

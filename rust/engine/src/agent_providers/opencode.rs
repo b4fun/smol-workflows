@@ -371,7 +371,7 @@ fn extract_structured_output(value: &Value) -> Option<Value> {
 fn extract_output(raw: &Value) -> Option<String> {
     match raw {
         Value::String(text) => Some(text.clone()),
-        Value::Array(items) => items.iter().filter_map(extract_output).last(),
+        Value::Array(items) => items.iter().rev().find_map(extract_output),
         Value::Object(record) => {
             if record.get("type").and_then(Value::as_str) == Some("text") {
                 if let Some(text) = record.get("part").and_then(extract_text) {

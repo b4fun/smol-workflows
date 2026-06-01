@@ -237,7 +237,7 @@ fn extract_last_assistant_text(events: &[Value]) -> Option<String> {
 
 fn extract_assistant_text(value: &Value) -> Option<String> {
     match value {
-        Value::Array(items) => items.iter().filter_map(extract_assistant_text).last(),
+        Value::Array(items) => items.iter().rev().find_map(extract_assistant_text),
         Value::Object(record) => {
             let text = extract_text(
                 record
@@ -246,16 +246,15 @@ fn extract_assistant_text(value: &Value) -> Option<String> {
                     .or_else(|| record.get("message"))
                     .or_else(|| record.get("content"))?,
             );
-            if matches!(
+            if (matches!(
                 record.get("role").and_then(Value::as_str),
                 Some("assistant")
             ) || matches!(
                 record.get("type").and_then(Value::as_str),
                 Some("assistant_message" | "message")
-            ) {
-                if text.is_some() {
-                    return text;
-                }
+            )) && text.is_some()
+            {
+                return text;
             }
             for key in [
                 "message",

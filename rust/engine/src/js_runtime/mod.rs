@@ -44,19 +44,10 @@ impl WorkflowModuleInput {
 }
 
 /// Budget values exposed through the workflow `budget` global.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct WorkflowBudgetSnapshot {
     pub total: Option<u64>,
     pub spent: u64,
-}
-
-impl Default for WorkflowBudgetSnapshot {
-    fn default() -> Self {
-        Self {
-            total: None,
-            spent: 0,
-        }
-    }
 }
 
 /// Sandbox limits for JavaScript execution.

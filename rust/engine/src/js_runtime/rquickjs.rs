@@ -686,7 +686,7 @@ fn create_budget_object<'js>(
             "total",
             Accessor::from(
                 move |ctx: rquickjs::Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-                    rquickjs_serde::to_value(ctx, &total_state.borrow().budget.total).map_err(
+                    rquickjs_serde::to_value(ctx, total_state.borrow().budget.total).map_err(
                         |error| rquickjs::Error::IntoJs {
                             from: "WorkflowBudgetSnapshot.total",
                             to: "value",
