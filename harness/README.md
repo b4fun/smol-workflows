@@ -25,36 +25,28 @@ codex plugin add smol-workflows@smol-workflows-marketplace
 Install the package from a checkout:
 
 ```sh
-pi install ./
+pi install ./harness
 ```
 
 Or try it for one session:
 
 ```sh
-pi -e ./
+pi -e ./harness
 ```
 
 The Pi package registers `smol_workflows_list` and `smol_workflows_run` tools plus the bundled skills.
 
 ## OpenCode
 
-From a checkout of this repository, add the root package as an OpenCode plugin:
+From a checkout of this repository, add the OpenCode harness package as a plugin:
 
 ```json
 {
-  "plugin": ["/path/to/smol-workflows"]
+  "plugin": ["/path/to/smol-workflows/harness"]
 }
 ```
 
-For a git-backed install, use the repository package once published/available:
-
-```json
-{
-  "plugin": ["smol-workflows@git+https://github.com/b4fun/smol-workflows.git"]
-}
-```
-
-Restart OpenCode after changing plugin config. The OpenCode plugin registers the bundled `smol-workflows` skills and injects a short note telling the agent when to load them.
+Restart OpenCode after changing plugin config. The OpenCode plugin registers the bundled `smol-workflows` skills and exposes workflow list/run tools.
 
 ## GitHub Copilot CLI
 

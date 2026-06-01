@@ -1,8 +1,9 @@
 {
-  "name": "smol-workflows",
+  "name": "smol-workflows-harness",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "main": "harness/opencode/plugin.js",
+  "main": "./opencode/plugin.js",
   "keywords": [
     "pi-package",
     "smol-workflows",
@@ -18,10 +19,10 @@
   },
   "pi": {
     "extensions": [
-      "./harness/pi/extension.ts"
+      "./pi/extension.ts"
     ],
     "skills": [
-      "./harness/plugins/smol-workflows/skills"
+      "./plugins/smol-workflows/skills"
     ]
   }
 }
