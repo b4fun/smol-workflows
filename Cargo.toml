@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/engine"]
+members = ["rust/engine", "rust/cli"]
 resolver = "2"
 
 [workspace.package]

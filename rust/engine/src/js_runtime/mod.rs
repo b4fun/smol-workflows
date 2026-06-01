@@ -2,8 +2,13 @@
 //!
 //! The boundary in this module is intentionally independent of any particular
 //! JavaScript engine. The first implementation is backed by QuickJS via
-//! [`rquickjs`], but callers should depend on [`WorkflowJsRuntime`] rather than
+//! [`rquickjs`], but callers should depend on these traits and types rather than
 //! directly on the engine crate.
+//!
+//! Runtime implementations own JavaScript parsing, execution, sandboxing, and
+//! the local JavaScript ↔ Rust bridge. The Rust workflow core drives the runtime
+//! as a resumable execution and handles semantic calls/requests such as log,
+//! phase, agent, and child workflow invocations.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +25,8 @@ pub struct WorkflowModuleInput {
     pub source_name: String,
     /// Workflow `args` global.
     pub args: Value,
+    /// Initial budget snapshot exposed through the `budget` global.
+    pub budget: WorkflowBudgetSnapshot,
     /// Sandbox limits and access policy for the runtime.
     pub sandbox: SandboxOptions,
 }
@@ -30,7 +37,24 @@ impl WorkflowModuleInput {
             source: source.into(),
             source_name: source_name.into(),
             args,
+            budget: WorkflowBudgetSnapshot::default(),
             sandbox: SandboxOptions::default(),
+        }
+    }
+}
+
+/// Budget values exposed through the workflow `budget` global.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct WorkflowBudgetSnapshot {
+    pub total: Option<u64>,
+    pub spent: u64,
+}
+
+impl Default for WorkflowBudgetSnapshot {
+    fn default() -> Self {
+        Self {
+            total: None,
+            spent: 0,
         }
     }
 }
@@ -72,33 +96,106 @@ pub struct WorkflowModuleOutput {
     /// Default-exported workflow result after function invocation, if the default
     /// export was a function.
     pub result: Value,
-    /// Values passed to `log(...)`.
-    pub logs: Vec<Vec<Value>>,
-    /// Calls to `phase(...)`.
-    pub phases: Vec<PhaseEvent>,
-    /// Calls to `agent(...)` captured by the experimental local echo agent.
-    ///
-    /// The production runner will replace this echo path with a host/provider
-    /// bridge while preserving this runtime boundary shape.
-    #[serde(rename = "agentCalls")]
-    pub agent_calls: Vec<AgentCall>,
 }
 
+/// Reference to a child workflow, matching the TypeScript SDK shape.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct PhaseEvent {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Value>,
+#[serde(untagged)]
+pub enum WorkflowRef {
+    Name(String),
+    ScriptPath {
+        #[serde(rename = "scriptPath")]
+        script_path: String,
+    },
 }
 
+/// Synchronous calls emitted by workflow JS.
+///
+/// These calls do not produce JavaScript-visible values. The workflow core should
+/// update its run state and continue polling the runtime.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct AgentCall {
-    pub prompt: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Value>,
+#[serde(tag = "type")]
+pub enum WorkflowRuntimeCall {
+    /// Workflow called `log(...)`.
+    #[serde(rename = "log")]
+    Log { values: Vec<Value> },
+
+    /// Workflow called `phase(...)`.
+    #[serde(rename = "phase")]
+    Phase {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Value>,
+    },
+}
+
+/// Long-running JavaScript-visible request emitted by workflow JS.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum WorkflowRuntimeRequest {
+    /// Workflow called `agent(...)` and is awaiting the provider result.
+    #[serde(rename = "agent")]
+    Agent {
+        id: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Value>,
+    },
+
+    /// Workflow called `workflow(...)` and is awaiting a child workflow result.
+    #[serde(rename = "workflow")]
+    Workflow {
+        id: String,
+        #[serde(rename = "ref")]
+        workflow_ref: WorkflowRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Value>,
+    },
+}
+
+impl WorkflowRuntimeRequest {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Agent { id, .. } | Self::Workflow { id, .. } => id,
+        }
+    }
+}
+
+/// Response used to resume a pending long-running runtime request.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum WorkflowRuntimeRequestResolution {
+    Ok(Value),
+    Err { message: String },
+}
+
+/// Result of polling a workflow JavaScript runtime execution.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum WorkflowRuntimePoll {
+    /// Runtime emitted a synchronous call. Core should handle it and poll again.
+    Call(WorkflowRuntimeCall),
+    /// Runtime is waiting for a long-running request to be resolved.
+    Request(WorkflowRuntimeRequest),
+    /// Workflow module completed.
+    Complete(WorkflowModuleOutput),
+    /// Runtime has no work ready and is not complete.
+    Pending,
+}
+
+/// Resumable workflow JavaScript execution.
+pub trait WorkflowRuntimeExecution {
+    fn poll(&mut self) -> anyhow::Result<WorkflowRuntimePoll>;
+
+    fn resolve_request(
+        &mut self,
+        id: &str,
+        resolution: WorkflowRuntimeRequestResolution,
+    ) -> anyhow::Result<()>;
 }
 
 /// Engine-independent JavaScript workflow runtime interface.
-pub trait WorkflowJsRuntime {
-    fn execute_module(&self, input: WorkflowModuleInput) -> anyhow::Result<WorkflowModuleOutput>;
+pub trait WorkflowJSRuntime {
+    fn start_module(
+        &self,
+        input: WorkflowModuleInput,
+    ) -> anyhow::Result<Box<dyn WorkflowRuntimeExecution>>;
 }
