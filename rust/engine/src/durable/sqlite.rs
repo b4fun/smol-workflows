@@ -260,13 +260,36 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Generate a durable-engine ID with a stable lowercase text form.
+///
+/// ULID's canonical display form is uppercase Crockford Base32, but these IDs are
+/// used as opaque workflow/database identifiers rather than values that users
+/// need to parse as canonical ULIDs. We normalize the suffix to lowercase so IDs
+/// remain consistent with the snake_case prefixes (`run_`, `task_`, `step_`,
+/// `budget_`) and are easier to copy through logs, URLs, shells, and
+/// case-sensitive external systems without mixed-case surprises.
+///
+/// Any code that compares durable IDs should treat this lowercase form as the
+/// stored/canonical engine representation.
 pub(crate) fn new_id(prefix: &str) -> String {
-    format!("{prefix}_{}", ulid::Ulid::new())
+    format!(
+        "{prefix}_{}",
+        ulid::Ulid::new().to_string().to_ascii_lowercase()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_ids_use_lowercase_ulid_suffixes() {
+        for prefix in ["task", "run", "step", "budget"] {
+            let id = new_id(prefix);
+            assert!(id.starts_with(&format!("{prefix}_")));
+            assert_eq!(id, id.to_ascii_lowercase());
+        }
+    }
 
     #[test]
     fn initializes_schema_and_records_migration() {
