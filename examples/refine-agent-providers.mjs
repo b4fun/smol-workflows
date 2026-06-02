@@ -59,9 +59,9 @@ const REVIEW_SCHEMA = {
 const reviewResults = await parallel(
   PROVIDERS.map(name => () =>
     agent(
-      `You are a senior TypeScript code reviewer. Review ./ts/engine/src/agent-providers/${name}.ts.
+      `You are a senior Rust code reviewer. Review ./rust/engine/src/agent_providers/${name}.rs.
 
-Focus on correctness, CLI invocation compatibility, structured-output parsing, usage/session parsing, error handling, test coverage, and consistency with the other providers in ./ts/engine/src/agent-providers/.
+Focus on correctness, CLI invocation compatibility, structured-output parsing, usage/session parsing, error handling, test coverage, and consistency with the other providers in ./rust/engine/src/agent_providers/.
 
 Return only high-signal findings. Prefer concrete, actionable feedback over style nits.
 
@@ -257,7 +257,7 @@ Requirements:
 - Add or update tests when the change affects behavior.
 - Do not modify unrelated files.
 - Run the most relevant typecheck or tests if practical, and report what you ran.
-- For every provider affected by the changes, verify the demo workflow with: ./ts/engine/dist/cli.js run ./examples/hello.mjs --agent-provider <provider>
+- For every provider affected by the changes, verify the demo workflow with: ./target/debug/smol-wf run ./examples/hello.mjs --agent-provider <provider>
 - Reject/revert your own changes for any provider if its hello demo verification fails; report the failure in skipped instead.
 - If an item is unsafe, ambiguous, already fixed, cannot be applied, or fails verification, skip it and explain why.
 
@@ -287,7 +287,7 @@ Review scope:
 - Confirm the update addressed this iteration's action items.
 - Inspect the changed files and relevant tests.
 - Look for regressions, incomplete fixes, unsafe edits, unrelated changes, or missing verification.
-- Verify that every changed provider was checked with: ./ts/engine/dist/cli.js run ./examples/hello.mjs --agent-provider <provider>
+- Verify that every changed provider was checked with: ./target/debug/smol-wf run ./examples/hello.mjs --agent-provider <provider>
 - Reject the update by setting approved: false if any changed provider failed the hello demo verification, or if the update report does not show that this verification was attempted.
 - Do not make additional code changes; only review and report.
 - If follow-up code changes are required, include them as findings. Leave findings empty when no follow-up changes are needed.

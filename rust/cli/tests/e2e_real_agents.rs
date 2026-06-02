@@ -58,12 +58,21 @@ fn max_parallel_agents() -> String {
     std::env::var("SMOL_WF_E2E_MAX_PARALLEL_AGENTS").unwrap_or_else(|_| "2".to_string())
 }
 
-fn run_example(provider: &str, label: &str, example: &str, extra_args: &[&str]) -> Value {
+fn run_example(
+    provider: &str,
+    label: &str,
+    example: &str,
+    db_path: &Path,
+    extra_args: &[&str],
+) -> Value {
     eprintln!("real-agent e2e provider={provider} example={label} start");
     let max_parallel = max_parallel_agents();
+    let db_path = db_path.to_string_lossy().into_owned();
     let mut args = vec![
         "run",
         example,
+        "--db",
+        db_path.as_str(),
         "--agent-provider",
         provider,
         "--max-parallel-agents",
@@ -92,10 +101,13 @@ fn run_provider_examples(provider: &str) {
         workspace.path.display()
     );
 
+    let db_path = workspace.path.join("durable-e2e.db");
+
     let hello = run_example(
         provider,
         "hello",
         &workspace.script("hello.mjs"),
+        &db_path,
         &["--budget-allowance", "20000", "--args-name", "Rust E2E"],
     );
     assert_eq!(hello["name"], "Rust E2E", "provider={provider}");
@@ -114,6 +126,7 @@ fn run_provider_examples(provider: &str) {
         provider,
         "workflow-parent",
         &workspace.script("workflow-parent.mjs"),
+        &db_path,
         &["--args-items", "alpha", "--args-items", "beta"],
     );
     assert_eq!(

@@ -5,7 +5,7 @@ use smol_workflow_engine::agent_providers::{
     OpenCodeAgentProviderOptions, PiAgentProvider, PiAgentProviderOptions,
 };
 fn fixture(name: &str) -> String {
-    format!("../../ts/engine/test/fixtures/{name}")
+    format!("tests/fixtures/{name}")
 }
 
 fn node() -> String {

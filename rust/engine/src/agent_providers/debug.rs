@@ -108,7 +108,8 @@ fn generate_debug_value_from_schema_object(schema: &Map<String, Value>) -> Value
     match first_schema_type(schema.get("type")).unwrap_or_else(|| infer_schema_type(schema)) {
         "null" => Value::Null,
         "boolean" => Value::Bool(true),
-        "integer" | "number" => Value::Number(0.into()),
+        "integer" => debug_number(schema, true),
+        "number" => debug_number(schema, false),
         "string" => Value::String(debug_string(schema)),
         "array" => debug_array(schema),
         "object" => debug_object(schema),
@@ -164,6 +165,20 @@ fn infer_schema_type(schema: &Map<String, Value>) -> &'static str {
         "string"
     } else {
         "object"
+    }
+}
+
+fn debug_number(schema: &Map<String, Value>, integer: bool) -> Value {
+    let mut value = schema.get("minimum").and_then(Value::as_f64).unwrap_or(0.0);
+    if let Some(exclusive_minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
+        value = value.max(exclusive_minimum + if integer { 1.0 } else { f64::EPSILON });
+    }
+    if integer || value.fract() == 0.0 {
+        Value::Number((value.ceil() as i64).into())
+    } else {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::Number(0.into()))
     }
 }
 

@@ -1,13 +1,15 @@
+use clap::{Arg, Command as ClapCommand};
 use log::{LevelFilter, Log, Metadata, Record};
 use serde_json::{Map, Value};
 use smol_workflow_engine::agent_providers::create_agent_provider;
+use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
+use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
-use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -20,39 +22,34 @@ async fn main() {
 }
 
 async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
-    let mut args = argv.into_iter();
-    let Some(command) = args.next() else {
-        print_help();
-        return Ok(());
+    let matches = match cli_command()
+        .try_get_matches_from(std::iter::once("smol-wf".to_string()).chain(argv))
+    {
+        Ok(matches) => matches,
+        Err(error) if error.use_stderr() => return Err(error.into()),
+        Err(error) => {
+            error.print()?;
+            return Ok(());
+        }
     };
 
-    if command == "--help" || command == "-h" {
-        print_help();
-        return Ok(());
-    }
-
-    match command.as_str() {
-        "run" => run_command(args.collect()).await,
-        "llm" => llm_command(args.collect()).await,
-        other => anyhow::bail!("Unknown command: {other}"),
-    }
-}
-
-async fn llm_command(argv: Vec<String>) -> anyhow::Result<()> {
-    let mut args = argv.into_iter();
-    let Some(command) = args.next() else {
-        print_llm_help();
-        return Ok(());
-    };
-
-    if command == "--help" || command == "-h" {
-        print_llm_help();
-        return Ok(());
-    }
-
-    match command.as_str() {
-        "list-workflows" => list_workflows_command(args.collect()).await,
-        other => anyhow::bail!("Unknown llm command: {other}"),
+    match matches.subcommand() {
+        Some(("run", matches)) => {
+            let script_path = matches
+                .get_one::<String>("workflow-script")
+                .expect("required by clap")
+                .clone();
+            let run_args = matches
+                .get_many::<String>("run-args")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            run_command(script_path, run_args).await
+        }
+        Some(("llm", matches)) => match matches.subcommand() {
+            Some(("list-workflows", _)) => list_workflows_command(Vec::new()).await,
+            _ => Ok(()),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -75,7 +72,7 @@ struct DiscoveredWorkflow {
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = ProcessCommand::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(start)
         .output()
@@ -175,24 +172,16 @@ fn print_workflows_table(workflows: &[DiscoveredWorkflow]) {
     }
 }
 
-async fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
-    let mut args = argv.into_iter();
-    let Some(script_path) = args.next() else {
-        anyhow::bail!("Missing workflow script path");
-    };
-
-    let options = parse_run_options(args.collect())?;
+async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
+    let options = parse_run_options(argv)?;
     init_logging(options.log_level);
     log::debug!(
-        "cli run script={} backend={} agent_provider={} budget_allowance={:?}",
+        "cli run script={} db={} agent_provider={} budget_allowance={:?}",
         script_path,
-        options.backend,
+        options.db_path.display(),
         options.agent_provider,
         options.budget_allowance
     );
-    if options.backend != "simple" {
-        anyhow::bail!("Unsupported backend: {}", options.backend);
-    }
 
     let provider: Arc<dyn smol_workflow_engine::agent_providers::AgentProvider> =
         Arc::from(create_agent_provider(&options.agent_provider)?);
@@ -223,18 +212,20 @@ async fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
         let _ = writeln!(stderr, "[log] {values}");
         let _ = stderr.flush();
     };
-    let result = run_workflow(RunWorkflowOptions {
-        script_path: PathBuf::from(script_path),
-        args: Value::Object(options.args),
-        agent_provider: provider,
-        budget_total: options.budget_allowance,
-        budget_spent: 0,
-        nesting_depth: 0,
-        max_parallel_agent_requests: options.max_parallel_agent_requests,
-        on_log: Some(&on_log),
-        on_phase: Some(&on_phase),
-    })
-    .await?;
+    let mut store = SqliteDurableStore::open(&options.db_path)?;
+    let mut durable_options = LocalDurableRunOptions::new(
+        PathBuf::from(script_path),
+        Value::Object(options.args),
+        provider,
+    );
+    durable_options.budget_total = options.budget_allowance;
+    durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
+    durable_options.resume_run_id = options.resume_run_id;
+    durable_options.on_log = Some(&on_log);
+    durable_options.on_phase = Some(&on_phase);
+    let result = run_local_durable_workflow(&mut store, durable_options)
+        .await?
+        .workflow;
 
     println!("{}", serde_json::to_string_pretty(&result.output.result)?);
     Ok(())
@@ -242,17 +233,17 @@ async fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
 
 #[derive(Debug)]
 struct RunCliOptions {
-    backend: String,
     agent_provider: String,
     args: Map<String, Value>,
     budget_allowance: Option<u64>,
     max_parallel_agent_requests: Option<usize>,
+    db_path: PathBuf,
+    resume_run_id: Option<String>,
     log_level: LevelFilter,
 }
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut workflow_arg_tokens = Vec::new();
-    let mut backend = "simple".to_string();
     let mut agent_provider =
         env::var("SMOL_WF_AGENT_PROVIDER").unwrap_or_else(|_| "debug".to_string());
     let mut budget_allowance = env::var("SMOL_WF_BUDGET_ALLOWANCE")
@@ -264,6 +255,10 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         .map(|value| parse_log_level(&value, "SMOL_WF_LOG"))
         .transpose()?
         .unwrap_or(LevelFilter::Off);
+    let mut resume_run_id = None;
+    let mut db_path = env::var("SMOL_WF_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("smol-workflows.db"));
     let mut max_parallel_agent_requests = env::var("SMOL_WF_MAX_PARALLEL_AGENTS")
         .ok()
         .map(|value| parse_positive_usize(&value, "SMOL_WF_MAX_PARALLEL_AGENTS"))
@@ -283,9 +278,19 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
             continue;
         }
 
-        if token == "--backend" || token.starts_with("--backend=") {
+        if token == "--resume-run" || token.starts_with("--resume-run=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
-            backend = parsed.value;
+            resume_run_id = Some(parsed.value);
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
+        if token == "--db" || token.starts_with("--db=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            db_path = PathBuf::from(parsed.value);
             if parsed.consumed_next {
                 index += 1;
             }
@@ -355,11 +360,12 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     }
 
     Ok(RunCliOptions {
-        backend,
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
         max_parallel_agent_requests,
+        db_path,
+        resume_run_id,
         log_level,
     })
 }
@@ -586,12 +592,37 @@ fn format_log_value(value: &Value) -> String {
     }
 }
 
-fn print_help() {
-    eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]\n  smol-wf llm list-workflows"
-    );
-}
-
-fn print_llm_help() {
-    eprintln!("smol-wf llm\n\nUSAGE:\n  smol-wf llm list-workflows");
+fn cli_command() -> ClapCommand {
+    ClapCommand::new("smol-wf")
+        .about("CLI for the smol-workflows Rust engine")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            ClapCommand::new("run")
+                .about("Run a workflow script")
+                .arg(
+                    Arg::new("workflow-script")
+                        .value_name("workflow-script")
+                        .help("Workflow JavaScript module to run")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("run-args")
+                        .value_name("run-options")
+                        .help("Run options and workflow args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true),
+                )
+                .after_help(
+                    "Run options:\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("llm")
+                .about("LLM-facing helper commands")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(ClapCommand::new("list-workflows").about("List discoverable workflows")),
+        )
 }

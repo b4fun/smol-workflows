@@ -1,6 +1,6 @@
 export const meta = {
   name: 'hello',
-  description: 'Minimal multi-phase smol-workflow example for local and Absurd-backed runs',
+  description: 'Minimal multi-phase smol-workflow example for local and SQLite-backed runs',
   phases: [
     { title: 'Prepare', detail: 'Read workflow args and decide who to greet' },
     { title: 'Draft', detail: 'Create multiple greeting drafts with pipeline' },

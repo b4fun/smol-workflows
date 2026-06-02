@@ -1,9 +1,34 @@
 use serde_json::json;
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn smol_wf() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_smol-wf"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smol-wf"));
+    let db_id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    command.env(
+        "SMOL_WF_DB",
+        std::env::temp_dir().join(format!(
+            "smol-wf-cli-test-{}-{db_id}.db",
+            std::process::id()
+        )),
+    );
+    command
+}
+
+#[test]
+fn run_help_does_not_treat_h_as_script_path() {
+    let output = smol_wf()
+        .args(["run", "-h"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: smol-wf run <workflow-script>"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to resolve workflow script"));
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -106,7 +131,7 @@ fn run_passes_prefixed_cli_args_into_workflow_args() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-my-arg1",
             "world",
             "--args-flag",
@@ -142,9 +167,9 @@ fn run_loads_workflow_args_from_json_file() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-from-file",
-            "../../ts/engine/test/fixtures/args.json",
+            "../engine/tests/fixtures/args.json",
             "--args-my-arg1",
             "file-arg-1",
         ])
@@ -169,7 +194,7 @@ fn run_rejects_unprefixed_run_args() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--my-arg1",
             "world",
         ])
@@ -232,7 +257,7 @@ fn run_rejects_invalid_budget_allowance() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--budget-allowance",
             "-1",
         ])
@@ -249,7 +274,7 @@ fn run_supports_agent_provider_debug() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--agent-provider",
             "debug",
             "--args-my-arg1",
@@ -273,7 +298,7 @@ fn run_supports_dim_debug_logging() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--log-level",
             "debug",
             "--args-my-arg1",
@@ -340,4 +365,64 @@ export default await parallel([
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
+}
+
+#[test]
+fn run_rejects_removed_backend_flag() {
+    let output = smol_wf()
+        .args([
+            "run",
+            "../engine/tests/fixtures/cli-args.workflow.js",
+            "--backend",
+            "sqlite",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown option: --backend"));
+}
+
+#[test]
+fn run_uses_sqlite_backend_by_default() {
+    let dir = std::env::temp_dir().join(format!(
+        "smol-wf-cli-sqlite-{}-{}",
+        std::process::id(),
+        "backend"
+    ));
+    fs::create_dir_all(&dir).expect("tempdir should be created");
+    let script_path = dir.join("sqlite.workflow.mjs");
+    let db_path = dir.join("workflow.db");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "cli-sqlite", description: "CLI SQLite backend" };
+export default { result: await agent("sqlite") };
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let output = smol_wf()
+        .args([
+            "run",
+            script_path.to_str().expect("path should be utf8"),
+            "--db",
+            db_path.to_str().expect("db path should be utf8"),
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout, json!({ "result": "echo: sqlite" }));
+    assert!(
+        db_path.exists(),
+        "sqlite backend should create a database file"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

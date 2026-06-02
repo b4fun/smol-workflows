@@ -207,7 +207,7 @@ If a custom handler returns only an output value, budget spend is zero for that 
 
 Durable backends should persist the full provider result for each checkpointed agent step, including output, provider session ID, raw diagnostics, and normalized usage. Replaying a checkpoint should return the persisted provider result rather than only the output value, so budget accounting remains consistent for resumed workflows.
 
-The Absurd backend records agent usage in `workflow.agent` events and checkpoints the provider result for durable agent steps.
+The Rust SQLite durable backend records normalized usage in `sw_budget_ledger` and checkpoints the full provider result for durable agent steps.
 
 ## Known limitations
 

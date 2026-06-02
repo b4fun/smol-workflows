@@ -2,15 +2,16 @@
 
 Minimal agentic workflow runtime for orchestrating your agents at scale.
 
-The workflow scripting syntax is based on [Claude Code's dynamic workflows](https://code.claude.com/docs/en/workflows#orchestrate-subagents-at-scale-with-dynamic-workflows) model: scripts with injected workflow capabilities such as `agent`, `parallel`, `pipeline`, `workflow`, `budget`, `phase`, and `log`.
+`smol-workflows` runs ES-module workflow scripts inside a self-contained Rust/QuickJS engine. Workflows use injected capabilities such as `agent`, `parallel`, `pipeline`, `workflow`, `budget`, `phase`, and `log`; agent calls are checkpointed in SQLite so interrupted runs can be resumed without re-running completed provider steps.
 
 ## What is in this repo
 
+- `rust/engine` — Rust workflow engine with a sandboxed QuickJS runtime, metadata extraction, schema validation, budget accounting, built-in agent providers, and a SQLite durable backend.
+- `rust/cli` — `smol-wf` command-line interface for running and discovering workflows.
 - `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
-- `ts/engine` — TypeScript CLI and isolated runner (`@smol-workflow/engine`).
-- `rust/engine` and `rust/cli` — Rust workflow engine, sandboxed QuickJS runner, built-in providers, and `smol-wf` CLI.
+- `harness` — integrations and skills for code-agent hosts.
 - `examples` — runnable workflow scripts.
-- `docs` — design notes, workflow API reference, and harness integration findings.
+- `docs` — design notes, workflow API reference, and harness capability notes.
 
 ## Getting Started
 
@@ -22,7 +23,7 @@ These integrations add smol-workflows skills/tools to the host agent. They do no
 
 ## Workflow shape
 
-Workflows are ES modules. The runner injects these globals before importing the script:
+Workflows are ES modules. The Rust runner injects these globals before evaluating the script:
 
 - `args`
 - `agent(prompt, options?)`
@@ -31,7 +32,7 @@ Workflows are ES modules. The runner injects these globals before importing the 
 - `workflow(nameOrRef, args?)`
 - `budget`
 - `log(...values)`
-- `phase(name)`
+- `phase(name, options?)`
 
 Example:
 
@@ -58,27 +59,25 @@ smol-wf run <workflow-script> --args-from-file <args.json>
 smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
 smol-wf run <workflow-script> --budget-allowance <output-token-count>
 smol-wf run <workflow-script> --max-parallel-agents <count>
+smol-wf run <workflow-script> --db <smol-workflows.db>
+smol-wf run <workflow-script> --resume-run <run-id>
+smol-wf llm list-workflows
 ```
 
 ### Agent providers
 
-The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`.
+The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` / `SMOL_WF_AGENT_PROVIDER` or per call with `agent(prompt, { provider })`.
 
-See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities/structured-output.md) for provider-specific structured-output behavior and [`docs/harness-capabilities/budget-and-usage.md`](docs/harness-capabilities/budget-and-usage.md) for current budget/usage tracking behavior.
+Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities/structured-output.md) for provider-specific structured-output behavior and [`docs/harness-capabilities/budget-and-usage.md`](docs/harness-capabilities/budget-and-usage.md) for current budget/usage tracking behavior.
 
 ## Durable backends
 
-We aim to support retryable, durable workflow runs. Today this is experimental and relies on Absurd SQLite for queueing, retries, completion, and persisted workflow/agent state.
-
-TODO: move the durable backend to a Rust-based SQLite implementation soon.
+Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` or `SMOL_WF_DB` is provided. Use `--resume-run <run-id>` to continue an existing run.
 
 ## TODOs
 
-- [ ] back budget accounting with an authoritative persisted run/session usage store for cross-run aggregate reporting
-- [ ] full coverage of dynamic workflow options and resume semantics
-- [ ] built-in durable workflows in the Rust implementation
 - [ ] isolation support for file-mutating agents
-- [ ] durable retry policies
+- [ ] configurable durable retry policies
 - [ ] dashboard
 - [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data
 - [ ] environment abstraction
@@ -86,3 +85,4 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 - [ ] remote environment support
 - [ ] pre-defined agents support
 - [ ] human in the loop / steering support
+- [ ] cross-run aggregate budget reporting

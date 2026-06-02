@@ -49,7 +49,7 @@ Status: **works for the basic workflow fixture**.
 Verified by:
 
 - test: `boa_embedded_executes_workflow_like_esm_js_fixture`
-- fixture: `ts/engine/test/fixtures/injected-globals.workflow.js`
+- fixture: `rust/engine/tests/fixtures/injected-globals.workflow.js`
 
 Observed behavior:
 
@@ -88,8 +88,8 @@ Verified by:
 
 - test: `rquickjs_embedded_executes_workflow_like_esm_js_fixture`
 - test: `rquickjs_embedded_executes_top_level_module_result_fixture`
-- fixture: `ts/engine/test/fixtures/injected-globals.workflow.js`
-- fixture: `ts/engine/test/fixtures/module-result.workflow.js`
+- fixture: `rust/engine/tests/fixtures/injected-globals.workflow.js`
+- fixture: `rust/engine/tests/fixtures/module-result.workflow.js`
 
 Observed behavior:
 

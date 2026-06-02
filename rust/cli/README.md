@@ -7,8 +7,10 @@ The binary name is `smol-wf`.
 Currently implemented command:
 
 ```sh
-smol-wf run <workflow-script> [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--args-<name> value]
+smol-wf run <workflow-script> [--db smol-workflows.db] [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--args-<name> value]
 ```
+
+Runs use the SQLite durable backend by default. Use `--db <path>` or `SMOL_WF_DB` to choose the database file.
 
 ## Real-agent end-to-end tests
 
