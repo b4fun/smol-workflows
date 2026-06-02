@@ -132,7 +132,7 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
             };
 
             match claim {
-                AgentStepClaim::Replay(result) => return Ok(result),
+                AgentStepClaim::Replay(result) => return Ok(*result),
                 AgentStepClaim::Run { step_id } => {
                     let provider_result =
                         run_durable_agent_provider(default_provider, provider_override, input)
@@ -663,7 +663,7 @@ impl SqliteDurableStore {
                     let result = serde_json::from_str::<AgentProviderResult>(&result_json)
                         .context("failed to deserialize durable agent result")?;
                     tx.commit().context("failed to commit replay transaction")?;
-                    return Ok(AgentStepClaim::Replay(result));
+                    return Ok(AgentStepClaim::Replay(Box::new(result)));
                 }
                 "running" if lease_expires_at.is_some_and(|lease| lease > input.now) => {
                     tx.commit().context("failed to commit wait transaction")?;
@@ -820,7 +820,7 @@ impl SqliteDurableStore {
 }
 
 pub enum AgentStepClaim {
-    Replay(AgentProviderResult),
+    Replay(Box<AgentProviderResult>),
     Run { step_id: String },
     Wait,
 }

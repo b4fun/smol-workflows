@@ -7,6 +7,19 @@ fn smol_wf() -> Command {
 }
 
 #[test]
+fn run_help_does_not_treat_h_as_script_path() {
+    let output = smol_wf()
+        .args(["run", "-h"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: smol-wf run <workflow-script>"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to resolve workflow script"));
+}
+
+#[test]
 fn run_passes_prefixed_cli_args_into_workflow_args() {
     let output = smol_wf()
         .args([

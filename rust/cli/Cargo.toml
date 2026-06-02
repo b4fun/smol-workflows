@@ -15,6 +15,7 @@ integration-test = ["smol-workflow-engine/integration-test"]
 
 [dependencies]
 anyhow = "1"
+clap = "4"
 log = "0.4"
 serde_json = "1"
 smol-workflow-engine = { path = "../engine" }

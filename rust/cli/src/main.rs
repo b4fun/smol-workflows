@@ -1,3 +1,4 @@
+use clap::{Arg, Command};
 use log::{LevelFilter, Log, Metadata, Record};
 use serde_json::{Map, Value};
 use smol_workflow_engine::agent_providers::create_agent_provider;
@@ -20,30 +21,35 @@ async fn main() {
 }
 
 async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
-    let mut args = argv.into_iter();
-    let Some(command) = args.next() else {
-        print_help();
-        return Ok(());
+    let matches = match cli_command()
+        .try_get_matches_from(std::iter::once("smol-wf".to_string()).chain(argv))
+    {
+        Ok(matches) => matches,
+        Err(error) if error.use_stderr() => return Err(error.into()),
+        Err(error) => {
+            error.print()?;
+            return Ok(());
+        }
     };
 
-    if command == "--help" || command == "-h" {
-        print_help();
-        return Ok(());
-    }
-
-    match command.as_str() {
-        "run" => run_command(args.collect()).await,
-        other => anyhow::bail!("Unknown command: {other}"),
+    match matches.subcommand() {
+        Some(("run", matches)) => {
+            let script_path = matches
+                .get_one::<String>("workflow-script")
+                .expect("required by clap")
+                .clone();
+            let run_args = matches
+                .get_many::<String>("run-args")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            run_command(script_path, run_args).await
+        }
+        _ => Ok(()),
     }
 }
 
-async fn run_command(argv: Vec<String>) -> anyhow::Result<()> {
-    let mut args = argv.into_iter();
-    let Some(script_path) = args.next() else {
-        anyhow::bail!("Missing workflow script path");
-    };
-
-    let options = parse_run_options(args.collect())?;
+async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
+    let options = parse_run_options(argv)?;
     init_logging(options.log_level);
     log::debug!(
         "cli run script={} backend={} agent_provider={} budget_allowance={:?}",
@@ -494,8 +500,30 @@ fn format_log_value(value: &Value) -> String {
     }
 }
 
-fn print_help() {
-    eprintln!(
-        "smol-wf\n\nUSAGE:\n  smol-wf run <workflow-script> [--backend simple|sqlite] [--db smol-workflows.db] [--resume-run run_id] [--agent-provider debug|claude-code|codex|opencode|pi] [--budget-allowance outputTokens] [--max-parallel-agents count] [--log-level off|error|warn|info|debug|trace] [--debug] [--args-<name> value] [--args-from-file <json-file>]"
-    );
+fn cli_command() -> Command {
+    Command::new("smol-wf")
+        .about("CLI for the smol-workflows Rust engine")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("run")
+                .about("Run a workflow script")
+                .arg(
+                    Arg::new("workflow-script")
+                        .value_name("workflow-script")
+                        .help("Workflow JavaScript module to run")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("run-args")
+                        .value_name("run-options")
+                        .help("Run options and workflow args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true),
+                )
+                .after_help(
+                    "Run options:\n  --backend simple|sqlite\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                ),
+        )
 }
