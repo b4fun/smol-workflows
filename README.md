@@ -48,6 +48,7 @@ export default { greeting }
 smol-wf run <workflow-script> [--args-<name> value]
 smol-wf run <workflow-script> --args-from-file <args.json>
 smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
+smol-wf run <workflow-script> --budget-allowance <output-token-count>
 smol-wf run <workflow-script> --max-parallel-agents <count>
 ```
 
@@ -65,7 +66,7 @@ TODO: move the durable backend to a Rust-based SQLite implementation soon.
 
 ## TODOs
 
-- [ ] back budget accounting with an authoritative run/session data source instead of parent-child IPC snapshots
+- [ ] back budget accounting with an authoritative persisted run/session usage store for cross-run aggregate reporting
 - [ ] full coverage of dynamic workflow options and resume semantics
 - [ ] built-in durable workflows in the Rust implementation
 - [ ] isolation support for file-mutating agents
