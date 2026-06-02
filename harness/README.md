@@ -56,8 +56,6 @@ Restart OpenCode after changing plugin config. The OpenCode plugin registers the
 
 ## GitHub Copilot CLI
 
-GitHub Copilot CLI plugin commands appear to use Claude-style plugin marketplaces. Try:
-
 ```sh
 copilot plugin marketplace add ./harness
 copilot plugin install smol-workflows@smol-workflows-marketplace

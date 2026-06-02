@@ -63,6 +63,10 @@ jobs:
             package: '@earendil-works/pi-coding-agent'
             version: '0.78.0'
             bin: pi
+          - provider: github-copilot
+            package: '@github/copilot'
+            version: '1.0.57'
+            bin: copilot
 
     steps:
       - name: Checkout
@@ -97,6 +101,18 @@ jobs:
           codex plugin list | grep -F smol-workflows
           test -f "$HOME/.codex/config.toml"
           grep -F smol-workflows-marketplace "$HOME/.codex/config.toml"
+
+      - name: Install GitHub Copilot plugin
+        if: matrix.provider == 'github-copilot'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          copilot plugin marketplace add "$GITHUB_WORKSPACE/harness"
+          copilot plugin install smol-workflows@smol-workflows-marketplace
+          copilot plugin list | grep -F smol-workflows
+          test -f "$HOME/.copilot/config.json"
+          grep -F smol-workflows-marketplace "$HOME/.copilot/config.json"
 
       - name: Install OpenCode plugin
         if: matrix.provider == 'opencode'
