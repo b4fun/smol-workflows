@@ -1,0 +1,10 @@
+{
+  "name": "smol-workflows-opencode-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./plugin.js",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.14.20"
+  }
+}

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const helperPath = path.resolve(
   __dirname,
-  "../plugins/smol-workflows/skills/scripts/smol-wf.sh",
+  "./scripts/smol-wf.sh",
 );
 
 async function exists(file: string): Promise<boolean> {

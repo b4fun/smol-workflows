@@ -7,8 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const packageRoot = path.resolve(__dirname, '../..')
-const skillsDir = path.resolve(__dirname, '../plugins/smol-workflows/skills')
-const helperPath = path.resolve(skillsDir, 'scripts/smol-wf.sh')
+const helperPath = path.resolve(__dirname, './scripts/smol-wf.sh')
 
 async function localSmolWfBin() {
   if (process.env.SMOL_WF_BIN) return process.env.SMOL_WF_BIN
@@ -168,14 +167,6 @@ const runWorkflowTool = tool({
 
 export const SmolWorkflowsPlugin = async () => {
   return {
-    config: async (config) => {
-      config.skills = config.skills || {}
-      config.skills.paths = config.skills.paths || []
-      if (!config.skills.paths.includes(skillsDir)) {
-        config.skills.paths.push(skillsDir)
-      }
-    },
-
     tool: {
       smol_workflows_list: listWorkflowsTool,
       smol_workflows_run: runWorkflowTool,

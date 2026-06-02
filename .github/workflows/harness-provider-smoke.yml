@@ -1,0 +1,121 @@
+name: Harness plugin install smoke tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'harness/**'
+  push:
+    paths:
+      - 'harness/**'
+
+jobs:
+  validate-harness-package:
+    name: Validate harness package assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install OpenCode harness package dependencies
+        run: npm --prefix harness/opencode install --package-lock=false
+
+      - name: Validate metadata and helper script
+        run: |
+          set -euo pipefail
+          node -e 'JSON.parse(require("fs").readFileSync("harness/opencode/package.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("harness/pi/package.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("harness/.agents/plugins/marketplace.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("harness/.claude-plugin/marketplace.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("harness/plugins/smol-workflows/.claude-plugin/plugin.json", "utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("harness/plugins/smol-workflows/.codex-plugin/plugin.json", "utf8"))'
+          bash -n harness/plugins/smol-workflows/skills/scripts/smol-wf.sh
+          bash -n harness/opencode/scripts/smol-wf.sh
+          bash -n harness/pi/scripts/smol-wf.sh
+          node --check harness/opencode/plugin.js
+
+  install-plugin:
+    name: Install ${{ matrix.provider }} plugin
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: claude-code
+            package: '@anthropic-ai/claude-code'
+            version: '2.1.160'
+            bin: claude
+          - provider: codex
+            package: '@openai/codex'
+            version: '0.136.0'
+            bin: codex
+          - provider: opencode
+            package: 'opencode-ai'
+            version: '1.15.13'
+            bin: opencode
+          - provider: pi
+            package: '@earendil-works/pi-coding-agent'
+            version: '0.78.0'
+            bin: pi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install provider CLI
+        run: npm install -g "${{ matrix.package }}@${{ matrix.version }}"
+
+      - name: Install Claude Code plugin
+        if: matrix.provider == 'claude-code'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          claude plugin marketplace add "$GITHUB_WORKSPACE/harness"
+          claude plugin install smol-workflows@smol-workflows-marketplace
+          find "$HOME" -maxdepth 6 -type f -print
+
+      - name: Install Codex plugin
+        if: matrix.provider == 'codex'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          codex plugin marketplace add "$GITHUB_WORKSPACE/harness"
+          codex plugin add smol-workflows@smol-workflows-marketplace
+          codex plugin list | grep -F smol-workflows
+          test -f "$HOME/.codex/config.toml"
+          grep -F smol-workflows-marketplace "$HOME/.codex/config.toml"
+
+      - name: Install OpenCode plugin
+        if: matrix.provider == 'opencode'
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$(mktemp -d)"
+          cd "$project"
+          opencode plugin "$GITHUB_WORKSPACE/harness/opencode"
+          test -f .opencode/opencode.json
+          grep -F "$GITHUB_WORKSPACE/harness/opencode" .opencode/opencode.json
+
+      - name: Install Pi package
+        if: matrix.provider == 'pi'
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$(mktemp -d)"
+          cd "$project"
+          pi install "$GITHUB_WORKSPACE/harness/pi" -l
+          test -f .pi/settings.json
+          grep -F "$GITHUB_WORKSPACE/harness/pi" .pi/settings.json

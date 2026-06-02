@@ -1,17 +1,13 @@
 {
-  "name": "smol-workflows-harness",
+  "name": "smol-workflows-pi-harness",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./opencode/plugin.js",
   "keywords": [
     "pi-package",
     "smol-workflows",
     "workflows"
   ],
-  "dependencies": {
-    "@opencode-ai/plugin": "^1.14.20"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -19,10 +15,7 @@
   },
   "pi": {
     "extensions": [
-      "./pi/extension.ts"
-    ],
-    "skills": [
-      "./plugins/smol-workflows/skills"
+      "./extension.ts"
     ]
   }
 }
