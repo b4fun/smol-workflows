@@ -1,9 +1,21 @@
 use serde_json::json;
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn smol_wf() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_smol-wf"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_smol-wf"));
+    let db_id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    command.env(
+        "SMOL_WF_DB",
+        std::env::temp_dir().join(format!(
+            "smol-wf-cli-test-{}-{db_id}.db",
+            std::process::id()
+        )),
+    );
+    command
 }
 
 #[test]
@@ -261,7 +273,23 @@ export default await parallel([
 }
 
 #[test]
-fn run_supports_sqlite_backend() {
+fn run_rejects_removed_backend_flag() {
+    let output = smol_wf()
+        .args([
+            "run",
+            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "--backend",
+            "sqlite",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown option: --backend"));
+}
+
+#[test]
+fn run_uses_sqlite_backend_by_default() {
     let dir = std::env::temp_dir().join(format!(
         "smol-wf-cli-sqlite-{}-{}",
         std::process::id(),
@@ -283,8 +311,6 @@ export default { result: await agent("sqlite") };
         .args([
             "run",
             script_path.to_str().expect("path should be utf8"),
-            "--backend",
-            "sqlite",
             "--db",
             db_path.to_str().expect("db path should be utf8"),
         ])

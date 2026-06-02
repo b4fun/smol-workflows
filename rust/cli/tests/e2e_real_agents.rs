@@ -71,8 +71,6 @@ fn run_example(
     let mut args = vec![
         "run",
         example,
-        "--backend",
-        "sqlite",
         "--db",
         db_path.as_str(),
         "--agent-provider",

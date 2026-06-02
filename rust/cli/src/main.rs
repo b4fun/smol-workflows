@@ -4,7 +4,6 @@ use serde_json::{Map, Value};
 use smol_workflow_engine::agent_providers::create_agent_provider;
 use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
-use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -52,15 +51,12 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
     let options = parse_run_options(argv)?;
     init_logging(options.log_level);
     log::debug!(
-        "cli run script={} backend={} agent_provider={} budget_allowance={:?}",
+        "cli run script={} db={} agent_provider={} budget_allowance={:?}",
         script_path,
-        options.backend,
+        options.db_path.display(),
         options.agent_provider,
         options.budget_allowance
     );
-    if options.backend != "simple" && options.backend != "sqlite" {
-        anyhow::bail!("Unsupported backend: {}", options.backend);
-    }
 
     let provider: Arc<dyn smol_workflow_engine::agent_providers::AgentProvider> =
         Arc::from(create_agent_provider(&options.agent_provider)?);
@@ -91,36 +87,20 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         let _ = writeln!(stderr, "[log] {values}");
         let _ = stderr.flush();
     };
-    let result = if options.backend == "sqlite" {
-        let mut store = SqliteDurableStore::open(&options.db_path)?;
-        let mut durable_options = LocalDurableRunOptions::new(
-            PathBuf::from(script_path),
-            Value::Object(options.args),
-            provider,
-        );
-        durable_options.budget_total = options.budget_allowance;
-        durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
-        durable_options.resume_run_id = options.resume_run_id;
-        durable_options.on_log = Some(&on_log);
-        durable_options.on_phase = Some(&on_phase);
-        run_local_durable_workflow(&mut store, durable_options)
-            .await?
-            .workflow
-    } else {
-        run_workflow(RunWorkflowOptions {
-            script_path: PathBuf::from(script_path),
-            args: Value::Object(options.args),
-            agent_provider: provider,
-            budget_total: options.budget_allowance,
-            budget_spent: 0,
-            nesting_depth: 0,
-            max_parallel_agent_requests: options.max_parallel_agent_requests,
-            agent_runner: None,
-            on_log: Some(&on_log),
-            on_phase: Some(&on_phase),
-        })
+    let mut store = SqliteDurableStore::open(&options.db_path)?;
+    let mut durable_options = LocalDurableRunOptions::new(
+        PathBuf::from(script_path),
+        Value::Object(options.args),
+        provider,
+    );
+    durable_options.budget_total = options.budget_allowance;
+    durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
+    durable_options.resume_run_id = options.resume_run_id;
+    durable_options.on_log = Some(&on_log);
+    durable_options.on_phase = Some(&on_phase);
+    let result = run_local_durable_workflow(&mut store, durable_options)
         .await?
-    };
+        .workflow;
 
     println!("{}", serde_json::to_string_pretty(&result.output.result)?);
     Ok(())
@@ -128,7 +108,6 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
 
 #[derive(Debug)]
 struct RunCliOptions {
-    backend: String,
     agent_provider: String,
     args: Map<String, Value>,
     budget_allowance: Option<u64>,
@@ -140,7 +119,6 @@ struct RunCliOptions {
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut workflow_arg_tokens = Vec::new();
-    let mut backend = "simple".to_string();
     let mut agent_provider =
         env::var("SMOL_WF_AGENT_PROVIDER").unwrap_or_else(|_| "debug".to_string());
     let mut budget_allowance = env::var("SMOL_WF_BUDGET_ALLOWANCE")
@@ -168,16 +146,6 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         if token == "--agent-provider" || token.starts_with("--agent-provider=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
             agent_provider = parsed.value;
-            if parsed.consumed_next {
-                index += 1;
-            }
-            index += 1;
-            continue;
-        }
-
-        if token == "--backend" || token.starts_with("--backend=") {
-            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
-            backend = parsed.value;
             if parsed.consumed_next {
                 index += 1;
             }
@@ -267,7 +235,6 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     }
 
     Ok(RunCliOptions {
-        backend,
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
@@ -523,7 +490,7 @@ fn cli_command() -> Command {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --backend simple|sqlite\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
                 ),
         )
 }
