@@ -119,3 +119,4 @@ jobs:
           pi install "$GITHUB_WORKSPACE/harness/pi" -l
           test -f .pi/settings.json
           grep -F "$GITHUB_WORKSPACE/harness/pi" .pi/settings.json
+          pi list | grep -F "$GITHUB_WORKSPACE/harness/pi"
