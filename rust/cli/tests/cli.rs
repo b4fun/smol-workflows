@@ -31,6 +31,101 @@ fn run_help_does_not_treat_h_as_script_path() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to resolve workflow script"));
 }
 
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "smol-wf-cli-test-{}-{}-{name}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("thread")
+    ));
+    let _ = fs::remove_dir_all(&path);
+    fs::create_dir_all(&path).expect("temp dir should be created");
+    path
+}
+
+#[test]
+fn llm_list_workflows_discovers_repo_workflow_dirs() {
+    let root = temp_dir("list-workflows");
+    Command::new("git")
+        .arg("init")
+        .current_dir(&root)
+        .output()
+        .expect("git init should run");
+    fs::create_dir_all(root.join(".agents/workflows/nested")).expect("workflow dir should exist");
+    fs::create_dir_all(root.join(".claude/workflows")).expect("claude workflow dir should exist");
+    fs::write(
+        root.join(".agents/workflows/alpha.mjs"),
+        r#"export const meta = { name: 'alpha', description: 'Alpha workflow' }
+export default {}
+"#,
+    )
+    .expect("workflow should be written");
+    fs::write(
+        root.join(".agents/workflows/nested/ignored.mjs"),
+        r#"export default {}
+"#,
+    )
+    .expect("non-workflow should be written");
+    fs::write(
+        root.join(".claude/workflows/beta.js"),
+        r#"export const meta = { name: 'beta', description: 'Beta workflow' }
+export default {}
+"#,
+    )
+    .expect("workflow should be written");
+
+    let output = smol_wf()
+        .current_dir(root.join(".agents/workflows/nested"))
+        .args(["llm", "list-workflows"])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("NAME"));
+    assert!(stdout.contains("PATH"));
+    assert!(stdout.contains("DESCRIPTION"));
+    assert!(stdout.contains(".agents/workflows/alpha.mjs"));
+    assert!(stdout.contains("alpha"));
+    assert!(stdout.contains("Alpha workflow"));
+    assert!(stdout.contains(".claude/workflows/beta.js"));
+    assert!(stdout.contains("beta"));
+    assert!(stdout.contains("Beta workflow"));
+    assert!(!stdout.contains("ignored"));
+}
+
+#[test]
+fn llm_list_workflows_reports_empty_table() {
+    let root = temp_dir("list-workflows-empty");
+    Command::new("git")
+        .arg("init")
+        .current_dir(&root)
+        .output()
+        .expect("git init should run");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["llm", "list-workflows"])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("NAME"));
+    assert!(stdout.contains("PATH"));
+    assert!(stdout.contains("DESCRIPTION"));
+    assert!(!stdout.contains("No workflows found"));
+}
+
 #[test]
 fn run_passes_prefixed_cli_args_into_workflow_args() {
     let output = smol_wf()

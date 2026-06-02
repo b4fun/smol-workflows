@@ -1,0 +1,21 @@
+{
+  "name": "smol-workflows-pi-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "smol-workflows",
+    "workflows"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extension.ts"
+    ]
+  }
+}

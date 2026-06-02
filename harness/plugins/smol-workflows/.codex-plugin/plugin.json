@@ -1,0 +1,31 @@
+{
+  "name": "smol-workflows",
+  "version": "0.1.0",
+  "description": "Skills for writing and running smol-wf workflows from Codex",
+  "author": {
+    "name": "b4fun"
+  },
+  "homepage": "https://github.com/b4fun/smol-workflows",
+  "repository": "https://github.com/b4fun/smol-workflows",
+  "license": "MIT",
+  "keywords": [
+    "workflows",
+    "multi-agent",
+    "orchestration",
+    "smol-wf"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "smol-workflows",
+    "shortDescription": "Write and run smol-wf workflows",
+    "longDescription": "Use smol-workflows to author JavaScript workflow scripts and run them with smol-wf for explicit multi-agent orchestration requests.",
+    "developerName": "b4fun",
+    "category": "Coding",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Write a smol-wf workflow for this task.",
+      "Run this smol-workflows script."
+    ],
+    "websiteURL": "https://github.com/b4fun/smol-workflows"
+  }
+}
