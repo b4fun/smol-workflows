@@ -496,36 +496,30 @@ Package name:
 
 The SDK is currently a minimal ESM TypeScript package. It provides types only; runtime implementations of `args`, `agent`, `parallel`, `log`, and `phase` are injected by the isolated runner.
 
-## Durable backend: Absurd SQLite
+## Durable backend: Rust SQLite
 
-The engine includes an experimental Absurd SQLite backend under:
-
-```ts
-@smol-workflow/engine/backends/absurd
-```
-
-The backend uses Absurd SQLite as the durable task/run store. The first implementation focuses on durable workflow invocation:
+The Rust engine includes a SQLite durable backend used by the `smol-wf` CLI by default.
+The first implementation focuses on durable local workflow invocation:
 
 - create/open a SQLite database
-- load the Absurd SQLite extension
-- apply Absurd migrations
-- create a queue
-- register a `workflow.run` task
-- submit workflow scripts as Absurd tasks
-- execute workflow scripts through the isolated runner
-- store the final workflow output as the Absurd task result
+- apply embedded Rust engine migrations
+- create local workflow task/run records
+- execute workflow scripts through the QuickJS runtime
+- checkpoint durable agent steps by stable input signatures
+- record output-token budget ledger entries
+- store terminal task/run state and final workflow output
 
 Conceptually:
 
 ```txt
-Absurd task: workflow.run
-  └─ smol isolated runner
+SQLite task/run records
+  └─ QuickJS workflow runtime
        ├─ injects globals
-       ├─ imports workflow module
+       ├─ evaluates the workflow module
        └─ returns default-exported result or function return value
 ```
 
-The backend checkpoints `agent` calls by routing runner agent requests through the parent engine. In Absurd mode, the parent wraps each call in `ctx.step(...)`. `agent(prompt, { key })` uses `key` as the stable checkpoint name; if no key is provided, the engine derives a deterministic key from the prompt, phase, and schema.
+The backend checkpoints `agent` calls through durable workflow steps. `agent(prompt, { key })` uses `key` as the stable checkpoint name; if no key is provided, the engine derives a deterministic key from the prompt, phase, schema, and provider context.
 
 ## Security and isolation
 

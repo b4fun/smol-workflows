@@ -7,8 +7,7 @@ The workflow scripting syntax is based on [Claude Code's dynamic workflows](http
 ## What is in this repo
 
 - `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
-- `ts/engine` — TypeScript CLI and isolated runner (`@smol-workflow/engine`).
-- `rust/engine` and `rust/cli` — Rust workflow engine, sandboxed QuickJS runner, built-in providers, and `smol-wf` CLI.
+- `rust/engine` and `rust/cli` — Rust workflow engine, sandboxed QuickJS runner, SQLite durable backend, built-in providers, and `smol-wf` CLI.
 - `examples` — runnable workflow scripts.
 - `docs` — design notes, workflow API reference, and harness integration findings.
 
@@ -68,9 +67,7 @@ See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities
 
 ## Durable backends
 
-We aim to support retryable, durable workflow runs. Today this is experimental and relies on Absurd SQLite for queueing, retries, completion, and persisted workflow/agent state.
-
-TODO: move the durable backend to a Rust-based SQLite implementation soon.
+Retryable, durable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state in `smol-workflows.db` unless `--db` or `SMOL_WF_DB` is provided.
 
 ## TODOs
 

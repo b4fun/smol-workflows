@@ -1,7 +1,7 @@
 //! Rust implementation of the smol-workflows engine.
 //!
-//! This crate is intentionally minimal for now. The TypeScript engine in
-//! `ts/engine` will be ported here incrementally.
+//! This crate contains the native Rust workflow engine, including the QuickJS
+//! runtime, SQLite durable execution, and built-in agent providers.
 
 pub mod agent_providers;
 pub mod durable;
