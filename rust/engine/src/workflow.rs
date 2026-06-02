@@ -556,16 +556,97 @@ impl<'a> RunState<'a> {
     }
 }
 
-async fn run_agent_provider(
+pub(crate) async fn run_agent_provider(
     default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {
-    if let Some(provider_override) = provider_override {
-        create_agent_provider(&provider_override)?.run(input).await
+    let provider: Arc<dyn AgentProvider> = if let Some(provider_override) = provider_override {
+        Arc::from(create_agent_provider(&provider_override)?)
     } else {
-        default_provider.run(input).await
+        default_provider
+    };
+    run_agent_with_schema_validation(provider, input).await
+}
+
+async fn run_agent_with_schema_validation(
+    provider: Arc<dyn AgentProvider>,
+    input: AgentProviderRunInput,
+) -> anyhow::Result<AgentProviderResult> {
+    let Some(schema) = input
+        .options
+        .as_ref()
+        .and_then(|options| options.get("schema"))
+        .cloned()
+    else {
+        return provider.run(input).await;
+    };
+
+    let max_attempts = 2;
+    let original_prompt = input.prompt.clone();
+    let mut attempt_input = input;
+    let mut last_errors = Vec::new();
+
+    for attempt in 1..=max_attempts {
+        let result = provider.run(attempt_input.clone()).await?;
+        match validate_structured_output(&schema, &result.output) {
+            Ok(()) => return Ok(result),
+            Err(errors) => {
+                last_errors = errors;
+                if attempt < max_attempts {
+                    attempt_input.prompt =
+                        with_structured_output_retry_prompt(&original_prompt, &last_errors);
+                }
+            }
+        }
     }
+
+    bail!(
+        "{}",
+        format_structured_output_validation_error(&last_errors)
+    )
+}
+
+fn validate_structured_output(schema: &Value, output: &Value) -> Result<(), Vec<String>> {
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| vec![format!("/ schema is invalid: {}", error)])?;
+    let errors = validator
+        .iter_errors(output)
+        .map(|error| {
+            let path = error.instance_path().to_string();
+            let path = if path.is_empty() {
+                "/".to_string()
+            } else {
+                path
+            };
+            format!("{path} {error}")
+        })
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn format_structured_output_validation_error(errors: &[String]) -> String {
+    format!(
+        "Structured output did not match JSON Schema: {}",
+        errors.join("; ")
+    )
+}
+
+fn with_structured_output_retry_prompt(prompt: &str, errors: &[String]) -> String {
+    let mut lines = vec![
+        prompt.to_string(),
+        String::new(),
+        "Previous structured output failed JSON Schema validation.".to_string(),
+        "Return a corrected structured output that satisfies the original JSON Schema.".to_string(),
+        "Validation errors:".to_string(),
+    ];
+    lines.extend(errors.iter().map(|error| format!("- {error}")));
+    lines.join("\n")
 }
 
 fn apply_phase_defaults(options: Option<Value>, metadata: &WorkflowMetadata) -> Option<Value> {

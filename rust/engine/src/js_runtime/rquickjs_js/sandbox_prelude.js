@@ -4,12 +4,19 @@ globalThis.__readonly = (() => {
   const cache = new WeakMap();
 
   function readonly(value) {
-    if (typeof value !== 'object' || value === null) return value;
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return value;
     const cached = cache.get(value);
     if (cached) return cached;
 
     const proxy = new Proxy(value, {
-      get(target, property, receiver) { return readonly(Reflect.get(target, property, receiver)); },
+      get(target, property, receiver) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+        const result = Reflect.get(target, property, receiver);
+        if (descriptor && descriptor.configurable === false && 'value' in descriptor && descriptor.writable === false) {
+          return result;
+        }
+        return readonly(result);
+      },
       set() { throw new TypeError('Cannot modify workflow value'); },
       defineProperty() { throw new TypeError('Cannot modify workflow value'); },
       deleteProperty() { throw new TypeError('Cannot modify workflow value'); },
@@ -30,7 +37,7 @@ Object.defineProperty(globalThis, 'parallel', {
   },
   enumerable: true,
   writable: false,
-  configurable: false,
+  configurable: true,
 });
 
 Object.defineProperty(globalThis, 'pipeline', {
@@ -45,7 +52,7 @@ Object.defineProperty(globalThis, 'pipeline', {
   },
   enumerable: true,
   writable: false,
-  configurable: false,
+  configurable: true,
 });
 
 

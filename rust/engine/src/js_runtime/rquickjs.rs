@@ -530,19 +530,17 @@ fn install_runtime_globals<'js>(
     let readonly = Persistent::save(ctx, readonly);
     let readonly_args =
         readonly_proxy(ctx, &readonly, args).context("failed to wrap workflow args as readonly")?;
-    globals
-        .prop("args", Property::from(readonly_args).enumerable())
+    define_readonly_data_property(ctx, &globals, "args", readonly_args, true)
         .context("failed to install readonly workflow args global")?;
 
     let budget = create_budget_object(ctx, Rc::clone(&state))?;
     let budget = readonly_proxy(ctx, &readonly, budget.into())
         .context("failed to wrap workflow budget as readonly")?;
-    globals
-        .prop("budget", Property::from(budget).enumerable())
+    define_readonly_data_property(ctx, &globals, "budget", budget, true)
         .context("failed to install workflow budget global")?;
 
     install_native_workflow_functions(&globals, state)?;
-    harden_public_js_helpers(&globals)?;
+    harden_public_workflow_globals(ctx, &globals, &readonly)?;
 
     harden_workflow_sandbox(ctx, &globals)?;
     hide_internal_globals(&globals);
@@ -632,13 +630,19 @@ fn readonly_proxy<'js>(
         .map_err(|error| anyhow!("failed to create readonly proxy: {error:?}"))
 }
 
-fn harden_public_js_helpers<'js>(globals: &Object<'js>) -> anyhow::Result<()> {
-    for name in ["parallel", "pipeline"] {
-        let value: Value<'_> = globals
+fn harden_public_workflow_globals<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    globals: &Object<'js>,
+    readonly: &Persistent<Function<'static>>,
+) -> anyhow::Result<()> {
+    for name in ["agent", "workflow", "log", "phase", "parallel", "pipeline"] {
+        let value: Value<'js> = globals
             .get(name)
-            .with_context(|| format!("failed to get JS workflow helper {name}"))?;
-        define_readonly_data_property(globals.ctx(), globals, name, value, true)
-            .with_context(|| format!("failed to harden JS workflow helper {name}"))?;
+            .with_context(|| format!("failed to get workflow global {name}"))?;
+        let value = readonly_proxy(ctx, readonly, value)
+            .with_context(|| format!("failed to wrap workflow global {name} as readonly"))?;
+        define_readonly_data_property(ctx, globals, name, value, true)
+            .with_context(|| format!("failed to harden workflow global {name}"))?;
     }
     Ok(())
 }
@@ -790,7 +794,8 @@ fn install_native_workflow_functions<'js>(
                     .push_back(WorkflowRuntimeCall::Log { values });
                 Ok::<(), rquickjs::Error>(())
             })))
-            .enumerable(),
+            .enumerable()
+            .configurable(),
         )
         .context("failed to install workflow log global")?;
 
@@ -820,7 +825,8 @@ fn install_native_workflow_functions<'js>(
                     Ok::<(), rquickjs::Error>(())
                 },
             )))
-            .enumerable(),
+            .enumerable()
+            .configurable(),
         )
         .context("failed to install workflow phase global")?;
 
@@ -863,7 +869,8 @@ fn install_native_workflow_functions<'js>(
                     })
                 },
             )))
-            .enumerable(),
+            .enumerable()
+            .configurable(),
         )
         .context("failed to install workflow agent global")?;
 
@@ -902,7 +909,8 @@ fn install_native_workflow_functions<'js>(
                     })
                 },
             )))
-            .enumerable(),
+            .enumerable()
+            .configurable(),
         )
         .context("failed to install workflow child workflow global")?;
 

@@ -36,7 +36,7 @@ fn run_passes_prefixed_cli_args_into_workflow_args() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-my-arg1",
             "world",
             "--args-flag",
@@ -72,9 +72,9 @@ fn run_loads_workflow_args_from_json_file() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-from-file",
-            "../../ts/engine/test/fixtures/args.json",
+            "../engine/tests/fixtures/args.json",
             "--args-my-arg1",
             "file-arg-1",
         ])
@@ -99,7 +99,7 @@ fn run_rejects_unprefixed_run_args() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--my-arg1",
             "world",
         ])
@@ -162,7 +162,7 @@ fn run_rejects_invalid_budget_allowance() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--budget-allowance",
             "-1",
         ])
@@ -179,7 +179,7 @@ fn run_supports_agent_provider_debug() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--agent-provider",
             "debug",
             "--args-my-arg1",
@@ -203,7 +203,7 @@ fn run_supports_dim_debug_logging() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--log-level",
             "debug",
             "--args-my-arg1",
@@ -277,7 +277,7 @@ fn run_rejects_removed_backend_flag() {
     let output = smol_wf()
         .args([
             "run",
-            "../../ts/engine/test/fixtures/cli-args.workflow.js",
+            "../engine/tests/fixtures/cli-args.workflow.js",
             "--backend",
             "sqlite",
         ])

@@ -55,7 +55,7 @@ fn echo_agent_result(prompt: &str, options: Option<&Value>) -> Value {
 
 #[test]
 fn rquickjs_executes_default_async_workflow_fixture() {
-    let source = fs::read_to_string("../../ts/engine/test/fixtures/injected-globals.workflow.js")
+    let source = fs::read_to_string("tests/fixtures/injected-globals.workflow.js")
         .expect("fixture should exist");
     let (output, trace) = run_to_completion(WorkflowModuleInput::new(
         source,
@@ -91,7 +91,7 @@ fn rquickjs_executes_default_async_workflow_fixture() {
 
 #[test]
 fn rquickjs_executes_top_level_module_result_fixture() {
-    let source = fs::read_to_string("../../ts/engine/test/fixtures/module-result.workflow.js")
+    let source = fs::read_to_string("tests/fixtures/module-result.workflow.js")
         .expect("fixture should exist");
     let (output, trace) = run_to_completion(WorkflowModuleInput::new(
         source,

@@ -4,10 +4,10 @@
 //! and root run, execute the existing workflow engine in-process, and persist the
 //! terminal task/run state. Durable retryable steps are introduced separately.
 
-use crate::agent_providers::{
-    create_agent_provider, AgentProvider, AgentProviderResult, AgentProviderRunInput,
+use crate::agent_providers::{AgentProvider, AgentProviderResult, AgentProviderRunInput};
+use crate::workflow::{
+    run_agent_provider, run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner,
 };
-use crate::workflow::{run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner};
 use anyhow::{bail, Context};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -857,11 +857,7 @@ async fn run_durable_agent_provider(
     provider_override: Option<String>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {
-    if let Some(provider_override) = provider_override {
-        create_agent_provider(&provider_override)?.run(input).await
-    } else {
-        default_provider.run(input).await
-    }
+    run_agent_provider(default_provider, provider_override, input).await
 }
 
 fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> Value {

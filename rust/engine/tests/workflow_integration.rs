@@ -7,11 +7,11 @@ use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(format!("../../ts/engine/test/fixtures/{name}"))
+    PathBuf::from(format!("tests/fixtures/{name}"))
 }
 
 fn example_path(name: &str) -> PathBuf {
@@ -36,6 +36,11 @@ struct ConcurrentProbeProvider {
 struct DynamicSchedulingProbeProvider {
     current: AtomicUsize,
     follow_up_started_while_slow_running: AtomicBool,
+}
+
+struct SchemaRetryProvider {
+    prompts: Mutex<Vec<String>>,
+    always_invalid: bool,
 }
 
 #[async_trait::async_trait]
@@ -91,6 +96,56 @@ impl DynamicSchedulingProbeProvider {
     fn follow_up_started_while_slow_running(&self) -> bool {
         self.follow_up_started_while_slow_running
             .load(Ordering::SeqCst)
+    }
+}
+
+impl SchemaRetryProvider {
+    fn new(always_invalid: bool) -> Self {
+        Self {
+            prompts: Mutex::new(Vec::new()),
+            always_invalid,
+        }
+    }
+
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentProvider for SchemaRetryProvider {
+    fn name(&self) -> &str {
+        "schema-retry"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        let mut prompts = self.prompts.lock().unwrap();
+        prompts.push(input.prompt);
+        let attempt = prompts.len();
+        drop(prompts);
+
+        let output = if self.always_invalid || attempt == 1 {
+            json!({ "wrong": true })
+        } else {
+            json!({ "summary": "corrected" })
+        };
+        Ok(AgentProviderResult {
+            output,
+            session_id: None,
+            usage: Some(AgentUsage {
+                output_tokens: Some(1),
+                ..Default::default()
+            }),
+            raw: None,
+        })
     }
 }
 
@@ -610,6 +665,122 @@ fn validates_schema_fixture_with_debug_provider() {
 
     assert_eq!(result.output.result, json!({ "summary": "debug-string" }));
     assert_eq!(result.agent_calls.len(), 1);
+}
+
+#[test]
+fn exposes_shared_budget_across_agents_and_child_workflows() {
+    let provider = Arc::new(FixedUsageProvider);
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path: fixture_path("budget-parent.workflow.js"),
+        args: json!({}),
+        agent_provider: provider,
+        budget_total: Some(50),
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        on_log: None,
+        on_phase: None,
+    }))
+    .expect("workflow should run");
+
+    assert_eq!(
+        result.output.result,
+        json!({
+            "initial": { "total": 50, "spent": 0, "remaining": 50 },
+            "afterParentAgent": { "total": 50, "spent": 7, "remaining": 43 },
+            "child": {
+                "before": { "total": 50, "spent": 7, "remaining": 43 },
+                "after": { "total": 50, "spent": 14, "remaining": 36 },
+            },
+            "afterChild": { "total": 50, "spent": 14, "remaining": 36 },
+        })
+    );
+    assert_eq!(result.budget.total, Some(50));
+    assert_eq!(result.budget.spent, 14);
+}
+
+#[test]
+fn protects_workflow_globals_from_user_mutation() {
+    let result = run_debug(
+        fixture_path("protected-globals.workflow.js"),
+        json!({ "my-arg1": "arg-value-1", "nested": { "value": "original-nested" } }),
+    );
+
+    assert_eq!(
+        result.output.result,
+        json!({
+            "blocked": [
+                "global-args-set",
+                "input-set",
+                "ctx-args-set",
+                "nested-args-set",
+                "agent-property-set",
+                "parallel-define-property",
+                "pipeline-property-set",
+                "global-agent-reassign",
+            ],
+            "arg": "arg-value-1",
+            "inputArg": "arg-value-1",
+            "ctxArg": "arg-value-1",
+            "nested": "original-nested",
+            "agentExtra": null,
+            "parallelExtra": null,
+            "pipelineExtra": null,
+            "agentResult": "echo: value: arg-value-1",
+        })
+    );
+}
+
+#[test]
+fn validates_schema_backed_agent_output_and_retries_once() {
+    let provider = Arc::new(SchemaRetryProvider::new(false));
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path: fixture_path("schema-validation.workflow.js"),
+        args: json!({}),
+        agent_provider: provider.clone(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        on_log: None,
+        on_phase: None,
+    }))
+    .expect("workflow should retry and run");
+
+    assert_eq!(result.output.result, json!({ "summary": "corrected" }));
+    let prompts = provider.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], "produce schema result");
+    assert!(prompts[1].contains("Previous structured output failed JSON Schema validation."));
+    assert!(prompts[1].contains("Return a corrected structured output"));
+    assert!(prompts[1].contains("required property"));
+    assert_eq!(result.budget.spent, 1);
+}
+
+#[test]
+fn rejects_invalid_schema_backed_agent_output_after_retry() {
+    let provider = Arc::new(SchemaRetryProvider::new(true));
+    let error = block_on(run_workflow(RunWorkflowOptions {
+        script_path: fixture_path("schema-validation.workflow.js"),
+        args: json!({}),
+        agent_provider: provider.clone(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        on_log: None,
+        on_phase: None,
+    }))
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("Structured output did not match JSON Schema"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(provider.prompts().len(), 2);
 }
 
 #[test]

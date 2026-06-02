@@ -17,6 +17,7 @@ integration-test = []
 anyhow = "1"
 async-trait = "0.1"
 blake3 = "1"
+jsonschema = { version = "0.46", default-features = false }
 log = "0.4"
 rquickjs = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

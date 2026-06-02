@@ -1,7 +1,7 @@
 use smol_workflow_engine::metadata::read_workflow_metadata;
 
 fn fixture_path(name: &str) -> String {
-    format!("../../ts/engine/test/fixtures/{name}")
+    format!("tests/fixtures/{name}")
 }
 
 #[test]
