@@ -12,6 +12,14 @@ The workflow scripting syntax is based on [Claude Code's dynamic workflows](http
 - `examples` — runnable workflow scripts.
 - `docs` — design notes, workflow API reference, and harness integration findings.
 
+## Getting Started
+
+### Installing in Code Agents
+
+Ask your code agent to read the [harness installation instructions](https://github.com/b4fun/smol-workflows/blob/main/harness/README.md) and install the smol-workflows harness integration for itself.
+
+These integrations add smol-workflows skills/tools to the host agent. They do not install the `smol-wf` binary itself; the bundled helper resolves an existing binary, builds from a nearby checkout when possible, or downloads a release archive.
+
 ## Workflow shape
 
 Workflows are ES modules. The runner injects these globals before importing the script:
