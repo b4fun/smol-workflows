@@ -1,0 +1,21 @@
+{
+  "name": "smol-workflows-marketplace",
+  "interface": {
+    "displayName": "smol-workflows"
+  },
+  "plugins": [
+    {
+      "name": "smol-workflows",
+      "source": {
+        "source": "local",
+        "path": "./plugins/smol-workflows"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+        "products": ["CODEX"]
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

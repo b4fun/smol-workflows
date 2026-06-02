@@ -1,0 +1,15 @@
+{
+  "name": "smol-workflows-marketplace",
+  "description": "smol-workflows harness integrations for Claude Code and GitHub Copilot CLI",
+  "owner": {
+    "name": "b4fun"
+  },
+  "plugins": [
+    {
+      "name": "smol-workflows",
+      "source": "./plugins/smol-workflows",
+      "description": "Skills for writing and running smol-wf workflows",
+      "version": "0.1.0"
+    }
+  ]
+}
