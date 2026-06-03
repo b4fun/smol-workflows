@@ -157,8 +157,11 @@ fn run_passes_prefixed_cli_args_into_workflow_args() {
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert!(stdout["runID"].as_str().is_some());
+    assert!(stdout.get("agentRuns").is_none());
+    assert_eq!(stdout["tokenUsage"]["inputTokens"], 3);
     assert_eq!(stdout["tokenUsage"]["outputTokens"], 5);
-    assert_eq!(stdout["agentRuns"].as_array().unwrap().len(), 1);
+    assert_eq!(stdout["tokenUsage"]["totalTokens"], 8);
+    assert_eq!(stdout["tokenUsage"].as_object().unwrap().len(), 3);
     assert_eq!(
         stdout["results"],
         json!({
@@ -465,7 +468,7 @@ export default await parallel([
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should remain JSON");
     assert_eq!(stdout["results"], json!(["echo: first", "echo: second"]));
-    assert_eq!(stdout["agentRuns"].as_array().unwrap().len(), 2);
+    assert!(stdout.get("agentRuns").is_none());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
