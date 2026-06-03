@@ -61,8 +61,10 @@ ${metrics}`,
 }))
 
 phase('Summarize')
-const diagnostics = await agent(`Summarize Kubernetes pod diagnostics for: ${target}
+const diagnostics = await agent(
+  `Summarize Kubernetes pod diagnostics for: ${target}
 For each pod, identify likely status, evidence, severity, and next actions.
-${JSON.stringify(inspections, null, 2)}`)
+${JSON.stringify(inspections, null, 2)}`,
+)
 
 export default { target, pods, inspections, diagnostics }
