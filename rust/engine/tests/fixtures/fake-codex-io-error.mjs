@@ -12,4 +12,5 @@ for await (const chunk of process.stdin) {
 // Create a *directory* at the output path so readFile() fails with EISDIR (not ENOENT).
 mkdirSync(outputPath, { recursive: true })
 
+console.log(JSON.stringify({ type: 'session_meta', payload: { id: 'codex-session-io-error' } }))
 console.log(JSON.stringify({ type: 'turn_complete', usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }))

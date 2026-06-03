@@ -115,10 +115,12 @@ async fn run_pi(
     } else {
         Value::String(candidate.trim_end().to_string())
     };
+    let session_id = extract_session_id(&events)
+        .ok_or_else(|| anyhow::anyhow!("Pi provider response did not include a session id"))?;
 
     Ok(AgentProviderResult {
         output,
-        session_id: extract_session_id(&events),
+        session_id: Some(session_id),
         usage: extract_usage(&events),
         raw: Some(to_json_value(
             json!({ "events": events, "stderr": stderr, "extensionPath": extension_path.map(|p| p.to_string_lossy().into_owned()) }),
@@ -521,21 +523,18 @@ fn extract_text(value: &Value) -> Option<String> {
 
 fn extract_session_id(events: &[Value]) -> Option<String> {
     for event in events {
-        let Some(record) = event.as_object() else {
-            continue;
-        };
-        let value = record
-            .get("id")
-            .or_else(|| record.get("sessionID"))
-            .or_else(|| record.get("sessionId"))
-            .or_else(|| record.get("session_id"))
-            .and_then(Value::as_str);
-        if let Some(value) = value {
-            if record.get("type").and_then(Value::as_str) == Some("session")
-                || value.starts_with("019")
-            {
-                return Some(value.to_string());
+        if event.get("type").and_then(Value::as_str) == Some("session") {
+            if let Some(id) = event.get("id").and_then(Value::as_str) {
+                return Some(id.to_string());
             }
+        }
+        if let Some(id) = event
+            .get("session_id")
+            .or_else(|| event.get("sessionId"))
+            .or_else(|| event.get("sessionID"))
+            .and_then(Value::as_str)
+        {
+            return Some(id.to_string());
         }
     }
     None

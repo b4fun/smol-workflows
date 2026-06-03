@@ -740,7 +740,7 @@ impl SqliteDurableStore {
     }
 
     pub fn complete_agent_step(&mut self, input: AgentStepCompleteInput<'_>) -> anyhow::Result<()> {
-        let result_json = serde_json::to_string(input.result)?;
+        let result_json = serde_json::to_string(&compact_agent_result_for_replay(input.result))?;
         let output_tokens = input
             .result
             .usage
@@ -824,6 +824,15 @@ pub enum AgentStepClaim {
     Replay(Box<AgentProviderResult>),
     Run { step_id: String },
     Wait,
+}
+
+fn compact_agent_result_for_replay(result: &AgentProviderResult) -> AgentProviderResult {
+    AgentProviderResult {
+        output: result.output.clone(),
+        session_id: result.session_id.clone(),
+        usage: result.usage.clone(),
+        raw: None,
+    }
 }
 
 pub struct AgentStepClaimInput<'a> {
@@ -1180,6 +1189,65 @@ mod tests {
             .unwrap();
         assert_eq!(entries, 1);
         assert_eq!(tokens, 7);
+    }
+
+    #[test]
+    fn completed_agent_step_persists_compact_replay_result_without_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let (_task_id, run_id) = seed_durable_run(&db_path);
+        let input_json = json!({ "prompt": "hello" });
+        let step_id = {
+            let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+            match store
+                .claim_or_replay_agent_step(claim_input(
+                    &run_id,
+                    "agent:compact",
+                    "worker-0",
+                    10_000,
+                    100,
+                    &input_json,
+                ))
+                .expect("claim should succeed")
+            {
+                AgentStepClaim::Run { step_id } => step_id,
+                other => panic!("expected run claim, got {other:?}"),
+            }
+        };
+        let result = AgentProviderResult {
+            output: json!("done"),
+            session_id: Some("provider-session-1".into()),
+            usage: Some(crate::agent_providers::AgentUsage {
+                output_tokens: Some(7),
+                ..Default::default()
+            }),
+            raw: Some(json!({ "events": ["large provider transcript"] })),
+        };
+
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        store
+            .complete_agent_step(AgentStepCompleteInput {
+                step_id: &step_id,
+                run_id: &run_id,
+                root_run_id: &run_id,
+                result: &result,
+                now: 200,
+            })
+            .expect("completion should succeed");
+        let stored: String = store
+            .connection()
+            .query_row(
+                "SELECT result_json FROM sw_workflow_steps WHERE step_id = ?1",
+                [&step_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored: Value = serde_json::from_str(&stored).unwrap();
+
+        assert_eq!(stored["output"], json!("done"));
+        assert_eq!(stored["sessionId"], json!("provider-session-1"));
+        assert_eq!(stored["usage"]["outputTokens"], json!(7));
+        assert!(stored.get("raw").is_none());
     }
 
     #[test]

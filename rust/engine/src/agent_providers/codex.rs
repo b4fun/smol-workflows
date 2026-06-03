@@ -1,6 +1,6 @@
 use super::common::*;
 use super::types::*;
-use anyhow::bail;
+use anyhow::{bail, Context};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -105,6 +105,8 @@ async fn run_codex(
     )
     .await?;
     let events = parse_json_lines(&stdout);
+    let session_id = extract_session_id(&events)
+        .context("Codex provider response did not include a session id")?;
     let final_message = read_final_message(&output_path, &events)?;
     let output = if has_schema {
         parse_structured_output(&final_message)?
@@ -114,7 +116,7 @@ async fn run_codex(
 
     Ok(AgentProviderResult {
         output,
-        session_id: None,
+        session_id: Some(session_id),
         usage: extract_usage(&events),
         raw: Some(to_json_value(json!({ "events": events, "stderr": stderr }))),
     })
@@ -304,6 +306,25 @@ fn extract_text(value: &Value) -> Option<String> {
             .and_then(extract_text),
         _ => None,
     }
+}
+
+fn extract_session_id(events: &[Value]) -> Option<String> {
+    for event in events {
+        if event.get("type").and_then(Value::as_str) == Some("session_meta") {
+            if let Some(id) = get_path(event, &["payload", "id"]).and_then(Value::as_str) {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(id) = event
+            .get("session_id")
+            .or_else(|| event.get("sessionId"))
+            .or_else(|| event.get("sessionID"))
+            .and_then(Value::as_str)
+        {
+            return Some(id.to_string());
+        }
+    }
+    None
 }
 
 fn extract_usage(events: &[Value]) -> Option<AgentUsage> {
