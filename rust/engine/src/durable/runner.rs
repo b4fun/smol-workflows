@@ -401,6 +401,10 @@ impl SqliteDurableStore {
         owner_id: &str,
         now: i64,
     ) -> anyhow::Result<(String, u32)> {
+        let db_label = self
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<in-memory>".to_string());
         let tx = self
             .connection_mut()
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -415,7 +419,13 @@ impl SqliteDurableStore {
                 rusqlite::params![run_id],
                 |row| row.get(0),
             )
-            .context("failed to find durable run to resume")?;
+            .optional()
+            .context("failed to query durable run to resume")?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workflow run {run_id} was not found in {db_label}; check --db or SMOL_WF_DB"
+                )
+            })?;
         let current_attempts: u32 =
             tx.query_row(
                 r#"
@@ -1594,6 +1604,23 @@ export default { unreachable: true };
             )
             .unwrap();
         assert_eq!(completed_steps, 1);
+    }
+
+    #[test]
+    fn prepare_resume_run_reports_missing_run_id_and_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        store.init().expect("schema should initialize");
+
+        let error = store
+            .prepare_resume_run("run_missing", "owner", 1)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("workflow run run_missing was not found"));
+        assert!(error.contains(&db_path.display().to_string()));
+        assert!(error.contains("check --db or SMOL_WF_DB"));
     }
 
     #[tokio::test]
