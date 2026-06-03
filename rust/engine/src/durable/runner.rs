@@ -422,9 +422,7 @@ impl SqliteDurableStore {
             .optional()
             .context("failed to query durable run to resume")?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "workflow run {run_id} was not found in {db_label}; check --db or SMOL_WF_DB"
-                )
+                anyhow::anyhow!("workflow run {run_id} was not found in {db_label}; check --db")
             })?;
         let current_attempts: u32 =
             tx.query_row(
@@ -1620,7 +1618,7 @@ export default { unreachable: true };
 
         assert!(error.contains("workflow run run_missing was not found"));
         assert!(error.contains(&db_path.display().to_string()));
-        assert!(error.contains("check --db or SMOL_WF_DB"));
+        assert!(error.contains("check --db"));
     }
 
     #[tokio::test]

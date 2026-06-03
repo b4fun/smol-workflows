@@ -13,15 +13,17 @@ fn node() -> String {
 }
 
 fn smol_wf() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_smol-wf"));
+    Command::new(env!("CARGO_BIN_EXE_smol-wf"))
+}
+
+fn smol_wf_run(script: &str) -> Command {
     let db_id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-    command.env(
-        "SMOL_WF_DB",
-        std::env::temp_dir().join(format!(
-            "smol-wf-cli-test-{}-{db_id}.db",
-            std::process::id()
-        )),
-    );
+    let db_path = std::env::temp_dir().join(format!(
+        "smol-wf-cli-test-{}-{db_id}.db",
+        std::process::id()
+    ));
+    let mut command = smol_wf();
+    command.arg("run").arg(script).arg("--db").arg(db_path);
     command
 }
 
@@ -135,10 +137,8 @@ fn llm_list_workflows_reports_empty_table() {
 
 #[test]
 fn run_passes_prefixed_cli_args_into_workflow_args() {
-    let output = smol_wf()
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-my-arg1",
             "world",
             "--args-flag",
@@ -177,10 +177,8 @@ fn run_passes_prefixed_cli_args_into_workflow_args() {
 
 #[test]
 fn run_loads_workflow_args_from_json_file() {
-    let output = smol_wf()
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
             "--args-from-file",
             "../engine/tests/fixtures/args.json",
             "--args-my-arg1",
@@ -207,13 +205,8 @@ fn run_loads_workflow_args_from_json_file() {
 
 #[test]
 fn run_rejects_unprefixed_run_args() {
-    let output = smol_wf()
-        .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
-            "--my-arg1",
-            "world",
-        ])
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args(["--my-arg1", "world"])
         .output()
         .expect("smol-wf should run");
 
@@ -223,10 +216,8 @@ fn run_rejects_unprefixed_run_args() {
 
 #[test]
 fn run_supports_budget_allowance_flag() {
-    let output = smol_wf()
+    let output = smol_wf_run("../../examples/budget.mjs")
         .args([
-            "run",
-            "../../examples/budget.mjs",
             "--budget-allowance",
             "20",
             "--args-topic",
@@ -247,29 +238,6 @@ fn run_supports_budget_allowance_flag() {
 }
 
 #[test]
-fn run_supports_budget_allowance_env() {
-    let output = smol_wf()
-        .env("SMOL_WF_BUDGET_ALLOWANCE", "15")
-        .args([
-            "run",
-            "../../examples/budget.mjs",
-            "--args-topic",
-            "rust cli budget env",
-        ])
-        .output()
-        .expect("smol-wf should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout["results"]["budget"]["total"], 15);
-}
-
-#[test]
 fn run_rejects_missing_raw_sessions_directory() {
     let missing = std::env::temp_dir().join(format!(
         "smol-wf-cli-missing-raw-sessions-{}",
@@ -277,10 +245,8 @@ fn run_rejects_missing_raw_sessions_directory() {
     ));
     let _ = fs::remove_dir_all(&missing);
 
-    let output = smol_wf()
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
             "--save-raw-sessions",
             missing.to_str().expect("path should be utf8"),
         ])
@@ -316,7 +282,7 @@ fn run_saves_raw_provider_sessions() {
     permissions.set_mode(0o755);
     fs::set_permissions(&wrapper, permissions).unwrap();
 
-    let output = smol_wf()
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .env(
             "PATH",
             format!(
@@ -326,8 +292,6 @@ fn run_saves_raw_provider_sessions() {
             ),
         )
         .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
             "--agent-provider",
             "claude-code",
             "--save-raw-sessions",
@@ -360,13 +324,8 @@ fn run_saves_raw_provider_sessions() {
 
 #[test]
 fn run_rejects_invalid_budget_allowance() {
-    let output = smol_wf()
-        .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
-            "--budget-allowance",
-            "-1",
-        ])
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args(["--budget-allowance", "-1"])
         .output()
         .expect("smol-wf should run");
 
@@ -377,15 +336,8 @@ fn run_rejects_invalid_budget_allowance() {
 
 #[test]
 fn run_supports_agent_provider_debug() {
-    let output = smol_wf()
-        .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
-            "--agent-provider",
-            "debug",
-            "--args-my-arg1",
-            "provider",
-        ])
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args(["--agent-provider", "debug", "--args-my-arg1", "provider"])
         .output()
         .expect("smol-wf should run");
 
@@ -401,15 +353,8 @@ fn run_supports_agent_provider_debug() {
 
 #[test]
 fn run_supports_dim_debug_logging() {
-    let output = smol_wf()
-        .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
-            "--log-level",
-            "debug",
-            "--args-my-arg1",
-            "logging",
-        ])
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args(["--log-level", "debug", "--args-my-arg1", "logging"])
         .output()
         .expect("smol-wf should run");
 
@@ -447,15 +392,8 @@ export default await parallel([
     )
     .expect("workflow fixture should be written");
 
-    let output = smol_wf()
-        .args([
-            "run",
-            path.to_str().expect("path should be utf8"),
-            "--log-level",
-            "debug",
-            "--max-parallel-agents",
-            "1",
-        ])
+    let output = smol_wf_run(path.to_str().expect("path should be utf8"))
+        .args(["--log-level", "debug", "--max-parallel-agents", "1"])
         .output()
         .expect("smol-wf should run");
     let _ = fs::remove_file(&path);
@@ -476,13 +414,8 @@ export default await parallel([
 
 #[test]
 fn run_rejects_removed_backend_flag() {
-    let output = smol_wf()
-        .args([
-            "run",
-            "../engine/tests/fixtures/cli-args.workflow.js",
-            "--backend",
-            "sqlite",
-        ])
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args(["--backend", "sqlite"])
         .output()
         .expect("smol-wf should run");
 

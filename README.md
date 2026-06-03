@@ -314,13 +314,13 @@ smol-wf llm list-workflows
 
 ### Agent providers
 
-The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` / `SMOL_WF_AGENT_PROVIDER` or per call with `agent(prompt, { provider })`.
+The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` or per call with `agent(prompt, { provider })`.
 
 Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities`](docs/harness-capabilities) for provider capability notes.
 
 ## Durable backends
 
-Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` or `SMOL_WF_DB` is provided. Use `--resume-run <run-id>` to continue an existing run.
+Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run.
 
 ## What is in this repo
 

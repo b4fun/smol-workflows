@@ -278,25 +278,12 @@ struct RunCliOptions {
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut workflow_arg_tokens = Vec::new();
-    let mut agent_provider =
-        env::var("SMOL_WF_AGENT_PROVIDER").unwrap_or_else(|_| "debug".to_string());
-    let mut budget_allowance = env::var("SMOL_WF_BUDGET_ALLOWANCE")
-        .ok()
-        .map(|value| parse_non_negative_integer(&value, "SMOL_WF_BUDGET_ALLOWANCE"))
-        .transpose()?;
-    let mut log_level = env::var("SMOL_WF_LOG")
-        .ok()
-        .map(|value| parse_log_level(&value, "SMOL_WF_LOG"))
-        .transpose()?
-        .unwrap_or(LevelFilter::Off);
+    let mut agent_provider = "debug".to_string();
+    let mut budget_allowance = None;
+    let mut log_level = LevelFilter::Off;
     let mut resume_run_id = None;
-    let mut db_path = env::var("SMOL_WF_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("smol-workflows.db"));
-    let mut max_parallel_agent_requests = env::var("SMOL_WF_MAX_PARALLEL_AGENTS")
-        .ok()
-        .map(|value| parse_positive_usize(&value, "SMOL_WF_MAX_PARALLEL_AGENTS"))
-        .transpose()?;
+    let mut db_path = PathBuf::from("smol-workflows.db");
+    let mut max_parallel_agent_requests = None;
     let mut save_raw_sessions = None;
     let mut index = 0;
 
