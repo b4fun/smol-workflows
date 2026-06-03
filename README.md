@@ -300,19 +300,12 @@ Writes workflow progress/debug information to stderr without changing the workfl
 
 ### CLI
 
-```sh
-smol-wf run <workflow-script> [--args-<name> value]
-smol-wf run <workflow-script> --args-from-file <args.json>
-smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
-smol-wf run <workflow-script> --budget-allowance <output-token-count>
-smol-wf run <workflow-script> --max-parallel-agents <count>
-smol-wf run <workflow-script> --save-raw-sessions <dir>
-smol-wf run <workflow-script> --db <smol-workflows.db>
-smol-wf run <workflow-script> --resume-run <run-id>
-smol-wf llm list-workflows
-```
+| Command group | Purpose | Reference |
+| --- | --- | --- |
+| `smol-wf run` | Run a workflow script. | [`docs/usages/run.md`](docs/usages/run.md) |
+| `smol-wf llm` | LLM-facing helper commands, such as workflow discovery. | [`docs/usages/llm.md`](docs/usages/llm.md) |
 
-### Agent providers
+## Agent providers
 
 The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` or per call with `agent(prompt, { provider })`.
 
