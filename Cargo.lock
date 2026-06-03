@@ -1539,6 +1539,7 @@ dependencies = [
  "anyhow",
  "clap",
  "log",
+ "serde",
  "serde_json",
  "smol-workflow-engine",
  "tokio",

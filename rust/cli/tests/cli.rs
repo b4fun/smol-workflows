@@ -149,8 +149,11 @@ fn run_passes_prefixed_cli_args_into_workflow_args() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert!(stdout["runID"].as_str().is_some());
+    assert_eq!(stdout["tokenUsage"]["outputTokens"], 5);
+    assert_eq!(stdout["agentRuns"].as_array().unwrap().len(), 1);
     assert_eq!(
-        stdout,
+        stdout["results"],
         json!({
             "args": {
                 "my-arg1": "world",
@@ -183,10 +186,13 @@ fn run_loads_workflow_args_from_json_file() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout["args"]["fromFile"], "file-value");
-    assert_eq!(stdout["args"]["nested"]["value"], "nested-file-value");
-    assert_eq!(stdout["args"]["my-arg1"], "file-arg-1");
-    assert_eq!(stdout["result"], "echo: hello file-arg-1");
+    assert_eq!(stdout["results"]["args"]["fromFile"], "file-value");
+    assert_eq!(
+        stdout["results"]["args"]["nested"]["value"],
+        "nested-file-value"
+    );
+    assert_eq!(stdout["results"]["args"]["my-arg1"], "file-arg-1");
+    assert_eq!(stdout["results"]["result"], "echo: hello file-arg-1");
 }
 
 #[test]
@@ -226,7 +232,8 @@ fn run_supports_budget_allowance_flag() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout["budget"]["total"], 20);
+    assert_eq!(stdout["results"]["budget"]["total"], 20);
+    assert!(stdout["tokenUsage"]["outputTokens"].as_u64().unwrap() > 0);
 }
 
 #[test]
@@ -249,7 +256,7 @@ fn run_supports_budget_allowance_env() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout["budget"]["total"], 15);
+    assert_eq!(stdout["results"]["budget"]["total"], 15);
 }
 
 #[test]
@@ -290,7 +297,7 @@ fn run_supports_agent_provider_debug() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout["result"], "echo: hello provider");
+    assert_eq!(stdout["results"]["result"], "echo: hello provider");
 }
 
 #[test]
@@ -314,7 +321,7 @@ fn run_supports_dim_debug_logging() {
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should remain JSON");
-    assert_eq!(stdout["result"], "echo: hello logging");
+    assert_eq!(stdout["results"]["result"], "echo: hello logging");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("\x1b[2m[debug]"));
@@ -361,7 +368,8 @@ export default await parallel([
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should remain JSON");
-    assert_eq!(stdout, json!(["echo: first", "echo: second"]));
+    assert_eq!(stdout["results"], json!(["echo: first", "echo: second"]));
+    assert_eq!(stdout["agentRuns"].as_array().unwrap().len(), 2);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
@@ -419,7 +427,8 @@ export default { result: await agent("sqlite") };
     );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(stdout, json!({ "result": "echo: sqlite" }));
+    assert_eq!(stdout["results"], json!({ "result": "echo: sqlite" }));
+    assert!(stdout["runID"].as_str().unwrap().starts_with("run_"));
     assert!(
         db_path.exists(),
         "sqlite backend should create a database file"

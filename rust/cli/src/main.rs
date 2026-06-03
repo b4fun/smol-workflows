@@ -1,10 +1,12 @@
 use clap::{Arg, Command as ClapCommand};
 use log::{LevelFilter, Log, Metadata, Record};
+use serde::Serialize;
 use serde_json::{Map, Value};
-use smol_workflow_engine::agent_providers::create_agent_provider;
+use smol_workflow_engine::agent_providers::{create_agent_provider, AgentUsageCost};
 use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
+use smol_workflow_engine::workflow::{WorkflowAgentRunSummary, WorkflowTokenUsage};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -172,6 +174,29 @@ fn print_workflows_table(workflows: &[DiscoveredWorkflow]) {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRunReport {
+    token_usage: CliTokenUsageReport,
+    #[serde(rename = "runID")]
+    run_id: String,
+    agent_runs: Vec<WorkflowAgentRunSummary>,
+    results: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliTokenUsageReport {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<AgentUsageCost>,
+    by_phase: std::collections::BTreeMap<String, WorkflowTokenUsage>,
+}
+
 async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
     let options = parse_run_options(argv)?;
     init_logging(options.log_level);
@@ -223,11 +248,24 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
     durable_options.resume_run_id = options.resume_run_id;
     durable_options.on_log = Some(&on_log);
     durable_options.on_phase = Some(&on_phase);
-    let result = run_local_durable_workflow(&mut store, durable_options)
-        .await?
-        .workflow;
+    let result = run_local_durable_workflow(&mut store, durable_options).await?;
+    let workflow = result.workflow;
+    let report = CliRunReport {
+        token_usage: CliTokenUsageReport {
+            input_tokens: workflow.token_usage.input_tokens,
+            output_tokens: workflow.token_usage.output_tokens,
+            cache_read_tokens: workflow.token_usage.cache_read_tokens,
+            cache_write_tokens: workflow.token_usage.cache_write_tokens,
+            total_tokens: workflow.token_usage.total_tokens,
+            cost: workflow.token_usage.cost,
+            by_phase: workflow.token_usage_by_phase,
+        },
+        run_id: result.run_id,
+        agent_runs: workflow.agent_runs,
+        results: workflow.output.result,
+    };
 
-    println!("{}", serde_json::to_string_pretty(&result.output.result)?);
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 

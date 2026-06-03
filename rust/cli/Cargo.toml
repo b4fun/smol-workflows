@@ -17,6 +17,7 @@ integration-test = ["smol-workflow-engine/integration-test"]
 anyhow = "1"
 clap = "4"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol-workflow-engine = { path = "../engine" }
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,6 +1,6 @@
 use crate::agent_providers::{
     create_agent_provider, AgentProvider, AgentProviderContext, AgentProviderResult,
-    AgentProviderRunInput,
+    AgentProviderRunInput, AgentUsage, AgentUsageCost,
 };
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
@@ -10,6 +10,7 @@ use crate::js_runtime::{
 };
 use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs;
@@ -67,6 +68,39 @@ pub struct RunWorkflowResult {
     pub agent_calls: Vec<WorkflowRuntimeRequest>,
     pub workflow_calls: Vec<WorkflowRuntimeRequest>,
     pub budget: WorkflowBudgetSnapshot,
+    pub token_usage: WorkflowTokenUsage,
+    pub token_usage_by_phase: std::collections::BTreeMap<String, WorkflowTokenUsage>,
+    pub agent_runs: Vec<WorkflowAgentRunSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<AgentUsageCost>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentRunSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +166,9 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
             total: options.budget_total,
             spent: options.budget_spent,
         },
+        token_usage: WorkflowTokenUsage::default(),
+        token_usage_by_phase: Default::default(),
+        agent_runs: Vec::new(),
         nesting_depth: options.nesting_depth,
         max_parallel_agent_requests: options.max_parallel_agent_requests,
         agent_runner: options
@@ -173,10 +210,9 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                 let completion = completion
                     .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
                     .map_err(|error| anyhow!("agent provider task failed: {error}"))?;
-                let id = completion.id;
-                let resolution = match completion
-                    .result
-                    .and_then(|result| state.apply_agent_result(result))
+                let AgentTaskCompletion { id, input, provider, result } = completion;
+                let resolution = match result
+                    .and_then(|result| state.apply_agent_result(&id, &input, provider, result))
                 {
                     Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
                         value,
@@ -283,6 +319,9 @@ struct RunState<'a> {
     agent_calls: Vec<WorkflowRuntimeRequest>,
     workflow_calls: Vec<WorkflowRuntimeRequest>,
     budget: WorkflowBudgetSnapshot,
+    token_usage: WorkflowTokenUsage,
+    token_usage_by_phase: std::collections::BTreeMap<String, WorkflowTokenUsage>,
+    agent_runs: Vec<WorkflowAgentRunSummary>,
     nesting_depth: usize,
     max_parallel_agent_requests: Option<usize>,
     agent_runner: Arc<dyn WorkflowAgentRunner>,
@@ -297,7 +336,71 @@ struct PreparedAgentRun {
 
 struct AgentTaskCompletion {
     id: String,
+    input: AgentProviderRunInput,
+    provider: Option<String>,
     result: anyhow::Result<AgentProviderResult>,
+}
+
+fn add_usage(total: &mut WorkflowTokenUsage, usage: Option<&AgentUsage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+
+    total.input_tokens = total
+        .input_tokens
+        .saturating_add(usage.input_tokens.unwrap_or_default());
+    total.output_tokens = total
+        .output_tokens
+        .saturating_add(usage.output_tokens.unwrap_or_default());
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens.unwrap_or_default());
+    total.cache_write_tokens = total
+        .cache_write_tokens
+        .saturating_add(usage.cache_write_tokens.unwrap_or_default());
+    total.total_tokens = total
+        .total_tokens
+        .saturating_add(usage.total_tokens.unwrap_or_default());
+
+    if let Some(cost) = usage.cost.as_ref() {
+        total.cost = Some(merge_cost(total.cost.as_ref(), cost));
+    }
+}
+
+fn merge_token_usage(total: &mut WorkflowTokenUsage, usage: &WorkflowTokenUsage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens);
+    total.cache_write_tokens = total
+        .cache_write_tokens
+        .saturating_add(usage.cache_write_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+    if let Some(cost) = usage.cost.as_ref() {
+        total.cost = Some(merge_cost(total.cost.as_ref(), cost));
+    }
+}
+
+fn merge_cost(left: Option<&AgentUsageCost>, right: &AgentUsageCost) -> AgentUsageCost {
+    AgentUsageCost {
+        input: sum_f64(left.and_then(|cost| cost.input), right.input),
+        output: sum_f64(left.and_then(|cost| cost.output), right.output),
+        cache_read: sum_f64(left.and_then(|cost| cost.cache_read), right.cache_read),
+        cache_write: sum_f64(left.and_then(|cost| cost.cache_write), right.cache_write),
+        total: sum_f64(left.and_then(|cost| cost.total), right.total),
+        currency: right
+            .currency
+            .clone()
+            .or_else(|| left.and_then(|cost| cost.currency.clone())),
+    }
+}
+
+fn sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or_default() + right.unwrap_or_default()),
+    }
 }
 
 impl<'a> RunState<'a> {
@@ -329,6 +432,9 @@ impl<'a> RunState<'a> {
                     agent_calls: std::mem::take(&mut self.agent_calls),
                     workflow_calls: std::mem::take(&mut self.workflow_calls),
                     budget: self.budget.clone(),
+                    token_usage: std::mem::take(&mut self.token_usage),
+                    token_usage_by_phase: std::mem::take(&mut self.token_usage_by_phase),
+                    agent_runs: std::mem::take(&mut self.agent_runs),
                 }));
             }
             JsEvent::Error(message) => bail!(message),
@@ -441,8 +547,14 @@ impl<'a> RunState<'a> {
         id: String,
         prepared: PreparedAgentRun,
     ) {
+        let default_provider_name = self.agent_provider.name().to_string();
         let default_provider = Arc::clone(&self.agent_provider);
         let agent_runner = Arc::clone(&self.agent_runner);
+        let completion_input = prepared.input.clone();
+        let completion_provider = prepared
+            .provider_override
+            .clone()
+            .or(Some(default_provider_name));
         let max_parallel = self
             .max_parallel_agent_requests
             .filter(|value| *value > 0)
@@ -456,6 +568,8 @@ impl<'a> RunState<'a> {
         agent_tasks.spawn(async move {
             AgentTaskCompletion {
                 id,
+                input: completion_input,
+                provider: completion_provider,
                 result: agent_runner
                     .run_agent(default_provider, prepared.provider_override, prepared.input)
                     .await,
@@ -506,10 +620,17 @@ impl<'a> RunState<'a> {
         }
     }
 
-    fn apply_agent_result(&mut self, result: AgentProviderResult) -> anyhow::Result<Value> {
+    fn apply_agent_result(
+        &mut self,
+        id: &str,
+        input: &AgentProviderRunInput,
+        provider: Option<String>,
+        result: AgentProviderResult,
+    ) -> anyhow::Result<Value> {
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
+        self.record_agent_run(id, input, provider, &result);
         log::debug!(
             "agent call complete session_id={:?} output_tokens={:?} budget_spent={}",
             result.session_id,
@@ -517,6 +638,35 @@ impl<'a> RunState<'a> {
             self.budget.spent
         );
         Ok(result.output)
+    }
+
+    fn record_agent_run(
+        &mut self,
+        id: &str,
+        input: &AgentProviderRunInput,
+        provider: Option<String>,
+        result: &AgentProviderResult,
+    ) {
+        add_usage(&mut self.token_usage, result.usage.as_ref());
+        if let Some(phase) = input.context.phase.as_ref() {
+            let phase_usage = self.token_usage_by_phase.entry(phase.clone()).or_default();
+            add_usage(phase_usage, result.usage.as_ref());
+        }
+        let model = input
+            .options
+            .as_ref()
+            .and_then(|options| options.get("model"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        self.agent_runs.push(WorkflowAgentRunSummary {
+            id: id.to_string(),
+            key: input.context.key.clone(),
+            phase: input.context.phase.clone(),
+            provider,
+            model,
+            provider_session_id: result.session_id.clone(),
+            usage: result.usage.clone(),
+        });
     }
 
     async fn handle_workflow(
@@ -552,6 +702,11 @@ impl<'a> RunState<'a> {
         self.phases.extend(child.phases);
         self.agent_calls.extend(child.agent_calls);
         self.workflow_calls.extend(child.workflow_calls);
+        merge_token_usage(&mut self.token_usage, &child.token_usage);
+        for (phase, usage) in child.token_usage_by_phase {
+            merge_token_usage(self.token_usage_by_phase.entry(phase).or_default(), &usage);
+        }
+        self.agent_runs.extend(child.agent_runs);
         Ok(child.output.result)
     }
 }

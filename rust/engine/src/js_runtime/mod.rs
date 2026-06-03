@@ -66,7 +66,8 @@ pub struct SandboxOptions {
 impl Default for SandboxOptions {
     fn default() -> Self {
         Self {
-            memory_limit_bytes: 64 * 1024 * 1024,
+            // TODO: expose this as a user-configurable workflow runtime limit.
+            memory_limit_bytes: 128 * 1024 * 1024,
             max_stack_size_bytes: 1024 * 1024,
             timeout: Duration::from_secs(5),
             import_policy: ImportPolicy::DenyAll,
