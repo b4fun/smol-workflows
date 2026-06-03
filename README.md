@@ -20,10 +20,9 @@ curl -fsSL https://github.com/b4fun/smol-workflows/releases/latest/download/smol
 
 ### Running your first workflow
 
-Save a workflow that uses `agent`, `parallel`, and `pipeline` to diagnose Kubernetes pod status. This example is also available at [`examples/pod-diagnostics.mjs`](examples/pod-diagnostics.mjs):
+Here is a workflow that uses `agent`, `parallel`, and `pipeline` to diagnose Kubernetes pod status. This example is also available at [`examples/pod-diagnostics.mjs`](examples/pod-diagnostics.mjs):
 
-```sh
-cat > pod-diagnostics.mjs <<'EOF'
+```js
 export const meta = {
   name: 'pod-diagnostics',
   description: 'Diagnose Kubernetes pod status with agent, parallel, and pipeline primitives',
@@ -92,10 +91,9 @@ For each pod, identify likely status, evidence, severity, and next actions.
 ${JSON.stringify(inspections, null, 2)}`)
 
 export default { target, pods, inspections, diagnostics }
-EOF
 ```
 
-Run it with your preferred provider and a natural-language target:
+Save the code above to `pod-diagnostics.mjs`, then run it with your preferred provider and a natural-language target:
 
 ```sh
 smol-wf run ./pod-diagnostics.mjs \
@@ -160,9 +158,9 @@ Ask your code agent to read the [harness installation instructions](https://gith
 
 These integrations add smol-workflows skills/tools to the host agent. They do not install the `smol-wf` binary itself; the bundled helper resolves an existing binary, builds from a nearby checkout when possible, or downloads a release archive.
 
-## Workflow shape
+## Workflow shape and primitives
 
-Workflows are ES modules. The Rust runner injects workflow primitives before evaluating the script. The TypeScript definitions for these globals live in [`ts/sdk/src/index.ts`](ts/sdk/src/index.ts) and [`ts/sdk/src/pipeline.ts`](ts/sdk/src/pipeline.ts).
+Workflows are ES modules. The Rust runner injects workflow primitives before evaluating the script. A primitive is a small built-in capability the workflow can call directly, such as running an agent, fanning work out in parallel, or marking progress. The TypeScript definitions for these globals live in [`ts/sdk/src/index.ts`](ts/sdk/src/index.ts) and [`ts/sdk/src/pipeline.ts`](ts/sdk/src/pipeline.ts).
 
 A workflow script should export:
 
@@ -171,7 +169,7 @@ export const meta: WorkflowMetadata
 export default resultOrWorkflowFunction
 ```
 
-### `args`
+### `args` -- Workflow input values supplied by the CLI or parent workflow
 
 ```ts
 args: Record<string, unknown>
@@ -184,7 +182,7 @@ Input arguments passed by `smol-wf run --args-*` or `--args-from-file`. Treat va
 
 </details>
 
-### `agent(prompt, options?)`
+### `agent(prompt, options?)` -- Send a prompt to a provider and get text or structured JSON back
 
 ```ts
 agent(prompt: string, options?: AgentRunOptions): Promise<string | null>
@@ -200,14 +198,13 @@ Runs one agent/provider call. By default it returns text. With `schema`, it requ
 - `schema` — JSON Schema for structured output;
 - `model` — provider-specific model override;
 - `provider` — provider override such as `pi`, `opencode`, `codex`, or `claude-code`;
-- `agentType` — provider-specific subagent/agent selection;
-- `key` — stable checkpoint/cache key for durable runs.
+- `agentType` — provider-specific subagent/agent selection.
 
 If an agent call fails inside `parallel` or `pipeline`, that item/task resolves to `null`; otherwise errors reject the workflow.
 
 </details>
 
-### `parallel(tasks)`
+### `parallel(tasks)` -- Run independent async tasks concurrently and collect their results
 
 ```ts
 parallel(tasks: Array<() => Awaitable<T>>): Promise<Array<T | null>>
@@ -220,7 +217,7 @@ Runs independent tasks concurrently and returns results in input order. If one t
 
 </details>
 
-### `pipeline(items, ...stages)`
+### `pipeline(items, ...stages)` -- Move each item through ordered stages as soon as it is ready
 
 ```ts
 pipeline(
@@ -242,7 +239,7 @@ If a stage throws for one item, that item becomes `null` and later stages for th
 
 </details>
 
-### `workflow(nameOrRef, args?)`
+### `workflow(nameOrRef, args?)` -- Invoke another workflow as a child step
 
 ```ts
 workflow(nameOrRef: string | { scriptPath: string }, args?: unknown): Promise<unknown>
@@ -255,7 +252,7 @@ Runs another workflow as a child workflow. Relative `scriptPath` values resolve 
 
 </details>
 
-### `budget`
+### `budget` -- Inspect the shared token-budget view for budget-aware prompts and decisions
 
 ```ts
 budget: {
@@ -272,7 +269,7 @@ Exposes the soft output-token budget. `total` is set by `--budget-allowance`; `s
 
 </details>
 
-### `phase(name, options?)`
+### `phase(name, options?)` -- Mark the current workflow phase for logs, tracing, and phase defaults
 
 ```ts
 phase(name: string, options?: unknown): void
@@ -285,7 +282,7 @@ Marks workflow progress. Phases are printed to stderr, included in run history, 
 
 </details>
 
-### `log(...values)`
+### `log(...values)` -- Write progress/debug messages without changing workflow results
 
 ```ts
 log(...values: unknown[]): void
