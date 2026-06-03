@@ -21,6 +21,8 @@ use tokio::task::{JoinSet, LocalSet};
 
 pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
 pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
+pub type WorkflowAgentResultCallback<'a> =
+    &'a dyn Fn(&str, &str, &AgentProviderResult) -> anyhow::Result<()>;
 
 #[async_trait::async_trait]
 pub trait WorkflowAgentRunner: Send + Sync {
@@ -58,6 +60,7 @@ pub struct RunWorkflowOptions<'a> {
     pub agent_runner: Option<Arc<dyn WorkflowAgentRunner>>,
     pub on_log: Option<WorkflowLogCallback<'a>>,
     pub on_phase: Option<WorkflowPhaseCallback<'a>>,
+    pub on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
 }
 
 #[derive(Debug)]
@@ -176,6 +179,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
             .unwrap_or_else(|| Arc::new(DirectWorkflowAgentRunner)),
         on_log: options.on_log,
         on_phase: options.on_phase,
+        on_agent_result: options.on_agent_result,
     };
 
     let mut pending_requests = VecDeque::<WorkflowRuntimeRequest>::new();
@@ -327,6 +331,7 @@ struct RunState<'a> {
     agent_runner: Arc<dyn WorkflowAgentRunner>,
     on_log: Option<WorkflowLogCallback<'a>>,
     on_phase: Option<WorkflowPhaseCallback<'a>>,
+    on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
 }
 
 struct PreparedAgentRun {
@@ -627,6 +632,12 @@ impl<'a> RunState<'a> {
         provider: Option<String>,
         result: AgentProviderResult,
     ) -> anyhow::Result<Value> {
+        let provider_name = provider
+            .as_deref()
+            .unwrap_or_else(|| self.agent_provider.name());
+        if let Some(on_agent_result) = self.on_agent_result {
+            on_agent_result(id, provider_name, &result)?;
+        }
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
@@ -695,6 +706,7 @@ impl<'a> RunState<'a> {
             agent_runner: Some(Arc::clone(&self.agent_runner)),
             on_log: self.on_log,
             on_phase: self.on_phase,
+            on_agent_result: self.on_agent_result,
         }))
         .await?;
         self.budget = child.budget;

@@ -307,6 +307,7 @@ smol-wf run <workflow-script> --args-from-file <args.json>
 smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
 smol-wf run <workflow-script> --budget-allowance <output-token-count>
 smol-wf run <workflow-script> --max-parallel-agents <count>
+smol-wf run <workflow-script> --save-raw-sessions <dir>
 smol-wf run <workflow-script> --db <smol-workflows.db>
 smol-wf run <workflow-script> --resume-run <run-id>
 smol-wf llm list-workflows

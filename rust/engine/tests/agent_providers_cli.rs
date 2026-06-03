@@ -404,6 +404,22 @@ async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn pi_provider_treats_json_error_events_as_failures() {
+    let provider = PiAgentProvider::new(PiAgentProviderOptions {
+        command: Some(node()),
+        subcommand: vec![fixture("fake-pi-provider.mjs")],
+        ..Default::default()
+    });
+
+    let error = provider
+        .run(input("model-error"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("fake provider model error"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cli_provider_failures_include_stderr() {
     let claude = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),

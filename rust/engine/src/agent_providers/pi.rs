@@ -109,10 +109,15 @@ async fn run_pi(
     )
     .await?;
     let events = parse_json_lines(&stdout);
-    let candidate = extract_output(&events).unwrap_or(stdout);
     let output = if has_schema {
         extract_structured_tool_output(&events)?
     } else {
+        let candidate = extract_output(&events).ok_or_else(|| {
+            let message = extract_error_message(&events)
+                .or_else(|| (!stderr.trim().is_empty()).then(|| stderr.trim().to_string()))
+                .unwrap_or_else(|| "Pi provider did not return assistant output".to_string());
+            anyhow::anyhow!(message)
+        })?;
         Value::String(candidate.trim_end().to_string())
     };
     let session_id = extract_session_id(&events)
@@ -517,6 +522,23 @@ fn extract_text(value: &Value) -> Option<String> {
             .or_else(|| record.get("content"))
             .or_else(|| record.get("message"))
             .and_then(extract_text),
+        _ => None,
+    }
+}
+
+fn extract_error_message(events: &[Value]) -> Option<String> {
+    events.iter().find_map(find_error_message)
+}
+
+fn find_error_message(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(find_error_message),
+        Value::Object(record) => {
+            if let Some(message) = record.get("errorMessage").and_then(Value::as_str) {
+                return Some(message.to_string());
+            }
+            record.values().find_map(find_error_message)
+        }
         _ => None,
     }
 }

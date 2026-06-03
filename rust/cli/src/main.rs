@@ -2,7 +2,9 @@ use clap::{Arg, Command as ClapCommand};
 use log::{LevelFilter, Log, Metadata, Record};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use smol_workflow_engine::agent_providers::{create_agent_provider, AgentUsageCost};
+use smol_workflow_engine::agent_providers::{
+    create_agent_provider, AgentProviderResult, AgentUsageCost,
+};
 use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
@@ -246,8 +248,15 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
     durable_options.budget_total = options.budget_allowance;
     durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
     durable_options.resume_run_id = options.resume_run_id;
+    let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
+        if let Some(dir) = options.save_raw_sessions.as_deref() {
+            save_raw_session(dir, provider, result)?;
+        }
+        Ok(())
+    };
     durable_options.on_log = Some(&on_log);
     durable_options.on_phase = Some(&on_phase);
+    durable_options.on_agent_result = Some(&on_agent_result);
     let result = run_local_durable_workflow(&mut store, durable_options).await?;
     let workflow = result.workflow;
     let report = CliRunReport {
@@ -278,6 +287,7 @@ struct RunCliOptions {
     db_path: PathBuf,
     resume_run_id: Option<String>,
     log_level: LevelFilter,
+    save_raw_sessions: Option<PathBuf>,
 }
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
@@ -301,6 +311,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         .ok()
         .map(|value| parse_positive_usize(&value, "SMOL_WF_MAX_PARALLEL_AGENTS"))
         .transpose()?;
+    let mut save_raw_sessions = None;
     let mut index = 0;
 
     while index < argv.len() {
@@ -329,6 +340,20 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         if token == "--db" || token.starts_with("--db=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
             db_path = PathBuf::from(parsed.value);
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
+        if token == "--save-raw-sessions" || token.starts_with("--save-raw-sessions=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            let path = PathBuf::from(parsed.value);
+            if !path.is_dir() {
+                anyhow::bail!("--save-raw-sessions must point to an existing directory");
+            }
+            save_raw_sessions = Some(path);
             if parsed.consumed_next {
                 index += 1;
             }
@@ -405,6 +430,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         db_path,
         resume_run_id,
         log_level,
+        save_raw_sessions,
     })
 }
 
@@ -623,6 +649,53 @@ fn usize_to_level(value: usize) -> LevelFilter {
     }
 }
 
+fn save_raw_session(
+    root: &Path,
+    provider: &str,
+    result: &AgentProviderResult,
+) -> anyhow::Result<()> {
+    let Some(session_id) = result.session_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(raw) = result.raw.as_ref() else {
+        return Ok(());
+    };
+    ensure_safe_path_component(provider, "provider name")?;
+    ensure_safe_path_component(session_id, "session id")?;
+    let provider_dir = root.join(provider);
+    fs::create_dir_all(&provider_dir)?;
+    let path = provider_dir.join(format!("{session_id}.jsonl"));
+    let mut file = fs::File::create(path)?;
+
+    if let Some(events) = raw.get("events").and_then(Value::as_array) {
+        write_json_lines(&mut file, events)?;
+    } else if let Some(items) = raw.as_array() {
+        write_json_lines(&mut file, items)?;
+    } else {
+        writeln!(file, "{}", serde_json::to_string(raw)?)?;
+    }
+    Ok(())
+}
+
+fn write_json_lines(file: &mut fs::File, values: &[Value]) -> anyhow::Result<()> {
+    for value in values {
+        writeln!(file, "{}", serde_json::to_string(value)?)?;
+    }
+    Ok(())
+}
+
+fn ensure_safe_path_component(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value == "."
+        || value == ".."
+    {
+        anyhow::bail!("provider {label} is not safe for a raw session file path: {value}");
+    }
+    Ok(())
+}
+
 fn format_log_value(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
@@ -653,7 +726,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
                 ),
         )
         .subcommand(

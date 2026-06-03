@@ -33,6 +33,7 @@ pub struct LocalDurableRunOptions<'a> {
     pub resume_run_id: Option<String>,
     pub on_log: Option<crate::workflow::WorkflowLogCallback<'a>>,
     pub on_phase: Option<crate::workflow::WorkflowPhaseCallback<'a>>,
+    pub on_agent_result: Option<crate::workflow::WorkflowAgentResultCallback<'a>>,
 }
 
 impl<'a> LocalDurableRunOptions<'a> {
@@ -47,6 +48,7 @@ impl<'a> LocalDurableRunOptions<'a> {
             resume_run_id: None,
             on_log: None,
             on_phase: None,
+            on_agent_result: None,
         }
     }
 }
@@ -245,6 +247,7 @@ pub async fn run_local_durable_workflow(
             agent_runner,
             on_log: options.on_log,
             on_phase: options.on_phase,
+            on_agent_result: options.on_agent_result,
         })
         .await;
 

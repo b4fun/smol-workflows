@@ -3,7 +3,14 @@ use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn node() -> String {
+    std::env::var("NODE").unwrap_or_else(|_| "node".to_string())
+}
 
 fn smol_wf() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_smol-wf"));
@@ -257,6 +264,95 @@ fn run_supports_budget_allowance_env() {
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(stdout["results"]["budget"]["total"], 15);
+}
+
+#[test]
+fn run_rejects_missing_raw_sessions_directory() {
+    let missing = std::env::temp_dir().join(format!(
+        "smol-wf-cli-missing-raw-sessions-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&missing);
+
+    let output = smol_wf()
+        .args([
+            "run",
+            "../engine/tests/fixtures/cli-args.workflow.js",
+            "--save-raw-sessions",
+            missing.to_str().expect("path should be utf8"),
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--save-raw-sessions must point to an existing directory"));
+}
+
+#[test]
+#[cfg(unix)]
+fn run_saves_raw_provider_sessions() {
+    let root = temp_dir("raw-sessions");
+    let bin_dir = root.join("bin");
+    let raw_dir = root.join("raw");
+    fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+    fs::create_dir_all(&raw_dir).expect("raw dir should exist");
+    let fake_claude = fs::canonicalize("../engine/tests/fixtures/fake-claude-provider.mjs")
+        .expect("fake claude fixture should exist");
+    let wrapper = bin_dir.join("claude");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec {} {} \"$@\"\n",
+            node(),
+            fake_claude.display()
+        ),
+    )
+    .expect("wrapper should be written");
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let output = smol_wf()
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args([
+            "run",
+            "../engine/tests/fixtures/cli-args.workflow.js",
+            "--agent-provider",
+            "claude-code",
+            "--save-raw-sessions",
+            raw_dir.to_str().expect("path should be utf8"),
+            "--args-my-arg1",
+            "raw",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let raw_file = raw_dir.join("claude-code/claude-session-1.jsonl");
+    assert!(raw_file.exists(), "raw session file should be written");
+    let lines = fs::read_to_string(&raw_file).expect("raw file should be readable");
+    let mut lines = lines.lines();
+    let first: serde_json::Value = serde_json::from_str(lines.next().expect("one JSONL line"))
+        .expect("raw session line should be JSON");
+    assert!(
+        lines.next().is_none(),
+        "raw object should be written as one JSONL line"
+    );
+    assert_eq!(first["response"]["session_id"], "claude-session-1");
+    assert_eq!(first["response"]["result"], "fake claude: hello raw");
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
