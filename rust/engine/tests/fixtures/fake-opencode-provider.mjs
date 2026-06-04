@@ -9,6 +9,12 @@ if (args[0] === 'serve') {
       const body = await readBody(request)
 
       if (request.method === 'POST' && url.pathname === '/session') {
+        if (url.searchParams.get('directory')?.includes('session-error')) {
+          response.writeHead(400, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ error: 'directory is not an opencode project' }))
+          return
+        }
+
         sendJSON(response, { id: 'opencode-session-structured' })
         return
       }

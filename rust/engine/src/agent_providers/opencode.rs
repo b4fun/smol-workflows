@@ -132,10 +132,12 @@ async fn run_opencode_via_server(
         .or(options.cwd.as_ref())
         .cloned()
         .unwrap_or(std::env::current_dir()?);
-    let session_body = json!({
+    let mut session_body = json!({
         "title": "smol-workflows agent call",
-        "agent": option_str(&input.options, "agentType"),
     });
+    if let Some(agent_type) = option_str(&input.options, "agentType") {
+        session_body["agent"] = Value::String(agent_type);
+    }
     let session = request_json(
         &server.url,
         "/session",
@@ -209,10 +211,12 @@ async fn run_opencode_structured(
         .or(options.cwd.as_ref())
         .cloned()
         .unwrap_or(std::env::current_dir()?);
-    let session_body = json!({
+    let mut session_body = json!({
         "title": "smol-workflows structured output",
-        "agent": option_str(&input.options, "agentType"),
     });
+    if let Some(agent_type) = option_str(&input.options, "agentType") {
+        session_body["agent"] = Value::String(agent_type);
+    }
     let session = request_json(
         &server.url,
         "/session",
@@ -405,9 +409,19 @@ async fn request_json(
         .post(url)
         .json(body)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    let status = response.status();
     let text = response.text().await?;
+    if !status.is_success() {
+        bail!(
+            "OpenCode {method} {path} failed with HTTP {status}: {}",
+            if text.trim().is_empty() {
+                "<empty response body>".to_string()
+            } else {
+                truncate(&text, 4000)
+            }
+        );
+    }
     Ok(if text.trim().is_empty() {
         Value::Null
     } else {
