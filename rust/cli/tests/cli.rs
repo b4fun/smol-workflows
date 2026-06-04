@@ -439,7 +439,7 @@ fn run_reports_worktree_isolation_metadata() {
         root.join("workflow.mjs"),
         r#"
 export const meta = { name: "cli-isolation", description: "CLI worktree isolation" };
-export default { result: await agent("isolated cli", { key: "isolated", isolation: "worktree" }) };
+export default { result: await agent("isolated cli", { key: "isolated", isolation: "worktree", model: "debug/test-model" }) };
 "#,
     )
     .expect("workflow fixture should be written");
@@ -490,6 +490,10 @@ export default { result: await agent("isolated cli", { key: "isolated", isolatio
     );
     let history_stdout: serde_json::Value =
         serde_json::from_slice(&history.stdout).expect("history stdout should be JSON");
+    assert_eq!(
+        history_stdout["steps"][0]["agent"]["model"],
+        "debug/test-model"
+    );
     let isolation = &history_stdout["steps"][0]["agent"]["isolation"];
     assert_eq!(isolation["kind"], "worktree");
     let branch = isolation["branch"]

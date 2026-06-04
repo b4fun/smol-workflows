@@ -67,6 +67,7 @@ impl AgentProvider for FixedUsageProvider {
         Ok(AgentProviderResult {
             output: json!(format!("fixed: {}", input.prompt)),
             session_id: None,
+            model: None,
             usage: Some(AgentUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(7),
@@ -156,6 +157,7 @@ impl AgentProvider for CwdProbeProvider {
         Ok(AgentProviderResult {
             output: json!({ "cwd": cwd.to_string_lossy() }),
             session_id: None,
+            model: None,
             usage: None,
             isolation: None,
             raw: None,
@@ -191,6 +193,7 @@ impl AgentProvider for SchemaRetryProvider {
         Ok(AgentProviderResult {
             output,
             session_id: None,
+            model: None,
             usage: Some(AgentUsage {
                 output_tokens: Some(1),
                 ..Default::default()
@@ -233,6 +236,7 @@ impl AgentProvider for DynamicSchedulingProbeProvider {
         Ok(AgentProviderResult {
             output: json!(input.prompt),
             session_id: None,
+            model: None,
             usage: None,
             isolation: None,
             raw: None,
@@ -262,6 +266,7 @@ impl AgentProvider for ConcurrentProbeProvider {
         Ok(AgentProviderResult {
             output: json!(input.prompt),
             session_id: None,
+            model: None,
             usage: None,
             isolation: None,
             raw: None,
@@ -293,6 +298,7 @@ impl AgentProvider for OptionsEchoProvider {
                 }
             }),
             session_id: None,
+            model: None,
             usage: None,
             isolation: None,
             raw: None,

@@ -87,6 +87,7 @@ async fn run_claude_code(
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
+        model: extract_model(&raw).or_else(|| option_model(&input.options)),
         usage: extract_usage(&raw),
         isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),

@@ -112,6 +112,7 @@ async fn run_opencode(
     Ok(AgentProviderResult {
         output: Value::String(candidate.trim_end().to_string()),
         session_id: Some(session_id),
+        model: extract_model(&raw).or_else(|| option_model(&input.options)),
         usage: extract_usage(&raw, true),
         isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
@@ -184,6 +185,9 @@ async fn run_opencode_via_server(
     Ok(AgentProviderResult {
         output: Value::String(output.trim_end().to_string()),
         session_id: Some(session_id),
+        model: extract_model(&response)
+            .or_else(|| extract_model(&session))
+            .or_else(|| option_model(&input.options)),
         usage: extract_usage(&response, true),
         isolation: None,
         raw: Some(to_json_value(
@@ -263,6 +267,9 @@ async fn run_opencode_structured(
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
+        model: extract_model(&response)
+            .or_else(|| extract_model(&session))
+            .or_else(|| option_model(&input.options)),
         usage: extract_usage(&response, true),
         isolation: None,
         raw: Some(to_json_value(

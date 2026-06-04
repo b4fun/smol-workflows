@@ -122,6 +122,8 @@ pub struct AgentProviderResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isolation: Option<AgentRunIsolation>,

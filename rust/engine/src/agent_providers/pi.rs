@@ -108,6 +108,8 @@ async fn run_pi(
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
+        model: extract_model(&Value::Array(events.clone()))
+            .or_else(|| option_model(&input.options)),
         usage: extract_usage(&events),
         isolation: None,
         raw: Some(to_json_value(

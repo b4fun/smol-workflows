@@ -658,12 +658,14 @@ impl<'a> RunState<'a> {
             let phase_usage = self.token_usage_by_phase.entry(phase.clone()).or_default();
             add_usage(phase_usage, result.usage.as_ref());
         }
-        let model = input
-            .options
-            .as_ref()
-            .and_then(|options| options.get("model"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
+        let model = result.model.clone().or_else(|| {
+            input
+                .options
+                .as_ref()
+                .and_then(|options| options.get("model"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
         self.agent_runs.push(WorkflowAgentRunSummary {
             id: id.to_string(),
             phase: input.context.phase.clone(),

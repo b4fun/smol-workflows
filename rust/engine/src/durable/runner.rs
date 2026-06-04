@@ -849,6 +849,7 @@ fn compact_agent_result_for_replay(result: &AgentProviderResult) -> AgentProvide
     AgentProviderResult {
         output: result.output.clone(),
         session_id: result.session_id.clone(),
+        model: result.model.clone(),
         usage: result.usage.clone(),
         isolation: result.isolation.clone(),
         raw: None,
@@ -978,6 +979,7 @@ mod tests {
             Ok(AgentProviderResult {
                 output: json!(format!("{}:{count}", input.prompt)),
                 session_id: None,
+                model: None,
                 usage: None,
                 isolation: None,
                 raw: None,
@@ -1018,6 +1020,7 @@ mod tests {
             Ok(AgentProviderResult {
                 output: json!(format!("{}:done", input.prompt)),
                 session_id: None,
+                model: None,
                 usage: Some(crate::agent_providers::AgentUsage {
                     output_tokens: Some(1),
                     ..Default::default()
@@ -1178,6 +1181,7 @@ mod tests {
                     let result = AgentProviderResult {
                         output: json!("done"),
                         session_id: None,
+                        model: None,
                         usage: Some(crate::agent_providers::AgentUsage {
                             output_tokens: Some(7),
                             ..Default::default()
@@ -1239,6 +1243,7 @@ mod tests {
         let result = AgentProviderResult {
             output: json!("done"),
             session_id: Some("provider-session-1".into()),
+            model: Some("provider/model-from-result".into()),
             usage: Some(crate::agent_providers::AgentUsage {
                 output_tokens: Some(7),
                 ..Default::default()
@@ -1269,6 +1274,7 @@ mod tests {
 
         assert_eq!(stored["output"], json!("done"));
         assert_eq!(stored["sessionId"], json!("provider-session-1"));
+        assert_eq!(stored["model"], json!("provider/model-from-result"));
         assert_eq!(stored["usage"]["outputTokens"], json!(7));
         assert!(stored.get("raw").is_none());
     }
