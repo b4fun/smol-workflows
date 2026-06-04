@@ -13,7 +13,7 @@ This capability has two requirements:
 
 Each provider integration should set `AgentProviderResult.session_id` when the provider exposes a stable session/thread/conversation identifier.
 
-The session ID should also be surfaced in the CLI run report through `agentRuns[].providerSessionId` so users can correlate a workflow agent call with the provider's own logs.
+The session ID should also be surfaced in durable run history, such as `smol-wf history <run-id> --output json` under `steps[].agent.sessionId`, so users can correlate a workflow agent call with the provider's own logs. Users can optionally export raw provider events at run time with `smol-wf run --save-raw-sessions <dir>`.
 
 If a provider does not expose a session ID, the integration should leave `session_id` unset and avoid fabricating one. A local smol-workflows step ID is not a provider session ID.
 

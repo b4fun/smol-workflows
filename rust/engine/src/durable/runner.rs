@@ -890,7 +890,7 @@ async fn run_durable_agent_provider(
 
 fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> Value {
     serde_json::json!({
-        "signatureVersion": 1,
+        "signatureVersion": 2,
         "kind": "agent",
         "workflowScope": "root",
         "provider": provider_name,
