@@ -372,6 +372,62 @@ pub fn option_str(options: &Option<Value>, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+pub fn option_model(options: &Option<Value>) -> Option<String> {
+    option_str(options, "model")
+}
+
+pub fn extract_model(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(extract_model),
+        Value::Object(record) => {
+            if let Some(model) = record
+                .get("model")
+                .or_else(|| record.get("modelId"))
+                .or_else(|| record.get("modelID"))
+                .or_else(|| record.get("model_id"))
+                .or_else(|| record.get("modelName"))
+                .or_else(|| record.get("model_name"))
+                .and_then(Value::as_str)
+            {
+                return Some(model.to_string());
+            }
+            if let Some(model_id) = record
+                .get("modelID")
+                .or_else(|| record.get("modelId"))
+                .or_else(|| record.get("model_id"))
+                .and_then(Value::as_str)
+            {
+                if let Some(provider_id) = record
+                    .get("providerID")
+                    .or_else(|| record.get("providerId"))
+                    .or_else(|| record.get("provider_id"))
+                    .and_then(Value::as_str)
+                {
+                    return Some(format!("{provider_id}/{model_id}"));
+                }
+                return Some(model_id.to_string());
+            }
+            for key in [
+                "session",
+                "message",
+                "event",
+                "properties",
+                "response",
+                "request",
+                "metadata",
+                "data",
+                "model",
+            ] {
+                if let Some(model) = record.get(key).and_then(extract_model) {
+                    return Some(model);
+                }
+            }
+            record.values().find_map(extract_model)
+        }
+        _ => None,
+    }
+}
+
 pub fn temp_dir(prefix: &str) -> anyhow::Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(prefix)

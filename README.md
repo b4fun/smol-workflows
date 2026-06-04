@@ -153,6 +153,20 @@ Both requested CoreDNS pods are Running, Ready, and not restarting. There is no 
 
 Explore more workflows under the [`examples`](examples) folder.
 
+You can inspect persisted run records later with `smol-wf history`:
+
+```sh
+# List recent workflow runs from the default smol-workflows.db
+smol-wf history
+
+# Show details for a specific run, including attempts, steps, usage, sessions,
+# model metadata, and isolation metadata when present
+smol-wf history run_01kt...
+
+# Machine-readable detail output
+smol-wf history run_01kt... --output json | jq '.steps'
+```
+
 ### Installing in Code Agents
 
 Ask your code agent to read the [harness installation instructions](https://github.com/b4fun/smol-workflows/blob/main/harness/README.md) and install the smol-workflows harness integration for itself.
@@ -199,6 +213,7 @@ Runs one agent/provider call. By default it returns text. With `schema`, it requ
 - `schema` — JSON Schema for structured output;
 - `model` — provider-specific model override;
 - `provider` — provider override such as `pi`, `opencode`, `codex`, or `claude-code`;
+- `isolation: "worktree"` — run the agent in an engine-managed temporary git worktree;
 - `agentType` — provider-specific subagent/agent selection.
 
 If an agent call fails inside `parallel` or `pipeline`, that item/task resolves to `null`; otherwise errors reject the workflow.
@@ -310,7 +325,7 @@ Writes workflow progress/debug information to stderr without changing the workfl
 
 The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` or per call with `agent(prompt, { provider })`.
 
-Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities`](docs/harness-capabilities) for provider capability notes.
+Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities`](docs/harness-capabilities) for provider capability notes, including provider-specific structured-output behavior, input/environment capability expectations, and budget/usage tracking behavior.
 
 ## Durable backends
 
@@ -327,7 +342,6 @@ Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend b
 
 ## TODOs
 
-- [ ] isolation support for file-mutating agents
 - [ ] configurable durable retry policies
 - [ ] dashboard
 - [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data

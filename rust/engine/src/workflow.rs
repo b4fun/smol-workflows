@@ -1,6 +1,6 @@
 use crate::agent_providers::{
     create_agent_provider, AgentProvider, AgentProviderContext, AgentProviderResult,
-    AgentProviderRunInput, AgentUsage, AgentUsageCost,
+    AgentProviderRunInput, AgentRunIsolation, AgentUsage, AgentUsageCost,
 };
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::{JoinSet, LocalSet};
@@ -102,6 +103,8 @@ pub struct WorkflowAgentRunSummary {
     pub provider_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<AgentRunIsolation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -655,12 +658,14 @@ impl<'a> RunState<'a> {
             let phase_usage = self.token_usage_by_phase.entry(phase.clone()).or_default();
             add_usage(phase_usage, result.usage.as_ref());
         }
-        let model = input
-            .options
-            .as_ref()
-            .and_then(|options| options.get("model"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
+        let model = result.model.clone().or_else(|| {
+            input
+                .options
+                .as_ref()
+                .and_then(|options| options.get("model"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
         self.agent_runs.push(WorkflowAgentRunSummary {
             id: id.to_string(),
             phase: input.context.phase.clone(),
@@ -668,6 +673,7 @@ impl<'a> RunState<'a> {
             model,
             provider_session_id: result.session_id.clone(),
             usage: result.usage.clone(),
+            isolation: result.isolation.clone(),
         });
     }
 
@@ -724,7 +730,206 @@ pub(crate) async fn run_agent_provider(
     } else {
         default_provider
     };
-    run_agent_with_schema_validation(provider, input).await
+    run_agent_with_optional_isolation(provider, input).await
+}
+
+async fn run_agent_with_optional_isolation(
+    provider: Arc<dyn AgentProvider>,
+    input: AgentProviderRunInput,
+) -> anyhow::Result<AgentProviderResult> {
+    if !requests_worktree_isolation(&input.options) {
+        return run_agent_with_schema_validation(provider, input).await;
+    }
+
+    let isolation = WorktreeIsolation::create(input.context.cwd.as_deref())?;
+    let isolation_info = isolation.info();
+    let mut isolated_input = input;
+    isolated_input.context.cwd = Some(isolation.cwd.clone());
+    let mut result = run_agent_with_schema_validation(provider, isolated_input).await;
+    if let Ok(result) = &mut result {
+        result.isolation = Some(isolation_info);
+    }
+    if let Err(error) = isolation.cleanup() {
+        log::warn!("failed to cleanup isolated agent worktree: {error:#}");
+    }
+    result
+}
+
+fn requests_worktree_isolation(options: &Option<Value>) -> bool {
+    options
+        .as_ref()
+        .and_then(|options| options.get("isolation"))
+        .and_then(Value::as_str)
+        == Some("worktree")
+}
+
+struct WorktreeIsolation {
+    repo_root: PathBuf,
+    worktree_root: PathBuf,
+    cwd: PathBuf,
+    branch_name: String,
+    cleaned: bool,
+    _temp_dir: tempfile::TempDir,
+}
+
+impl WorktreeIsolation {
+    fn create(cwd: Option<&Path>) -> anyhow::Result<Self> {
+        let cwd = cwd
+            .map(Path::to_path_buf)
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()
+            .context("failed to canonicalize workflow cwd for worktree isolation")?;
+        let repo_root = git_output(&cwd, &["rev-parse", "--show-toplevel"]).context(
+            "agent isolation='worktree' requires the workflow cwd to be inside a git repository",
+        )?;
+        let repo_root = PathBuf::from(repo_root.trim())
+            .canonicalize()
+            .context("failed to canonicalize git repository root for worktree isolation")?;
+        let relative_cwd = cwd.strip_prefix(&repo_root).with_context(|| {
+            format!(
+                "workflow cwd {} is not under git repository root {}",
+                cwd.display(),
+                repo_root.display()
+            )
+        })?;
+
+        let temp_dir = tempfile::Builder::new()
+            .prefix("smol-wf-agent-worktree-")
+            .tempdir()
+            .context("failed to create temp directory for agent worktree isolation")?;
+        let worktree_root = temp_dir.path().join("worktree");
+        let worktree_arg = path_arg(&worktree_root);
+        let branch_name = format!(
+            "smol-wf/agent-run/{}",
+            ulid::Ulid::new().to_string().to_ascii_lowercase()
+        );
+        git_status(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                &branch_name,
+                &worktree_arg,
+                "HEAD",
+            ],
+        )
+        .context("failed to create isolated git worktree for agent run")?;
+        let isolated_cwd = if relative_cwd.as_os_str().is_empty() {
+            worktree_root.clone()
+        } else {
+            worktree_root.join(relative_cwd)
+        };
+        Ok(Self {
+            repo_root,
+            worktree_root,
+            cwd: isolated_cwd,
+            branch_name,
+            cleaned: false,
+            _temp_dir: temp_dir,
+        })
+    }
+
+    fn info(&self) -> AgentRunIsolation {
+        AgentRunIsolation {
+            kind: "worktree".to_string(),
+            branch: Some(self.branch_name.clone()),
+            worktree_path: Some(path_arg(&self.worktree_root)),
+            cwd: Some(path_arg(&self.cwd)),
+        }
+    }
+
+    fn cleanup(mut self) -> anyhow::Result<()> {
+        self.remove_worktree()?;
+        self.delete_branch()?;
+        self.cleaned = true;
+        Ok(())
+    }
+
+    fn remove_worktree(&self) -> anyhow::Result<()> {
+        let worktree_arg = path_arg(&self.worktree_root);
+        git_status(
+            &self.repo_root,
+            &["worktree", "remove", "--force", &worktree_arg],
+        )
+        .context("failed to remove isolated git worktree")
+    }
+
+    fn delete_branch(&self) -> anyhow::Result<()> {
+        git_status(&self.repo_root, &["branch", "-D", &self.branch_name])
+            .context("failed to delete isolated agent worktree branch")
+    }
+}
+
+impl Drop for WorktreeIsolation {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            if let Err(error) = self.remove_worktree() {
+                log::warn!("failed to cleanup isolated agent worktree during drop: {error:#}");
+            }
+            if let Err(error) = self.delete_branch() {
+                log::warn!(
+                    "failed to delete isolated agent worktree branch during drop: {error:#}"
+                );
+            }
+        }
+    }
+}
+
+fn path_arg(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        bail!(
+            "git {} failed with {}{}",
+            args.join(" "),
+            status_text(output.status.code()),
+            command_stderr(&output.stderr)
+        )
+    }
+}
+
+fn git_status(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "git {} failed with {}{}",
+            args.join(" "),
+            status_text(output.status.code()),
+            command_stderr(&output.stderr)
+        )
+    }
+}
+
+fn status_text(code: Option<i32>) -> String {
+    code.map(|code| format!("code {code}"))
+        .unwrap_or_else(|| "signal".to_string())
+}
+
+fn command_stderr(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(": {stderr}")
+    }
 }
 
 async fn run_agent_with_schema_validation(

@@ -206,6 +206,9 @@ pub struct HistoryStepAgent {
     pub phase: Option<String>,
     /// Provider session ID, when available.
     pub session_id: Option<String>,
+    /// Agent isolation metadata, when the step used engine-managed isolation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<Value>,
 }
 
 fn serialize_epoch_ms_iso8601<S>(timestamp_ms: &i64, serializer: S) -> Result<S::Ok, S::Error>

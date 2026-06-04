@@ -110,15 +110,25 @@ fn run_provider_examples(provider: &str) {
         &db_path,
         &["--budget-allowance", "20000", "--args-name", "Rust E2E"],
     );
-    assert_eq!(hello["name"], "Rust E2E", "provider={provider}");
-    assert!(hello["plan"].is_string(), "provider={provider}");
-    assert!(hello["drafts"].is_object(), "provider={provider}");
-    assert!(hello["finalGreeting"].is_string(), "provider={provider}");
-
-    assert_eq!(hello["budget"]["total"], 20000, "provider={provider}");
-    assert!(hello["budget"]["spent"].is_number(), "provider={provider}");
+    let hello_results = &hello["results"];
+    assert_eq!(hello_results["name"], "Rust E2E", "provider={provider}");
+    assert!(hello_results["plan"].is_string(), "provider={provider}");
+    assert!(hello_results["drafts"].is_object(), "provider={provider}");
     assert!(
-        hello["budget"]["remaining"].is_number(),
+        hello_results["finalGreeting"].is_string(),
+        "provider={provider}"
+    );
+
+    assert_eq!(
+        hello_results["budget"]["total"], 20000,
+        "provider={provider}"
+    );
+    assert!(
+        hello_results["budget"]["spent"].is_number(),
+        "provider={provider}"
+    );
+    assert!(
+        hello_results["budget"]["remaining"].is_number(),
         "provider={provider}"
     );
 
@@ -129,17 +139,21 @@ fn run_provider_examples(provider: &str) {
         &db_path,
         &["--args-items", "alpha", "--args-items", "beta"],
     );
+    let parent_results = &parent["results"];
     assert_eq!(
-        parent["items"],
+        parent_results["items"],
         serde_json::json!(["alpha", "beta"]),
         "provider={provider}"
     );
     assert_eq!(
-        parent["childResults"].as_array().map(Vec::len),
+        parent_results["childResults"].as_array().map(Vec::len),
         Some(2),
         "provider={provider}"
     );
-    assert!(parent["synthesis"].is_string(), "provider={provider}");
+    assert!(
+        parent_results["synthesis"].is_string(),
+        "provider={provider}"
+    );
 }
 
 #[test]

@@ -96,7 +96,13 @@ Detail JSON is resource-oriented:
         "provider": "pi",
         "model": "github-copilot/gpt-5.4-mini",
         "phase": "diagnose",
-        "sessionId": "..."
+        "sessionId": "...",
+        "isolation": {
+          "kind": "worktree",
+          "branch": "smol-wf/agent-run/01kt...",
+          "worktreePath": "/tmp/smol-wf-agent-worktree-.../worktree",
+          "cwd": "/tmp/smol-wf-agent-worktree-.../worktree"
+        }
       },
       "tokenUsage": {
         "inputTokens": 290,
@@ -110,7 +116,7 @@ Detail JSON is resource-oriented:
 }
 ```
 
-In table detail output, token usage is shown as per-phase and per-step `INPUT`, `CACHE READ`, `OUTPUT`, and `TOTAL` columns. There is intentionally no `total` row in the phase table; JSON keeps aggregate totals under `tokenUsage` and preserves `cacheWriteTokens` if a provider reports them.
+In table detail output, token usage is shown as per-phase and per-step `INPUT`, `CACHE READ`, `OUTPUT`, and `TOTAL` columns. There is intentionally no `total` row in the phase table; JSON keeps aggregate totals under `tokenUsage` and preserves `cacheWriteTokens` if a provider reports them. JSON step details also include agent isolation metadata when a step used `isolation: "worktree"`.
 
 ## Options
 

@@ -4,8 +4,10 @@ use smol_workflow_engine::agent_providers::{
     AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
 };
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
+use std::fs;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -38,6 +40,10 @@ struct DynamicSchedulingProbeProvider {
     follow_up_started_while_slow_running: AtomicBool,
 }
 
+struct CwdProbeProvider {
+    cwd: Mutex<Option<PathBuf>>,
+}
+
 struct SchemaRetryProvider {
     prompts: Mutex<Vec<String>>,
     always_invalid: bool,
@@ -61,12 +67,14 @@ impl AgentProvider for FixedUsageProvider {
         Ok(AgentProviderResult {
             output: json!(format!("fixed: {}", input.prompt)),
             session_id: None,
+            model: None,
             usage: Some(AgentUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(7),
                 total_tokens: Some(107),
                 ..AgentUsage::default()
             }),
+            isolation: None,
             raw: None,
         })
     }
@@ -99,6 +107,18 @@ impl DynamicSchedulingProbeProvider {
     }
 }
 
+impl CwdProbeProvider {
+    fn new() -> Self {
+        Self {
+            cwd: Mutex::new(None),
+        }
+    }
+
+    fn cwd(&self) -> Option<PathBuf> {
+        self.cwd.lock().unwrap().clone()
+    }
+}
+
 impl SchemaRetryProvider {
     fn new(always_invalid: bool) -> Self {
         Self {
@@ -109,6 +129,39 @@ impl SchemaRetryProvider {
 
     fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentProvider for CwdProbeProvider {
+    fn name(&self) -> &str {
+        "cwd-probe"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        let cwd = input
+            .context
+            .cwd
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("provider cwd missing"))?;
+        fs::write(cwd.join("agent-created.txt"), "isolated")?;
+        *self.cwd.lock().unwrap() = Some(cwd.clone());
+        Ok(AgentProviderResult {
+            output: json!({ "cwd": cwd.to_string_lossy() }),
+            session_id: None,
+            model: None,
+            usage: None,
+            isolation: None,
+            raw: None,
+        })
     }
 }
 
@@ -140,10 +193,12 @@ impl AgentProvider for SchemaRetryProvider {
         Ok(AgentProviderResult {
             output,
             session_id: None,
+            model: None,
             usage: Some(AgentUsage {
                 output_tokens: Some(1),
                 ..Default::default()
             }),
+            isolation: None,
             raw: None,
         })
     }
@@ -181,7 +236,9 @@ impl AgentProvider for DynamicSchedulingProbeProvider {
         Ok(AgentProviderResult {
             output: json!(input.prompt),
             session_id: None,
+            model: None,
             usage: None,
+            isolation: None,
             raw: None,
         })
     }
@@ -209,7 +266,9 @@ impl AgentProvider for ConcurrentProbeProvider {
         Ok(AgentProviderResult {
             output: json!(input.prompt),
             session_id: None,
+            model: None,
             usage: None,
+            isolation: None,
             raw: None,
         })
     }
@@ -239,7 +298,9 @@ impl AgentProvider for OptionsEchoProvider {
                 }
             }),
             session_id: None,
+            model: None,
             usage: None,
+            isolation: None,
             raw: None,
         })
     }
@@ -264,6 +325,132 @@ fn run_debug(
         on_agent_result: None,
     }))
     .expect("workflow should run")
+}
+
+fn run_with_provider(
+    script_path: PathBuf,
+    provider: Arc<dyn AgentProvider>,
+) -> anyhow::Result<smol_workflow_engine::workflow::RunWorkflowResult> {
+    block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider,
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        on_log: None,
+        on_phase: None,
+        on_agent_result: None,
+    }))
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn runs_worktree_isolated_agent_in_fresh_git_worktree() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    git(repo.path(), &["init"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(repo.path(), &["config", "user.name", "Test User"]);
+    fs::write(
+        repo.path().join("workflow.mjs"),
+        r#"
+export const meta = { name: 'isolated-agent', description: 'isolation test' }
+export default await agent('touch isolated workspace', { isolation: 'worktree' })
+"#,
+    )
+    .expect("workflow should be written");
+    fs::write(repo.path().join("tracked.txt"), "tracked").expect("tracked file");
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "initial"]);
+
+    let provider = Arc::new(CwdProbeProvider::new());
+    let result = run_with_provider(repo.path().join("workflow.mjs"), provider.clone())
+        .expect("workflow should run with worktree isolation");
+
+    let isolated_cwd = provider.cwd().expect("provider cwd should be captured");
+    assert_ne!(isolated_cwd, repo.path());
+    assert!(!repo.path().join("agent-created.txt").exists());
+    assert!(
+        !isolated_cwd.exists(),
+        "isolated worktree should be cleaned up after the agent run"
+    );
+    assert_eq!(
+        result.output.result["cwd"],
+        json!(isolated_cwd.to_string_lossy())
+    );
+    let isolation = result.agent_runs[0]
+        .isolation
+        .as_ref()
+        .expect("agent run should include isolation info");
+    assert_eq!(isolation.kind, "worktree");
+    let branch = isolation.branch.as_deref().expect("branch name");
+    assert!(
+        branch.starts_with("smol-wf/agent-run/"),
+        "unexpected branch name: {branch}"
+    );
+    assert_eq!(
+        isolation.worktree_path.as_deref(),
+        Some(isolated_cwd.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        isolation.cwd.as_deref(),
+        Some(isolated_cwd.to_string_lossy().as_ref())
+    );
+    let branch_output = Command::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(repo.path())
+        .output()
+        .expect("git branch should run");
+    assert!(branch_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .is_empty(),
+        "isolation branch should be deleted during cleanup"
+    );
+}
+
+#[test]
+fn worktree_isolation_requires_git_repository() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    fs::write(
+        workspace.path().join("workflow.mjs"),
+        r#"
+export const meta = { name: 'isolated-agent', description: 'isolation test' }
+export default await agent('touch isolated workspace', { isolation: 'worktree' })
+"#,
+    )
+    .expect("workflow should be written");
+
+    let error = run_with_provider(
+        workspace.path().join("workflow.mjs"),
+        Arc::new(CwdProbeProvider::new()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("requires the workflow cwd to be inside a git repository"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -832,6 +1019,7 @@ fn runs_existing_examples_with_debug_provider() {
     for example in [
         "budget.mjs",
         "hello.mjs",
+        "isolation.mjs",
         "refine-agent-providers.mjs",
         "stock.mjs",
         "workflow-child.mjs",

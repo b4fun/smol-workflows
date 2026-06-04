@@ -50,6 +50,7 @@ impl AgentProvider for DebugAgentProvider {
         Ok(AgentProviderResult {
             output: output.clone(),
             session_id: None,
+            model: super::common::option_model(&input.options),
             usage: Some(AgentUsage {
                 input_tokens: Some(input_tokens),
                 output_tokens: Some(output_tokens),
@@ -63,6 +64,7 @@ impl AgentProvider for DebugAgentProvider {
                 }),
                 ..AgentUsage::default()
             }),
+            isolation: None,
             raw: Some(json!({ "output": output })),
         })
     }

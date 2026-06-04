@@ -72,10 +72,16 @@ impl AgentProvider for OpenCodeAgentProvider {
     }
 }
 
+const MAX_PROMPT_ARG_LENGTH: usize = 32_000;
+
 async fn run_opencode(
     input: AgentProviderRunInput,
     options: &OpenCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
+    if input.prompt.len() > MAX_PROMPT_ARG_LENGTH {
+        return run_opencode_via_server(input, options).await;
+    }
+
     let command = options.command.as_deref().unwrap_or("opencode");
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());
@@ -106,8 +112,87 @@ async fn run_opencode(
     Ok(AgentProviderResult {
         output: Value::String(candidate.trim_end().to_string()),
         session_id: Some(session_id),
+        model: extract_model(&raw).or_else(|| option_model(&input.options)),
         usage: extract_usage(&raw, true),
+        isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
+    })
+}
+
+async fn run_opencode_via_server(
+    input: AgentProviderRunInput,
+    options: &OpenCodeAgentProviderOptions,
+) -> anyhow::Result<AgentProviderResult> {
+    let command = options.command.as_deref().unwrap_or("opencode");
+    let mut server = start_opencode_server(command, options, &input).await?;
+    let directory = input
+        .context
+        .cwd
+        .as_ref()
+        .or(options.cwd.as_ref())
+        .cloned()
+        .unwrap_or(std::env::current_dir()?);
+    let session_body = json!({
+        "title": "smol-workflows agent call",
+        "agent": option_str(&input.options, "agentType"),
+    });
+    let session = request_json(
+        &server.url,
+        "/session",
+        "POST",
+        &[("directory", directory.to_string_lossy().to_string())],
+        &session_body,
+    )
+    .await?;
+    let session_id = extract_session_id(&session)
+        .or_else(|| {
+            session
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenCode create-session response did not include a session id: {session}"
+            )
+        })?;
+
+    let model = option_str(&input.options, "model")
+        .map(|model| split_model(&model))
+        .transpose()?;
+    let mut body = json!({
+        "parts": [{ "type": "text", "text": input.prompt }],
+    });
+    if let Some(model) = model {
+        body["model"] = model;
+    }
+    if let Some(agent_type) = option_str(&input.options, "agentType") {
+        body["agent"] = Value::String(agent_type);
+    }
+    let response = request_json(
+        &server.url,
+        &format!("/session/{}/message", url_encode(&session_id)),
+        "POST",
+        &[("directory", directory.to_string_lossy().to_string())],
+        &body,
+    )
+    .await?;
+    let output = extract_output(&response).ok_or_else(|| {
+        anyhow::anyhow!("OpenCode response did not include a final assistant message")
+    })?;
+    let logs = server.logs.clone();
+    server.stop().await;
+    Ok(AgentProviderResult {
+        output: Value::String(output.trim_end().to_string()),
+        session_id: Some(session_id),
+        model: extract_model(&response)
+            .or_else(|| extract_model(&session))
+            .or_else(|| option_model(&input.options)),
+        usage: extract_usage(&response, true),
+        isolation: None,
+        raw: Some(to_json_value(
+            json!({ "session": session, "response": response, "serverLogs": logs }),
+        )),
     })
 }
 
@@ -182,7 +267,11 @@ async fn run_opencode_structured(
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
+        model: extract_model(&response)
+            .or_else(|| extract_model(&session))
+            .or_else(|| option_model(&input.options)),
         usage: extract_usage(&response, true),
+        isolation: None,
         raw: Some(to_json_value(
             json!({ "session": session, "response": response, "serverLogs": logs }),
         )),
@@ -219,7 +308,6 @@ async fn start_opencode_server(
         "127.0.0.1".into(),
         "--port".into(),
         "0".into(),
-        "--pure".into(),
     ]);
     let mut cmd = Command::new(command);
     cmd.args(&args)
@@ -406,16 +494,11 @@ fn extract_output(raw: &Value) -> Option<String> {
                     return Some(text);
                 }
             }
-            for key in ["result", "output", "text", "message"] {
+            for key in ["result", "output", "text", "message", "content", "parts"] {
                 if let Some(text) = record.get(key).and_then(extract_text) {
                     if !text.is_empty() {
                         return Some(text);
                     }
-                }
-            }
-            if let Some(text) = record.get("content").and_then(extract_text) {
-                if !text.is_empty() {
-                    return Some(text);
                 }
             }
             for key in ["data", "item", "event", "properties"] {
@@ -446,6 +529,7 @@ fn extract_text(value: &Value) -> Option<String> {
             .get("text")
             .or_else(|| record.get("content"))
             .or_else(|| record.get("message"))
+            .or_else(|| record.get("parts"))
             .and_then(extract_text),
         _ => None,
     }

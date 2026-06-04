@@ -63,7 +63,7 @@ async fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn claude_code_provider_parses_structured_output_and_argv() {
+async fn claude_code_provider_parses_structured_output_and_stdin() {
     let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),
         subcommand: vec![fixture("fake-claude-provider.mjs")],
@@ -82,11 +82,12 @@ async fn claude_code_provider_parses_structured_output_and_argv() {
         json!([
             "--output-format",
             "json",
+            "--input-format",
+            "text",
             "--json-schema",
             serde_json::to_string(&schema_input("structured snapshot").options.unwrap()["schema"])
                 .unwrap(),
-            "--print",
-            "structured snapshot"
+            "--print"
         ])
     );
 }
@@ -271,6 +272,17 @@ async fn opencode_provider_supports_json_run_and_structured_server_mode() {
     assert_eq!(result.output, json!("fake opencode: hello opencode"));
     assert_eq!(result.session_id.as_deref(), Some("opencode-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(19));
+
+    let long_prompt = format!("long opencode {}", "x".repeat(40_000));
+    let long = provider
+        .run(input(&long_prompt))
+        .await
+        .expect("long prompt should use server transport");
+    assert_eq!(long.output, json!(format!("fake opencode: {long_prompt}")));
+    assert_eq!(
+        long.raw.as_ref().unwrap()["response"]["request"]["parts"][0]["text"],
+        long_prompt
+    );
 
     let structured = provider
         .run(schema_input("structured prompt"))

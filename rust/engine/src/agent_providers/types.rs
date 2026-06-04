@@ -108,12 +108,25 @@ pub struct AgentProviderRunInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentRunIsolation {
+    pub kind: String,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentProviderResult {
     pub output: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<AgentRunIsolation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
 }

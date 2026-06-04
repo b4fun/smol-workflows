@@ -15,6 +15,19 @@ if (args[0] === 'serve') {
 
       if (request.method === 'POST' && url.pathname === '/session/opencode-session-structured/message') {
         const prompt = body?.parts?.[0]?.text ?? ''
+
+        if (!body?.format) {
+          sendJSON(response, {
+            message: {
+              role: 'assistant',
+              parts: [{ type: 'text', text: `fake opencode: ${prompt}` }],
+            },
+            request: body,
+            usage: { input_tokens: 12, output_tokens: 7, total_tokens: 19 },
+          })
+          return
+        }
+
         const structured = { summary: 'structured opencode summary', prompt }
 
         if (prompt.includes('tool-state-structured')) {

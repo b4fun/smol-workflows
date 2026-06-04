@@ -543,7 +543,16 @@ fn load_history_steps(
             .and_then(|value| value.get("sessionId"))
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        let agent = history_step_agent(&input, session_id);
+        let model = result
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let isolation = result
+            .as_ref()
+            .and_then(|value| value.get("isolation"))
+            .cloned();
+        let agent = history_step_agent(&input, session_id, model, isolation);
         let token_usage = result
             .as_ref()
             .and_then(history_usage_from_result)
@@ -563,7 +572,12 @@ fn load_history_steps(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn history_step_agent(input: &Value, session_id: Option<String>) -> Option<HistoryStepAgent> {
+fn history_step_agent(
+    input: &Value,
+    session_id: Option<String>,
+    model: Option<String>,
+    isolation: Option<Value>,
+) -> Option<HistoryStepAgent> {
     if input.get("kind").and_then(Value::as_str) != Some("agent") {
         return None;
     }
@@ -574,15 +588,18 @@ fn history_step_agent(input: &Value, session_id: Option<String>) -> Option<Histo
             .get("provider")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        model: options
-            .and_then(|options| options.get("model"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
+        model: model.or_else(|| {
+            options
+                .and_then(|options| options.get("model"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        }),
         phase: context
             .and_then(|context| context.get("phase"))
             .and_then(Value::as_str)
             .map(ToString::to_string),
         session_id,
+        isolation,
     })
 }
 

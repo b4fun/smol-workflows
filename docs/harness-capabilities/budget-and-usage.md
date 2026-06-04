@@ -2,7 +2,7 @@
 
 This document is the reference for how `smol-workflows` should interact with each supported agent harness for token/cost usage tracking and workflow budget accounting.
 
-It focuses on usage metadata only: how to obtain token usage from each harness, how to normalize it, and what source/official documentation supports the approach.
+It focuses on usage/model metadata: how to obtain token usage and resolved model identity from each harness, how to normalize it, and what source/official documentation supports the approach.
 
 ## Objectives
 
@@ -11,7 +11,8 @@ It focuses on usage metadata only: how to obtain token usage from each harness, 
 3. **Do not double-count cache tokens:** cache-read tokens are diagnostic/discount fields and should not be added on top of provider-reported input totals unless a provider explicitly documents that input totals exclude them.
 4. **Prefer authoritative harness metadata:** use JSON event streams, session/message metadata, or provider-native usage objects instead of estimating usage from text.
 5. **Support missing usage:** providers may omit usage. Missing usage should not fail a workflow; it contributes zero spend to the current soft budget counter.
-6. **Preserve raw diagnostics:** provider raw events/responses should remain available for debugging when usage normalization needs adjustment.
+6. **Report resolved model when available:** providers should include `AgentProviderResult.model` from authoritative harness metadata when possible, falling back to the explicit workflow `options.model` override.
+7. **Preserve raw diagnostics:** provider raw events/responses should remain available for debugging when usage/model normalization needs adjustment.
 
 ## Engine budget behavior
 
@@ -72,6 +73,22 @@ Do **not** add `cacheReadTokens` to the derived total unless provider documentat
 
 When recursively searching raw events for usage objects, skip nested `cost` objects so cost numbers are not mistaken for token counts.
 
+## Model reporting
+
+`AgentProviderResult.model` should identify the model used for the provider call when that can be determined.
+
+Recommended behavior:
+
+1. Prefer authoritative harness metadata from JSON events, session responses, message responses, or final result objects.
+2. Normalize common model fields such as `model`, `modelId`, `modelID`, `model_id`, `modelName`, and `model_name`.
+3. When a provider returns split OpenCode-style model fields, normalize `providerID` + `modelID` to `providerID/modelID`.
+4. If harness metadata does not expose the resolved model, fall back to the explicit workflow `options.model` value.
+5. If neither source is available, leave `model` unset. Missing model metadata must not fail a workflow.
+
+Important distinction: `options.model` is a requested model override; `AgentProviderResult.model` is the observed/resolved model when known. History and run summaries should prefer `AgentProviderResult.model` and fall back to `options.model` so default/inherited provider models can appear when providers expose them.
+
+Model reporting is diagnostic and traceability metadata. It does not currently affect budget math. Future hard budget/cost policies may use it to map token counts to model-specific pricing.
+
 ## `debug`
 
 ### Behavior
@@ -83,6 +100,7 @@ Expected behavior:
 - estimate input tokens from the prompt;
 - estimate output tokens from the generated output;
 - set cost to zero;
+- report `options.model` as the model when explicitly supplied;
 - use this only for deterministic testing, not real accounting.
 
 ### References
@@ -95,11 +113,13 @@ Expected behavior:
 
 Claude Code print mode can emit JSON output. Usage should be extracted from the JSON response when present.
 
-Expected usage extraction:
+Expected usage/model extraction:
 
 - parse the top-level JSON response;
 - recursively search for provider usage objects;
 - normalize aliases into `AgentUsage`;
+- extract model identity from response metadata when present;
+- fall back to explicit `options.model` when response metadata does not include the resolved model;
 - preserve the raw JSON response for diagnostics.
 
 ### References
@@ -114,11 +134,13 @@ Expected usage extraction:
 
 Codex non-interactive mode supports JSON Lines event output with `--json`. Usage should be extracted from JSONL events.
 
-Expected usage extraction:
+Expected usage/model extraction:
 
 - parse stdout as JSON Lines;
 - find usage/token objects in events;
 - normalize OpenAI/Codex token aliases;
+- extract model identity from event metadata when present;
+- fall back to explicit `options.model` when events do not include the resolved model;
 - use explicit totals when available;
 - otherwise derive totals without double-counting cache-read tokens.
 
@@ -138,11 +160,13 @@ Pi JSON mode emits session events as JSON Lines. Usage should be extracted from 
 
 For schema-backed calls, a generated structured-output extension may also be loaded, but usage extraction still comes from the JSON event stream.
 
-Expected usage extraction:
+Expected usage/model extraction:
 
 - parse stdout as JSON Lines;
 - recursively scan events/messages for usage objects;
 - normalize fields such as `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens`;
+- extract model identity from session/message/event metadata when present;
+- fall back to explicit `options.model` when events do not include the resolved model;
 - preserve cost fields if present;
 - use the latest or most complete event-level usage object rather than adding duplicate nested copies.
 
@@ -163,12 +187,14 @@ OpenCode exposes both CLI JSON output and server/session APIs. Usage should come
 
 Usage should be read from CLI JSON events, server/session message responses, or related session events.
 
-Expected usage extraction:
+Expected usage/model extraction:
 
 - parse CLI output as JSON or JSON Lines for `opencode run`;
 - parse server/session JSON responses for schema-backed calls;
 - recursively search for usage objects;
 - normalize token aliases, including cache aliases such as `cache.read` and `cache.write`;
+- extract model identity from CLI events or server/session/message responses when present, including `providerID/modelID` split fields;
+- fall back to explicit `options.model` when responses do not include the resolved model;
 - account for event stream semantics: if the CLI emits per-turn delta usage events, sum token fields across events; if a future OpenCode API returns cumulative totals, switch to right-wins semantics to avoid double-counting.
 
 ### References
@@ -188,11 +214,12 @@ Minimal handler shape returns only the output value:
 (prompt, options) => output
 ```
 
-Usage-reporting shape:
+Usage/model-reporting shape:
 
 ```ts
 (prompt, options) => ({
   output,
+  model: "provider/model-id",
   usage: {
     inputTokens,
     outputTokens,
@@ -205,7 +232,7 @@ If a custom handler returns only an output value, budget spend is zero for that 
 
 ## Durable usage records
 
-Durable backends should persist the full provider result for each checkpointed agent step, including output, provider session ID, raw diagnostics, and normalized usage. Replaying a checkpoint should return the persisted provider result rather than only the output value, so budget accounting remains consistent for resumed workflows.
+Durable backends should persist the full provider result for each checkpointed agent step, including output, provider session ID, resolved model, raw diagnostics, isolation metadata, and normalized usage. Replaying a checkpoint should return the persisted provider result rather than only the output value, so budget accounting and traceability remain consistent for resumed workflows.
 
 The Rust SQLite durable backend records normalized usage in `sw_budget_ledger` and checkpoints the full provider result for durable agent steps.
 
