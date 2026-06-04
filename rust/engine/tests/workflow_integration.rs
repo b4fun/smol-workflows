@@ -236,7 +236,6 @@ impl AgentProvider for OptionsEchoProvider {
                 "options": input.options,
                 "context": {
                     "phase": input.context.phase,
-                    "key": input.context.key,
                 }
             }),
             session_id: None,
@@ -262,6 +261,7 @@ fn run_debug(
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run")
 }
@@ -322,6 +322,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .unwrap_err();
     assert!(no_meta
@@ -339,6 +340,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .unwrap_err();
     assert!(missing_default
@@ -409,6 +411,7 @@ fn rejects_nested_child_workflow_fixture() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .unwrap_err();
 
@@ -454,6 +457,7 @@ export default { inherited, explicit, phaseOverride };
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -496,6 +500,7 @@ export default await agent("override me", { provider: "debug" });
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -532,6 +537,7 @@ export default await parallel([
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -573,6 +579,7 @@ export default await parallel([
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -613,6 +620,7 @@ export default await parallel([
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -652,6 +660,7 @@ export default await parallel([
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -681,6 +690,7 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 
@@ -746,6 +756,7 @@ fn validates_schema_backed_agent_output_and_retries_once() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should retry and run");
 
@@ -773,6 +784,7 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .unwrap_err();
 
@@ -797,6 +809,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
         agent_runner: None,
         on_log: None,
         on_phase: None,
+        on_agent_result: None,
     }))
     .expect("workflow should run");
 

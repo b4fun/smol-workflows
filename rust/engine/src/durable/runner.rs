@@ -5,6 +5,10 @@
 //! terminal task/run state. Durable retryable steps are introduced separately.
 
 use crate::agent_providers::{AgentProvider, AgentProviderResult, AgentProviderRunInput};
+use crate::durable::json::{
+    DurableRunMode, FailureReasonJSON, LocalTaskParamsJSON, WorkflowRunJSON,
+};
+use crate::metadata::read_workflow_metadata;
 use crate::workflow::{
     run_agent_provider, run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner,
 };
@@ -33,6 +37,7 @@ pub struct LocalDurableRunOptions<'a> {
     pub resume_run_id: Option<String>,
     pub on_log: Option<crate::workflow::WorkflowLogCallback<'a>>,
     pub on_phase: Option<crate::workflow::WorkflowPhaseCallback<'a>>,
+    pub on_agent_result: Option<crate::workflow::WorkflowAgentResultCallback<'a>>,
 }
 
 impl<'a> LocalDurableRunOptions<'a> {
@@ -47,6 +52,7 @@ impl<'a> LocalDurableRunOptions<'a> {
             resume_run_id: None,
             on_log: None,
             on_phase: None,
+            on_agent_result: None,
         }
     }
 }
@@ -150,9 +156,9 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
                             return Ok(result);
                         }
                         Err(error) => {
-                            let failure_reason = serde_json::json!({
-                                "message": error.to_string(),
-                            });
+                            let failure_reason = serde_json::to_value(FailureReasonJSON {
+                                message: error.to_string(),
+                            })?;
                             store.fail_agent_step(AgentStepFailInput {
                                 step_id: &step_id,
                                 failure_reason: &failure_reason,
@@ -180,16 +186,18 @@ pub async fn run_local_durable_workflow(
     let owner_id = new_id("owner");
     let now = now_ms();
     let max_attempts = options.max_attempts.max(1);
-    let params_json = serde_json::json!({
-        "mode": "local",
-        "scriptPath": options.script_path,
-        "args": options.args,
-        "budgetTotal": options.budget_total,
-    });
-    let workflow_run_json = serde_json::json!({
-        "mode": "local",
-        "scriptPath": params_json["scriptPath"],
-    });
+    let params_json = serde_json::to_value(LocalTaskParamsJSON {
+        mode: DurableRunMode::Local,
+        script_path: options.script_path.clone(),
+        args: options.args.clone(),
+        budget_total: options.budget_total,
+    })?;
+    let workflow_metadata = read_workflow_metadata(&options.script_path).ok().flatten();
+    let workflow_run_json = serde_json::to_value(WorkflowRunJSON {
+        mode: DurableRunMode::Local,
+        script_path: options.script_path.clone(),
+        metadata: workflow_metadata,
+    })?;
 
     let (task_id, run_id, first_attempt) = if let Some(run_id) = options.resume_run_id.clone() {
         let (task_id, current_attempts) = store.prepare_resume_run(&run_id, &owner_id, now)?;
@@ -245,6 +253,7 @@ pub async fn run_local_durable_workflow(
             agent_runner,
             on_log: options.on_log,
             on_phase: options.on_phase,
+            on_agent_result: options.on_agent_result,
         })
         .await;
 
@@ -268,7 +277,9 @@ pub async fn run_local_durable_workflow(
                 });
             }
             Err(error) => {
-                let failure_reason = serde_json::json!({ "message": error.to_string() });
+                let failure_reason = serde_json::to_value(FailureReasonJSON {
+                    message: error.to_string(),
+                })?;
                 let terminal = attempt >= last_attempt;
                 store.fail_attempt(LocalAttemptFail {
                     task_id: &task_id,
@@ -398,6 +409,10 @@ impl SqliteDurableStore {
         owner_id: &str,
         now: i64,
     ) -> anyhow::Result<(String, u32)> {
+        let db_label = self
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<in-memory>".to_string());
         let tx = self
             .connection_mut()
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -412,7 +427,11 @@ impl SqliteDurableStore {
                 rusqlite::params![run_id],
                 |row| row.get(0),
             )
-            .context("failed to find durable run to resume")?;
+            .optional()
+            .context("failed to query durable run to resume")?
+            .ok_or_else(|| {
+                anyhow::anyhow!("workflow run {run_id} was not found in {db_label}; check --db")
+            })?;
         let current_attempts: u32 =
             tx.query_row(
                 r#"
@@ -740,7 +759,7 @@ impl SqliteDurableStore {
     }
 
     pub fn complete_agent_step(&mut self, input: AgentStepCompleteInput<'_>) -> anyhow::Result<()> {
-        let result_json = serde_json::to_string(input.result)?;
+        let result_json = serde_json::to_string(&compact_agent_result_for_replay(input.result))?;
         let output_tokens = input
             .result
             .usage
@@ -826,6 +845,15 @@ pub enum AgentStepClaim {
     Wait,
 }
 
+fn compact_agent_result_for_replay(result: &AgentProviderResult) -> AgentProviderResult {
+    AgentProviderResult {
+        output: result.output.clone(),
+        session_id: result.session_id.clone(),
+        usage: result.usage.clone(),
+        raw: None,
+    }
+}
+
 pub struct AgentStepClaimInput<'a> {
     pub run_id: &'a str,
     pub root_run_id: &'a str,
@@ -862,7 +890,7 @@ async fn run_durable_agent_provider(
 
 fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> Value {
     serde_json::json!({
-        "signatureVersion": 1,
+        "signatureVersion": 2,
         "kind": "agent",
         "workflowScope": "root",
         "provider": provider_name,
@@ -870,7 +898,6 @@ fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> 
         "options": input.options,
         "context": {
             "phase": input.context.phase,
-            "key": input.context.key,
             "cwd": input.context.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
         }
     })
@@ -1180,6 +1207,65 @@ mod tests {
             .unwrap();
         assert_eq!(entries, 1);
         assert_eq!(tokens, 7);
+    }
+
+    #[test]
+    fn completed_agent_step_persists_compact_replay_result_without_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let (_task_id, run_id) = seed_durable_run(&db_path);
+        let input_json = json!({ "prompt": "hello" });
+        let step_id = {
+            let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+            match store
+                .claim_or_replay_agent_step(claim_input(
+                    &run_id,
+                    "agent:compact",
+                    "worker-0",
+                    10_000,
+                    100,
+                    &input_json,
+                ))
+                .expect("claim should succeed")
+            {
+                AgentStepClaim::Run { step_id } => step_id,
+                other => panic!("expected run claim, got {other:?}"),
+            }
+        };
+        let result = AgentProviderResult {
+            output: json!("done"),
+            session_id: Some("provider-session-1".into()),
+            usage: Some(crate::agent_providers::AgentUsage {
+                output_tokens: Some(7),
+                ..Default::default()
+            }),
+            raw: Some(json!({ "events": ["large provider transcript"] })),
+        };
+
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        store
+            .complete_agent_step(AgentStepCompleteInput {
+                step_id: &step_id,
+                run_id: &run_id,
+                root_run_id: &run_id,
+                result: &result,
+                now: 200,
+            })
+            .expect("completion should succeed");
+        let stored: String = store
+            .connection()
+            .query_row(
+                "SELECT result_json FROM sw_workflow_steps WHERE step_id = ?1",
+                [&step_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored: Value = serde_json::from_str(&stored).unwrap();
+
+        assert_eq!(stored["output"], json!("done"));
+        assert_eq!(stored["sessionId"], json!("provider-session-1"));
+        assert_eq!(stored["usage"]["outputTokens"], json!(7));
+        assert!(stored.get("raw").is_none());
     }
 
     #[test]
@@ -1523,6 +1609,23 @@ export default { unreachable: true };
             )
             .unwrap();
         assert_eq!(completed_steps, 1);
+    }
+
+    #[test]
+    fn prepare_resume_run_reports_missing_run_id_and_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        store.init().expect("schema should initialize");
+
+        let error = store
+            .prepare_resume_run("run_missing", "owner", 1)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("workflow run run_missing was not found"));
+        assert!(error.contains(&db_path.display().to_string()));
+        assert!(error.contains("check --db"));
     }
 
     #[tokio::test]

@@ -71,7 +71,6 @@ Return a structured object with:
   - description: 2-3 sentence description of the issue and why it matters
   - priority: integer from 1 (least important) to 5 (critical)`,
       {
-        key: `review:${name}`,
         label: `review:${name}`,
         phase: 'Review',
         schema: REVIEW_SCHEMA,
@@ -133,7 +132,6 @@ Return a structured object with:
 - summary: concise summary of overall provider health and main themes
 - actionItems: prioritized concrete changes, each with provider, file, priority, description, rationale, and proposedChange`,
   {
-    key: `synthesize:${PROVIDERS.join(',')}`,
     label: 'synthesize-provider-feedback',
     phase: 'Synthesize',
     schema: SYNTHESIS_SCHEMA,
@@ -207,7 +205,6 @@ function reviewFindingsToActionItems(findings, iteration) {
     description: finding.description,
     rationale: `Follow-up from UpdateReview iteration ${iteration} with severity ${finding.severity}.`,
     proposedChange: finding.proposedChange,
-    key: `update-review:${iteration}:${index}`,
   }))
 }
 
@@ -270,7 +267,6 @@ Return a structured report with:
 - skipped: skipped items with reasons
 - verification: commands run or verification performed`,
       {
-        key: `update:${PROVIDERS.join(',')}:min-${MIN_UPDATE_PRIORITY}:iter-${iteration}`,
         label: `update-provider-implementations:${iteration}`,
         phase: 'Update',
         schema: UPDATE_SCHEMA,
@@ -305,7 +301,6 @@ Return a structured review with:
 - findings: concrete follow-up findings with file, description, severity, and proposedChange; use an empty array when no follow-up update is needed
 - followUpActions: recommended non-code next steps, if any`,
         {
-          key: `update-review:${PROVIDERS.join(',')}:min-${MIN_UPDATE_PRIORITY}:iter-${iteration}`,
           label: `review-generated-provider-updates:${iteration}`,
           phase: 'UpdateReview',
           schema: UPDATE_REVIEW_SCHEMA,

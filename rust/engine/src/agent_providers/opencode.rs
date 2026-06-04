@@ -101,9 +101,11 @@ async fn run_opencode(
     .await?;
     let raw = parse_output(&stdout);
     let candidate = extract_output(&raw).unwrap_or(stdout);
+    let session_id = extract_session_id(&raw)
+        .context("OpenCode provider response did not include a session id")?;
     Ok(AgentProviderResult {
         output: Value::String(candidate.trim_end().to_string()),
-        session_id: extract_session_id(&raw),
+        session_id: Some(session_id),
         usage: extract_usage(&raw, true),
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
     })

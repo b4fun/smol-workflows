@@ -109,16 +109,23 @@ async fn run_pi(
     )
     .await?;
     let events = parse_json_lines(&stdout);
-    let candidate = extract_output(&events).unwrap_or(stdout);
     let output = if has_schema {
         extract_structured_tool_output(&events)?
     } else {
+        let candidate = extract_output(&events).ok_or_else(|| {
+            let message = extract_error_message(&events)
+                .or_else(|| (!stderr.trim().is_empty()).then(|| stderr.trim().to_string()))
+                .unwrap_or_else(|| "Pi provider did not return assistant output".to_string());
+            anyhow::anyhow!(message)
+        })?;
         Value::String(candidate.trim_end().to_string())
     };
+    let session_id = extract_session_id(&events)
+        .ok_or_else(|| anyhow::anyhow!("Pi provider response did not include a session id"))?;
 
     Ok(AgentProviderResult {
         output,
-        session_id: extract_session_id(&events),
+        session_id: Some(session_id),
         usage: extract_usage(&events),
         raw: Some(to_json_value(
             json!({ "events": events, "stderr": stderr, "extensionPath": extension_path.map(|p| p.to_string_lossy().into_owned()) }),
@@ -519,23 +526,37 @@ fn extract_text(value: &Value) -> Option<String> {
     }
 }
 
+fn extract_error_message(events: &[Value]) -> Option<String> {
+    events.iter().find_map(find_error_message)
+}
+
+fn find_error_message(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(find_error_message),
+        Value::Object(record) => {
+            if let Some(message) = record.get("errorMessage").and_then(Value::as_str) {
+                return Some(message.to_string());
+            }
+            record.values().find_map(find_error_message)
+        }
+        _ => None,
+    }
+}
+
 fn extract_session_id(events: &[Value]) -> Option<String> {
     for event in events {
-        let Some(record) = event.as_object() else {
-            continue;
-        };
-        let value = record
-            .get("id")
-            .or_else(|| record.get("sessionID"))
-            .or_else(|| record.get("sessionId"))
-            .or_else(|| record.get("session_id"))
-            .and_then(Value::as_str);
-        if let Some(value) = value {
-            if record.get("type").and_then(Value::as_str) == Some("session")
-                || value.starts_with("019")
-            {
-                return Some(value.to_string());
+        if event.get("type").and_then(Value::as_str) == Some("session") {
+            if let Some(id) = event.get("id").and_then(Value::as_str) {
+                return Some(id.to_string());
             }
+        }
+        if let Some(id) = event
+            .get("session_id")
+            .or_else(|| event.get("sessionId"))
+            .or_else(|| event.get("sessionID"))
+            .and_then(Value::as_str)
+        {
+            return Some(id.to_string());
         }
     }
     None

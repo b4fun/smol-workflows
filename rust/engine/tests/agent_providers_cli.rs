@@ -122,6 +122,7 @@ async fn codex_provider_reads_output_schema_and_usage() {
         .expect("provider should run");
     assert_eq!(provider.name(), "codex");
     assert_eq!(result.output, json!("fake codex: hello codex"));
+    assert_eq!(result.session_id.as_deref(), Some("codex-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(15));
 
     let structured = provider
@@ -268,6 +269,7 @@ async fn opencode_provider_supports_json_run_and_structured_server_mode() {
         .expect("provider should run");
     assert_eq!(provider.name(), "opencode");
     assert_eq!(result.output, json!("fake opencode: hello opencode"));
+    assert_eq!(result.session_id.as_deref(), Some("opencode-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(19));
 
     let structured = provider
@@ -399,6 +401,22 @@ async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output(
     assert_eq!(cache.cache_read_tokens, Some(4));
     assert_eq!(cache.cache_write_tokens, Some(2));
     assert_eq!(cache.total_tokens, Some(10));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pi_provider_treats_json_error_events_as_failures() {
+    let provider = PiAgentProvider::new(PiAgentProviderOptions {
+        command: Some(node()),
+        subcommand: vec![fixture("fake-pi-provider.mjs")],
+        ..Default::default()
+    });
+
+    let error = provider
+        .run(input("model-error"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("fake provider model error"));
 }
 
 #[tokio::test(flavor = "current_thread")]

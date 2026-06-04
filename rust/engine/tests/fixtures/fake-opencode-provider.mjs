@@ -63,6 +63,7 @@ if (args[0] === 'serve') {
 
   if (prompt.includes('usage-nested')) {
     // Return usage inside a nested structure — must not be double-counted.
+    console.log(JSON.stringify({ type: 'session', sessionID: 'opencode-session-1' }))
     console.log(JSON.stringify({
       type: 'usage',
       data: {
@@ -94,6 +95,8 @@ if (args[0] === 'serve') {
     }))
     process.exit(0)
   }
+
+  console.log(JSON.stringify({ type: 'session', sessionID: 'opencode-session-1' }))
 
   if (prompt.includes('cache-alias')) {
     // Return usage with cache sub-object (opencode normalizeUsage reads cache.read / cache.write).

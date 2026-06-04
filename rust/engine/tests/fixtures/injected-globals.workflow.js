@@ -11,11 +11,11 @@ export default async function workflow() {
   const [first, second] = await parallel([
     () => agent(
       `first: ${args["my-arg1"]}`,
-      { key: "first", phase: "Research" }
+      { phase: "Research" }
     ),
     () => agent(
       `second: ${args["my-arg2"]}`,
-      { key: "second", phase: "Research" }
+      { phase: "Research" }
     ),
   ]);
 
