@@ -642,12 +642,12 @@ export default { result: await agent("detail") };
     assert_eq!(detail["results"], json!({ "result": "echo: detail" }));
     assert_eq!(detail["tokenUsage"]["outputTokens"], 4);
     assert_eq!(detail["tokenUsage"]["byPhase"]["Detail"]["outputTokens"], 4);
-    assert!(detail["attempts"].as_array().unwrap().len() >= 1);
+    assert!(!detail["attempts"].as_array().unwrap().is_empty());
     assert!(detail["attempts"][0]["startedAt"]
         .as_str()
         .unwrap()
         .contains('T'));
-    assert!(detail["steps"].as_array().unwrap().len() >= 1);
+    assert!(!detail["steps"].as_array().unwrap().is_empty());
     assert_eq!(detail["steps"][0]["agent"]["provider"], "debug");
     assert_eq!(detail["steps"][0]["agent"]["phase"], "Detail");
     assert_eq!(detail["steps"][0]["tokenUsage"]["outputTokens"], 4);

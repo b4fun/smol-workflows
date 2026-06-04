@@ -411,7 +411,7 @@ fn load_history_detail(
 }
 
 fn history_results(completed_payload: Option<Value>) -> Option<Value> {
-    completed_payload.and_then(|payload| payload.get("result").cloned().or_else(|| Some(payload)))
+    completed_payload.and_then(|payload| payload.get("result").cloned().or(Some(payload)))
 }
 
 fn history_workflow_run_resource(
