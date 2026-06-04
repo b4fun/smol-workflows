@@ -153,6 +153,20 @@ Both requested CoreDNS pods are Running, Ready, and not restarting. There is no 
 
 Explore more workflows under the [`examples`](examples) folder.
 
+You can inspect persisted run records later with `smol-wf history`:
+
+```sh
+# List recent workflow runs from the default smol-workflows.db
+smol-wf history
+
+# Show details for a specific run, including attempts, steps, usage, sessions,
+# model metadata, and isolation metadata when present
+smol-wf history run_01kt...
+
+# Machine-readable detail output
+smol-wf history run_01kt... --output json | jq '.steps'
+```
+
 ### Installing in Code Agents
 
 Ask your code agent to read the [harness installation instructions](https://github.com/b4fun/smol-workflows/blob/main/harness/README.md) and install the smol-workflows harness integration for itself.
