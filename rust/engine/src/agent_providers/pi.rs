@@ -42,8 +42,6 @@ impl AgentProvider for PiAgentProvider {
     }
 }
 
-const MAX_PROMPT_ARG_LENGTH: usize = 32_000;
-
 async fn run_pi(
     input: AgentProviderRunInput,
     options: &PiAgentProviderOptions,
@@ -55,20 +53,9 @@ async fn run_pi(
     } else {
         input.prompt.clone()
     };
-    let use_prompt_file = prompt.len() > MAX_PROMPT_ARG_LENGTH;
-    let temp = if has_schema || use_prompt_file {
-        Some(temp_dir("smol-wf-pi-")?)
-    } else {
-        None
-    };
-    let extension_path = temp
-        .as_ref()
-        .filter(|_| has_schema)
-        .map(|t| t.path().join("structured-output-extension.ts"));
-    let prompt_path = temp
-        .as_ref()
-        .filter(|_| use_prompt_file)
-        .map(|t| t.path().join("prompt.md"));
+    let temp = temp_dir("smol-wf-pi-")?;
+    let extension_path = has_schema.then(|| temp.path().join("structured-output-extension.ts"));
+    let prompt_path = temp.path().join("prompt.md");
 
     if let Some(path) = &extension_path {
         fs::write(
@@ -76,14 +63,9 @@ async fn run_pi(
             build_structured_output_extension(option_schema(&input.options).unwrap()),
         )?;
     }
-    if let Some(path) = &prompt_path {
-        fs::write(path, &prompt)?;
-    }
+    fs::write(&prompt_path, &prompt)?;
 
-    let prompt_arg = prompt_path
-        .as_ref()
-        .map(|path| format!("@{}", path.to_string_lossy()))
-        .unwrap_or(prompt);
+    let prompt_arg = format!("@{}", prompt_path.to_string_lossy());
 
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());

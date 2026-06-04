@@ -56,18 +56,23 @@ async fn run_claude_code(
     if let Some(model) = option_str(&input.options, "model") {
         args.extend(["--model".into(), model]);
     }
-    args.extend(["--output-format".into(), "json".into()]);
+    args.extend([
+        "--output-format".into(),
+        "json".into(),
+        "--input-format".into(),
+        "text".into(),
+    ]);
     if let Some(schema) = option_schema(&input.options) {
         args.extend(["--json-schema".into(), serde_json::to_string(schema)?]);
     }
-    args.extend(["--print".into(), input.prompt.clone()]);
+    args.push("--print".into());
 
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
     let (stdout, stderr) = run_command(
         "Claude Code",
         command,
         &args,
-        None,
+        Some(&input.prompt),
         cwd,
         &options.env,
         options.timeout_ms,
