@@ -86,6 +86,7 @@ async fn run_claude_code(
         output,
         session_id: extract_session_id(&raw),
         usage: extract_usage(&raw),
+        isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
     })
 }

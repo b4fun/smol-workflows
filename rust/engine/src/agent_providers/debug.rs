@@ -64,6 +64,7 @@ impl AgentProvider for DebugAgentProvider {
                 }),
                 ..AgentUsage::default()
             }),
+            isolation: None,
             raw: Some(json!({ "output": output })),
         })
     }

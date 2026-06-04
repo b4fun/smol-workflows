@@ -951,6 +951,7 @@ mod tests {
                 output: json!(format!("{}:{count}", input.prompt)),
                 session_id: None,
                 usage: None,
+                isolation: None,
                 raw: None,
             })
         }
@@ -993,6 +994,7 @@ mod tests {
                     output_tokens: Some(1),
                     ..Default::default()
                 }),
+                isolation: None,
                 raw: None,
             })
         }
@@ -1152,6 +1154,7 @@ mod tests {
                             output_tokens: Some(7),
                             ..Default::default()
                         }),
+                        isolation: None,
                         raw: None,
                     };
                     barrier.wait();

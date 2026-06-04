@@ -16,8 +16,9 @@ For now, it focuses on **transporting the prompt safely** and on the minimum exe
 4. **Use API request bodies for server harnesses:** when a provider uses a server/session API, put prompt text in the JSON request body rather than in the process argv.
 5. **Keep argv for flags and small selectors:** model names, agent types, output modes, schema-file paths, and other short configuration values are appropriate CLI arguments.
 6. **Honor `cwd`:** every provider must run the harness in the workflow working directory, or pass the equivalent project/directory field when using a server/API transport.
-7. **Do not reshape the host harness by default:** at this stage, providers should not add extra harness/provider modifications beyond the requested agent call. They should follow the host's normal setup, including pre-installed skills, instructions, context files, extensions, plugins, or agent configuration when the harness would normally load them.
-8. **Preserve diagnostics without leaking prompt text:** logs may include prompt length, temp-file paths, cwd, and argument shapes, but should avoid dumping full prompts.
+7. **Support engine-managed worktree isolation:** when `agent(..., { isolation: "worktree" })` is requested, the workflow engine creates a fresh git worktree from the workflow `cwd` repository and passes that worktree as the provider `cwd` for the call.
+8. **Do not reshape the host harness by default:** at this stage, providers should not add extra harness/provider modifications beyond the requested agent call. They should follow the host's normal setup, including pre-installed skills, instructions, context files, extensions, plugins, or agent configuration when the harness would normally load them.
+9. **Preserve diagnostics without leaking prompt text:** logs may include prompt length, temp-file paths, cwd, and argument shapes, but should avoid dumping full prompts.
 
 ## Cross-provider input transport rules
 
@@ -73,6 +74,19 @@ Provider status:
 | `claude-code` | Set child process `cwd` for `claude --print`. |
 | `pi` | Set child process `cwd` for `pi --print`. |
 | `opencode` | For CLI mode, set child process `cwd`; for server/session mode, pass the directory in session/message API parameters. |
+
+## Agent run isolation
+
+`isolation: "worktree"` is an engine-level capability, not a provider-level capability. Providers do not create worktrees themselves. Instead, the workflow engine:
+
+1. checks that the workflow `cwd` is inside a git repository;
+2. creates a temporary git worktree from `HEAD` using a short-lived branch named with the pattern `smol-wf/agent-run/<lowercase-ulid>`;
+3. maps the original workflow `cwd` to the corresponding path inside that worktree, preserving subdirectory workflows;
+4. passes the isolated path as `input.context.cwd` to the provider;
+5. captures isolation metadata on the agent run summary (`kind`, `branch`, `worktreePath`, and provider `cwd`);
+6. removes the worktree and deletes the temporary branch after the agent run completes.
+
+If the workflow `cwd` is not inside a git repository, `isolation: "worktree"` fails with a clear error. The isolated worktree is intended for agent calls that may modify files without touching the caller's working tree. Temporary prompt/schema/output files may still live outside the isolated worktree. Cleanup is best-effort on failures: normal provider errors still trigger worktree removal and branch deletion, while process-kill or machine-failure scenarios may leave stale git worktree metadata for manual cleanup.
 
 ## Host harness setup
 

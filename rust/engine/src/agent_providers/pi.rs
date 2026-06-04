@@ -102,6 +102,7 @@ async fn run_pi(
         output,
         session_id: extract_session_id(&events),
         usage: extract_usage(&events),
+        isolation: None,
         raw: Some(to_json_value(
             json!({ "events": events, "stderr": stderr, "extensionPath": extension_path.map(|p| p.to_string_lossy().into_owned()) }),
         )),

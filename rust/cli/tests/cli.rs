@@ -1,5 +1,6 @@
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -40,6 +41,21 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("temp dir should be created");
     path
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -373,6 +389,99 @@ export default await parallel([
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("starting agent request id=1 in_flight_after_start=1 max_parallel=1"));
+}
+
+#[test]
+fn run_reports_worktree_isolation_metadata() {
+    let root = temp_dir("worktree-isolation");
+    git(&root, &["init"]);
+    git(&root, &["config", "user.email", "test@example.invalid"]);
+    git(&root, &["config", "user.name", "Test User"]);
+    fs::write(
+        root.join("workflow.mjs"),
+        r#"
+export const meta = { name: "cli-isolation", description: "CLI worktree isolation" };
+export default { result: await agent("isolated cli", { key: "isolated", isolation: "worktree" }) };
+"#,
+    )
+    .expect("workflow fixture should be written");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["run", "workflow.mjs", "--agent-provider", "debug"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout["results"]["result"], "echo: isolated cli");
+    let isolation = &stdout["agentRuns"][0]["isolation"];
+    assert_eq!(isolation["kind"], "worktree");
+    let branch = isolation["branch"]
+        .as_str()
+        .expect("branch should be present");
+    assert!(
+        branch.starts_with("smol-wf/agent-run/"),
+        "unexpected branch name: {branch}"
+    );
+    let worktree_path = isolation["worktreePath"]
+        .as_str()
+        .expect("worktree path should be present");
+    let cwd = isolation["cwd"].as_str().expect("cwd should be present");
+    assert_eq!(cwd, worktree_path);
+    assert!(
+        !Path::new(worktree_path).exists(),
+        "worktree should be cleaned up after the run"
+    );
+
+    let branch_output = Command::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(&root)
+        .output()
+        .expect("git branch should run");
+    assert!(branch_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .is_empty(),
+        "isolation branch should be deleted after the run"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn run_rejects_worktree_isolation_outside_git_repo() {
+    let root = temp_dir("worktree-isolation-non-git");
+    fs::write(
+        root.join("workflow.mjs"),
+        r#"
+export const meta = { name: "cli-isolation", description: "CLI worktree isolation" };
+export default await agent("isolated cli", { isolation: "worktree" });
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["run", "workflow.mjs", "--agent-provider", "debug"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("requires the workflow cwd to be inside a git repository"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

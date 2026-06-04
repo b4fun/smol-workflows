@@ -149,7 +149,7 @@ Both requested CoreDNS pods are Running, Ready, and not restarting. There is no 
 
 - `runID` — workflow run identifier;
 - `tokenUsage` — aggregate token usage, including per-phase usage;
-- `agentRuns` — per-agent call IDs, keys, phases, provider session IDs, and usage;
+- `agentRuns` — per-agent call IDs, keys, phases, provider session IDs, usage, and isolation metadata when requested;
 - `results` — the workflow's returned data.
 
 Explore more workflows under the [`examples`](examples) folder.

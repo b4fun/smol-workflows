@@ -107,9 +107,11 @@ export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchem
    */
   model?: string;
   /**
-   * Request fresh worktree isolation for providers that support file-mutating agents.
+   * Request a fresh git worktree for this agent run.
    *
-   * TODO: implement support.
+   * The workflow engine creates the worktree from the workflow cwd's git
+   * repository using a temporary `smol-wf/agent-run/<id>` branch, passes that
+   * worktree as the provider cwd for this call, then removes it after the call.
    */
   isolation?: "worktree";
   /** Optional provider-specific subagent/agent type, such as `Explore` or `code-reviewer`. */

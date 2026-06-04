@@ -111,6 +111,7 @@ async fn run_opencode(
         output: Value::String(candidate.trim_end().to_string()),
         session_id: extract_session_id(&raw),
         usage: extract_usage(&raw, true),
+        isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
     })
 }
@@ -182,6 +183,7 @@ async fn run_opencode_via_server(
         output: Value::String(output.trim_end().to_string()),
         session_id: Some(session_id),
         usage: extract_usage(&response, true),
+        isolation: None,
         raw: Some(to_json_value(
             json!({ "session": session, "response": response, "serverLogs": logs }),
         )),
@@ -260,6 +262,7 @@ async fn run_opencode_structured(
         output,
         session_id: Some(session_id),
         usage: extract_usage(&response, true),
+        isolation: None,
         raw: Some(to_json_value(
             json!({ "session": session, "response": response, "serverLogs": logs }),
         )),

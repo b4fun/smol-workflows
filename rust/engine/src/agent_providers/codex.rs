@@ -116,6 +116,7 @@ async fn run_codex(
         output,
         session_id: None,
         usage: extract_usage(&events),
+        isolation: None,
         raw: Some(to_json_value(json!({ "events": events, "stderr": stderr }))),
     })
 }
