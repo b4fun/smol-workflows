@@ -204,8 +204,6 @@ pub struct HistoryStepAgent {
     pub model: Option<String>,
     /// Workflow phase associated with this step.
     pub phase: Option<String>,
-    /// Stable workflow key, when provided.
-    pub key: Option<String>,
     /// Provider session ID, when available.
     pub session_id: Option<String>,
 }

@@ -582,10 +582,6 @@ fn history_step_agent(input: &Value, session_id: Option<String>) -> Option<Histo
             .and_then(|context| context.get("phase"))
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        key: context
-            .and_then(|context| context.get("key"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
         session_id,
     })
 }

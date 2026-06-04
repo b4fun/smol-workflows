@@ -898,7 +898,6 @@ fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> 
         "options": input.options,
         "context": {
             "phase": input.context.phase,
-            "key": input.context.key,
             "cwd": input.context.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
         }
     })

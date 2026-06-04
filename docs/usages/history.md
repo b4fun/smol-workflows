@@ -96,7 +96,6 @@ Detail JSON is resource-oriented:
         "provider": "pi",
         "model": "github-copilot/gpt-5.4-mini",
         "phase": "diagnose",
-        "key": null,
         "sessionId": "..."
       },
       "tokenUsage": {

@@ -13,29 +13,21 @@ const topic = typeof args.topic === "string" ? args.topic : "workflow budget acc
 const minimumForOptionalCall = numberArg("minimum-for-optional-call", 40);
 
 phase("Plan");
-const plan = await agent(`Create a concise research plan for: ${topic}`, {
-  key: "budget-example:plan",
-});
+const plan = await agent(`Create a concise research plan for: ${topic}`);
 
 phase("Research");
 const findings = [];
 
-findings.push(await agent(`Essential research for ${topic}. Plan: ${plan}`, {
-  key: "budget-example:essential-research",
-}));
+findings.push(await agent(`Essential research for ${topic}. Plan: ${plan}`));
 
 if (hasBudgetForOptionalWork()) {
-  findings.push(await agent(`Optional counterarguments and risks for ${topic}. Keep it concise.`, {
-    key: "budget-example:risks",
-  }));
+  findings.push(await agent(`Optional counterarguments and risks for ${topic}. Keep it concise.`));
 } else {
   log("Skipping optional risk research because budget is low", budgetSnapshot());
 }
 
 if (hasBudgetForOptionalWork()) {
-  findings.push(await agent(`Optional practical examples for ${topic}. Keep it concise.`, {
-    key: "budget-example:examples",
-  }));
+  findings.push(await agent(`Optional practical examples for ${topic}. Keep it concise.`));
 } else {
   log("Skipping optional examples because budget is low", budgetSnapshot());
 }
@@ -46,9 +38,7 @@ const final = await agent([
   `Current budget: ${JSON.stringify(budgetSnapshot())}`,
   "Findings:",
   ...findings.map((finding, index) => `${index + 1}. ${finding}`),
-].join("\n"), {
-  key: "budget-example:final",
-});
+].join("\n"));
 
 export default {
   topic,

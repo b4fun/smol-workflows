@@ -14,7 +14,6 @@ const name = typeof args.name === 'string' ? args.name : 'world'
 log(`Preparing greeting workflow for ${name}`)
 
 const plan = await agent(`Create a short greeting plan for ${name}`, {
-  key: `plan:${name}`,
   phase: 'Prepare',
 })
 
@@ -26,11 +25,9 @@ const draftStyles = ['friendly', 'concise', 'enthusiastic']
 const draftResults = await pipeline(
   draftStyles,
   (style) => agent(`Using this plan, write a ${style} greeting for ${name}: ${plan}`, {
-    key: `draft:${style}:${name}`,
     phase: 'Draft',
   }),
   (draft, style) => agent(`Improve this ${style} greeting for ${name}: ${draft}`, {
-    key: `improve:${style}:${name}`,
     phase: 'Draft',
   }),
 )
@@ -45,7 +42,6 @@ log(`Finalizing greeting for ${name}`)
 const finalGreeting = await agent(
   `Pick the best greeting for ${name} and polish it. Drafts:\n\n${JSON.stringify(drafts, null, 2)}`,
   {
-    key: `final:${name}`,
     phase: 'Finalize',
   },
 )

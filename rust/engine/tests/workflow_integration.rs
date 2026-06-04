@@ -236,7 +236,6 @@ impl AgentProvider for OptionsEchoProvider {
                 "options": input.options,
                 "context": {
                     "phase": input.context.phase,
-                    "key": input.context.key,
                 }
             }),
             session_id: None,

@@ -14,8 +14,8 @@
 //!   external command or file-relative backend behavior. The workflow runner sets
 //!   this to the current workflow script's directory.
 //! - Providers should treat `input.options` as provider/workflow configuration.
-//!   Common keys used by built-ins include `model`, `schema`, `phase`, `key`,
-//!   `provider`, and provider-specific keys such as `agentType`.
+//!   Common keys used by built-ins include `model`, `schema`, `phase`, `provider`,
+//!   and provider-specific keys such as `agentType`.
 //! - If a JSON Schema is provided in `options.schema` and the provider reports
 //!   [`AgentProviderSchemaMode::Builtin`], the provider should return structured
 //!   JSON matching that schema, or return an error if the backend cannot produce
@@ -96,7 +96,6 @@ pub struct AgentUsageCost {
 #[derive(Debug, Clone, Default)]
 pub struct AgentProviderContext {
     pub phase: Option<String>,
-    pub key: Option<String>,
     pub cwd: Option<PathBuf>,
 }
 

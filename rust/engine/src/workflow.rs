@@ -93,8 +93,6 @@ pub struct WorkflowTokenUsage {
 pub struct WorkflowAgentRunSummary {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -590,11 +588,6 @@ impl<'a> RunState<'a> {
                 .and_then(|options| options.get("phase"))
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            key: options
-                .as_ref()
-                .and_then(|options| options.get("key"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
             cwd: self.script_path.parent().map(Path::to_path_buf),
         };
         let provider_override = options
@@ -603,12 +596,11 @@ impl<'a> RunState<'a> {
             .and_then(Value::as_str)
             .map(ToString::to_string);
         log::debug!(
-            "agent call provider={} phase={:?} key={:?} model={:?} prompt_len={}",
+            "agent call provider={} phase={:?} model={:?} prompt_len={}",
             provider_override
                 .as_deref()
                 .unwrap_or_else(|| self.agent_provider.name()),
             context.phase.as_deref(),
-            context.key.as_deref(),
             options
                 .as_ref()
                 .and_then(|options| options.get("model"))
@@ -671,7 +663,6 @@ impl<'a> RunState<'a> {
             .map(ToString::to_string);
         self.agent_runs.push(WorkflowAgentRunSummary {
             id: id.to_string(),
-            key: input.context.key.clone(),
             phase: input.context.phase.clone(),
             provider,
             model,
