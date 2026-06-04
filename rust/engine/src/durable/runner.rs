@@ -5,6 +5,10 @@
 //! terminal task/run state. Durable retryable steps are introduced separately.
 
 use crate::agent_providers::{AgentProvider, AgentProviderResult, AgentProviderRunInput};
+use crate::durable::json::{
+    DurableRunMode, FailureReasonJSON, LocalTaskParamsJSON, WorkflowRunJSON,
+};
+use crate::metadata::read_workflow_metadata;
 use crate::workflow::{
     run_agent_provider, run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner,
 };
@@ -152,9 +156,9 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
                             return Ok(result);
                         }
                         Err(error) => {
-                            let failure_reason = serde_json::json!({
-                                "message": error.to_string(),
-                            });
+                            let failure_reason = serde_json::to_value(FailureReasonJSON {
+                                message: error.to_string(),
+                            })?;
                             store.fail_agent_step(AgentStepFailInput {
                                 step_id: &step_id,
                                 failure_reason: &failure_reason,
@@ -182,16 +186,18 @@ pub async fn run_local_durable_workflow(
     let owner_id = new_id("owner");
     let now = now_ms();
     let max_attempts = options.max_attempts.max(1);
-    let params_json = serde_json::json!({
-        "mode": "local",
-        "scriptPath": options.script_path,
-        "args": options.args,
-        "budgetTotal": options.budget_total,
-    });
-    let workflow_run_json = serde_json::json!({
-        "mode": "local",
-        "scriptPath": params_json["scriptPath"],
-    });
+    let params_json = serde_json::to_value(LocalTaskParamsJSON {
+        mode: DurableRunMode::Local,
+        script_path: options.script_path.clone(),
+        args: options.args.clone(),
+        budget_total: options.budget_total,
+    })?;
+    let workflow_metadata = read_workflow_metadata(&options.script_path).ok().flatten();
+    let workflow_run_json = serde_json::to_value(WorkflowRunJSON {
+        mode: DurableRunMode::Local,
+        script_path: options.script_path.clone(),
+        metadata: workflow_metadata,
+    })?;
 
     let (task_id, run_id, first_attempt) = if let Some(run_id) = options.resume_run_id.clone() {
         let (task_id, current_attempts) = store.prepare_resume_run(&run_id, &owner_id, now)?;
@@ -271,7 +277,9 @@ pub async fn run_local_durable_workflow(
                 });
             }
             Err(error) => {
-                let failure_reason = serde_json::json!({ "message": error.to_string() });
+                let failure_reason = serde_json::to_value(FailureReasonJSON {
+                    message: error.to_string(),
+                })?;
                 let terminal = attempt >= last_attempt;
                 store.fail_attempt(LocalAttemptFail {
                     task_id: &task_id,

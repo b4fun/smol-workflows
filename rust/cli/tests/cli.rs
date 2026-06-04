@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
 use std::process::Command;
@@ -421,6 +422,303 @@ fn run_rejects_removed_backend_flag() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown option: --backend"));
+}
+
+#[test]
+fn history_lists_runs_with_filters_and_formats() {
+    let dir = temp_dir("history-list");
+    let db_path = dir.join("history.db");
+    let alpha = dir.join("alpha-history.mjs");
+    let beta = dir.join("beta-history.mjs");
+    fs::write(
+        &alpha,
+        r#"export const meta = { name: "alpha-meta", description: "alpha history" };
+export default { result: await agent("alpha") };
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &beta,
+        r#"export const meta = { name: "beta-meta", description: "beta history" };
+export default { result: await agent("beta") };
+"#,
+    )
+    .unwrap();
+
+    for script in [&alpha, &beta] {
+        let output = smol_wf()
+            .args([
+                "run",
+                script.to_str().unwrap(),
+                "--db",
+                db_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("smol-wf should run");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            "-o",
+            "json",
+            "--state",
+            "completed",
+            "--name",
+            "alpha",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let runs = runs.as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].get("workflowName").is_none());
+    assert!(runs[0]["totalTokens"].as_u64().unwrap() > 0);
+    assert_eq!(runs[0]["metadata"]["name"], "alpha-meta");
+    assert_eq!(runs[0]["state"], "completed");
+
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--output",
+            "json",
+            "--name",
+            "alpha-history",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let path_name_runs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(path_name_runs.as_array().unwrap().len(), 0);
+
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute(
+            r#"UPDATE sw_workflow_runs
+               SET workflow_run_json = json_remove(workflow_run_json, '$.metadata')
+               WHERE run_id = ?1"#,
+            [runs[0]["runID"].as_str().unwrap()],
+        )
+        .unwrap();
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            "-o",
+            "json",
+            "--state",
+            "completed",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let legacy_runs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let legacy_run = legacy_runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["runID"] == runs[0]["runID"])
+        .expect("legacy row should be listed");
+    assert_eq!(legacy_run["metadata"], json!({}));
+    let created_at = runs[0]["createdAt"].as_str().unwrap();
+    assert!(created_at.contains('T'));
+    assert!(created_at.ends_with('Z'));
+
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--output",
+            "json",
+            "--until",
+            "0",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let runs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(runs.as_array().unwrap().len(), 0);
+
+    let output = smol_wf()
+        .args(["history", "--db", db_path.to_str().unwrap(), "--limit", "1"])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("RUN ID"));
+    assert!(stdout.contains("TOTAL TOKENS"));
+    assert!(stdout.contains("beta-meta") || stdout.contains("alpha-meta"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_shows_run_details_as_json() {
+    let dir = temp_dir("history-detail");
+    let db_path = dir.join("history.db");
+    let script = dir.join("detail-history.mjs");
+    fs::write(
+        &script,
+        r#"export const meta = { name: "detail-meta", description: "detail history" };
+phase("Detail");
+export default { result: await agent("detail") };
+"#,
+    )
+    .unwrap();
+
+    let output = smol_wf()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--db",
+            db_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let run_id = report["runID"].as_str().unwrap();
+
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            run_id,
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let detail: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(detail.get("summary").is_none());
+    assert_eq!(detail["workflowRun"]["runID"], run_id);
+    assert!(detail["workflowRun"]["workerId"]
+        .as_str()
+        .unwrap()
+        .starts_with("owner_"));
+    assert!(detail["workflowRun"].get("workflowName").is_none());
+    assert_eq!(detail["workflowRun"]["metadata"]["name"], "detail-meta");
+    assert_eq!(
+        detail["workflowRun"]["metadata"]["description"],
+        "detail history"
+    );
+    assert_eq!(detail["workflowRun"]["state"], "completed");
+    assert!(detail["workflowRun"]["createdAt"]
+        .as_str()
+        .unwrap()
+        .ends_with('Z'));
+    assert_eq!(detail["workflowRun"]["args"], json!({}));
+    assert!(detail["workflowRun"].get("attempts").is_none());
+    assert!(detail["workflowRun"].get("completedSteps").is_none());
+    assert!(detail["workflowRun"].get("failedSteps").is_none());
+    assert!(detail["workflowRun"].get("results").is_none());
+    assert!(detail["workflowRun"].get("outputTokens").is_none());
+    assert_eq!(detail["results"], json!({ "result": "echo: detail" }));
+    assert_eq!(detail["tokenUsage"]["outputTokens"], 4);
+    assert_eq!(detail["tokenUsage"]["byPhase"]["Detail"]["outputTokens"], 4);
+    assert!(detail["attempts"].as_array().unwrap().len() >= 1);
+    assert!(detail["attempts"][0]["startedAt"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert!(detail["steps"].as_array().unwrap().len() >= 1);
+    assert_eq!(detail["steps"][0]["agent"]["provider"], "debug");
+    assert_eq!(detail["steps"][0]["agent"]["phase"], "Detail");
+    assert_eq!(detail["steps"][0]["tokenUsage"]["outputTokens"], 4);
+    assert!(detail["steps"][0].get("outputTokens").is_none());
+
+    let output = smol_wf()
+        .args(["history", run_id, "--db", db_path.to_str().unwrap()])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let table = String::from_utf8_lossy(&output.stdout);
+    assert!(table.contains("Token Usage"));
+    assert!(table.contains("PHASE"));
+    assert!(table.contains("Detail"));
+    assert!(table.contains("PROVIDER"));
+    assert!(table.contains("MODEL"));
+    assert!(table.contains("CACHE READ"));
+    assert!(table.contains("debug"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_reports_missing_run() {
+    let dir = temp_dir("history-missing");
+    let db_path = dir.join("history.db");
+    let script = dir.join("missing-history.mjs");
+    fs::write(
+        &script,
+        r#"export const meta = { name: "missing-meta", description: "missing history" };
+export default { result: "ok" };
+"#,
+    )
+    .unwrap();
+    let output = smol_wf()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--db",
+            db_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+
+    let output = smol_wf()
+        .args(["history", "run_missing", "--db", db_path.to_str().unwrap()])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("workflow run run_missing was not found")
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_reports_missing_database() {
+    let dir = temp_dir("history-missing-db");
+    let db_path = dir.join("missing.db");
+
+    let output = smol_wf()
+        .args(["history", "--db", db_path.to_str().unwrap()])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("history database"));
+    assert!(!db_path.exists());
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
