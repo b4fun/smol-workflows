@@ -347,6 +347,39 @@ async fn opencode_provider_handles_nested_events_and_cache_aliases() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn opencode_provider_http_failures_include_response_body() {
+    let temp = tempfile::Builder::new()
+        .prefix("opencode-session-error")
+        .tempdir()
+        .unwrap();
+    let fixture = std::fs::canonicalize(fixture("fake-opencode-provider.mjs"))
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let provider = OpenCodeAgentProvider::new(OpenCodeAgentProviderOptions {
+        command: Some(node()),
+        subcommand: vec![fixture.clone()],
+        server_subcommand: vec![fixture, "serve".into()],
+        cwd: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    });
+
+    let error = provider
+        .run(schema_input("structured prompt"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("OpenCode POST /session failed with HTTP 400 Bad Request"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("directory is not an opencode project"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output() {
     let provider = PiAgentProvider::new(PiAgentProviderOptions {
         command: Some(node()),
