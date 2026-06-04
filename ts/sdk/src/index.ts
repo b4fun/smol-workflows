@@ -121,8 +121,6 @@ export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchem
 /** Options for a single agent run supported by this SDK. */
 export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> =
   DynamicWorkflowAgentRunOptions<Schema> & {
-    /** Optional stable key used for caching, deduplication, or trace correlation. */
-    key?: string;
     /**
      * Optional agent provider override for this call.
      *

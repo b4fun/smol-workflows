@@ -29,9 +29,8 @@ impl AgentProvider for DebugAgentProvider {
 
     async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
         log::debug!(
-            "running debug provider phase={:?} key={:?} prompt_len={} schema={}",
+            "running debug provider phase={:?} prompt_len={} schema={}",
             input.context.phase.as_deref(),
-            input.context.key.as_deref(),
             input.prompt.len(),
             input
                 .options

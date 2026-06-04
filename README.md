@@ -148,8 +148,7 @@ Both requested CoreDNS pods are Running, Ready, and not restarting. There is no 
 `smol-wf run` writes progress such as `[phase] ...` and `[log] ...` to stderr, and writes the final JSON report to stdout. The JSON report includes:
 
 - `runID` — workflow run identifier;
-- `tokenUsage` — aggregate token usage, including per-phase usage;
-- `agentRuns` — per-agent call IDs, keys, phases, provider session IDs, usage, and isolation metadata when requested;
+- `tokenUsage` — aggregate `inputTokens`, `outputTokens`, and `totalTokens`;
 - `results` — the workflow's returned data.
 
 Explore more workflows under the [`examples`](examples) folder.
@@ -200,6 +199,7 @@ Runs one agent/provider call. By default it returns text. With `schema`, it requ
 - `schema` — JSON Schema for structured output;
 - `model` — provider-specific model override;
 - `provider` — provider override such as `pi`, `opencode`, `codex`, or `claude-code`;
+- `isolation: "worktree"` — run the agent in an engine-managed temporary git worktree;
 - `agentType` — provider-specific subagent/agent selection.
 
 If an agent call fails inside `parallel` or `pipeline`, that item/task resolves to `null`; otherwise errors reject the workflow.
@@ -301,26 +301,21 @@ Writes workflow progress/debug information to stderr without changing the workfl
 
 ### CLI
 
-```sh
-smol-wf run <workflow-script> [--args-<name> value]
-smol-wf run <workflow-script> --args-from-file <args.json>
-smol-wf run <workflow-script> --agent-provider <debug|codex|claude-code|pi|opencode>
-smol-wf run <workflow-script> --budget-allowance <output-token-count>
-smol-wf run <workflow-script> --max-parallel-agents <count>
-smol-wf run <workflow-script> --db <smol-workflows.db>
-smol-wf run <workflow-script> --resume-run <run-id>
-smol-wf llm list-workflows
-```
+| Command group | Purpose | Reference |
+| --- | --- | --- |
+| `smol-wf run` | Run a workflow script. | [`docs/usages/run.md`](docs/usages/run.md) |
+| `smol-wf history` | Get workflow runs history. | [`docs/usages/history.md`](docs/usages/history.md) |
+| `smol-wf llm` | LLM-facing helper commands, such as workflow discovery. | [`docs/usages/llm.md`](docs/usages/llm.md) |
 
-### Agent providers
+## Agent providers
 
-The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` / `SMOL_WF_AGENT_PROVIDER` or per call with `agent(prompt, { provider })`.
+The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` or per call with `agent(prompt, { provider })`.
 
-Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities/structured-output.md`](docs/harness-capabilities/structured-output.md) for provider-specific structured-output behavior, [`docs/harness-capabilities/input-and-env.md`](docs/harness-capabilities/input-and-env.md) for input/environment capability expectations, and [`docs/harness-capabilities/budget-and-usage.md`](docs/harness-capabilities/budget-and-usage.md) for current budget/usage tracking behavior.
+Structured output schemas are validated by the Rust engine, with one retry using a schema-validation prompt when a provider result does not match. See [`docs/harness-capabilities`](docs/harness-capabilities) for provider capability notes, including provider-specific structured-output behavior, input/environment capability expectations, and budget/usage tracking behavior.
 
 ## Durable backends
 
-Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` or `SMOL_WF_DB` is provided. Use `--resume-run <run-id>` to continue an existing run.
+Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run.
 
 ## What is in this repo
 
@@ -333,7 +328,6 @@ Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend b
 
 ## TODOs
 
-- [ ] isolation support for file-mutating agents
 - [ ] configurable durable retry policies
 - [ ] dashboard
 - [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data

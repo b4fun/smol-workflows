@@ -21,22 +21,18 @@ export const meta = {
 
 phase("Analyze");
 
-const plan = await agent("Break down the investment question", {
-  key: "analysis-plan",
-});
+const plan = await agent("Break down the investment question");
 
 phase("Research");
 
 const results = await parallel([
-  () => agent(`Research AAPL using this plan: ${plan}`, { key: "research-aapl" }),
-  () => agent(`Research MSFT using this plan: ${plan}`, { key: "research-msft" }),
+  () => agent(`Research AAPL using this plan: ${plan}`),
+  () => agent(`Research MSFT using this plan: ${plan}`),
 ]);
 
 phase("Synthesize");
 
-const synthesis = await agent(`Synthesize these findings: ${JSON.stringify(results)}`, {
-  key: "final-synthesis",
-});
+const synthesis = await agent(`Synthesize these findings: ${JSON.stringify(results)}`);
 
 export default synthesis;
 ```
@@ -229,7 +225,6 @@ Supported options:
 type AgentRunOptions = {
   schema?: JSONSchema;
   phase?: string;
-  key?: string;
   model?: string;
   provider?: string;
 };
@@ -237,7 +232,6 @@ type AgentRunOptions = {
 
 - `schema` requests and/or validates structured output.
 - `phase` associates the run with a tracing/display phase.
-- `key` provides a stable identifier for caching, deduplication, or trace correlation.
 - `model` optionally overrides the selected model for this call.
 - `provider` optionally switches the agent provider for this call.
 
@@ -519,7 +513,7 @@ SQLite task/run records
        └─ returns default-exported result or function return value
 ```
 
-The backend checkpoints `agent` calls through durable workflow steps. `agent(prompt, { key })` uses `key` as the stable checkpoint name; if no key is provided, the engine derives a deterministic key from the prompt, phase, schema, and provider context.
+The backend checkpoints `agent` calls through durable workflow steps. The engine derives a deterministic checkpoint identity from the prompt, phase, schema, provider, and other agent options.
 
 ## Security and isolation
 

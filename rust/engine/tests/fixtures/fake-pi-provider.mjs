@@ -9,6 +9,21 @@ if (prompt.includes('fail')) {
   process.exit(7)
 }
 
+if (prompt.includes('model-error')) {
+  console.log(JSON.stringify({ type: 'session', id: 'pi-session-1' }))
+  console.log(JSON.stringify({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'fake provider model error',
+    },
+  }))
+  console.log(JSON.stringify({ type: 'agent_end', messages: [] }))
+  process.exit(0)
+}
+
 const extensionIndex = args.indexOf('--extension')
 const extensionPath = extensionIndex >= 0 ? args[extensionIndex + 1] : undefined
 const extensionSource = extensionPath ? readFileSync(extensionPath, 'utf8') : ''

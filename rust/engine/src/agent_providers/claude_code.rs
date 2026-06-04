@@ -81,10 +81,12 @@ async fn run_claude_code(
     let raw = parse_json_or_text(&stdout);
     let structured = option_schema(&input.options).is_some();
     let output = extract_output(&raw, structured)?;
+    let session_id = extract_session_id(&raw)
+        .context("Claude Code provider response did not include a session id")?;
 
     Ok(AgentProviderResult {
         output,
-        session_id: extract_session_id(&raw),
+        session_id: Some(session_id),
         usage: extract_usage(&raw),
         isolation: None,
         raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),

@@ -30,7 +30,6 @@ phase('Synthesize')
 const synthesis = await agent(
   `Combine these child workflow results into a concise final report:\n\n${JSON.stringify(childResults, null, 2)}`,
   {
-    key: `parent-synthesis:${items.join(',')}`,
     phase: 'Synthesize',
   },
 )
