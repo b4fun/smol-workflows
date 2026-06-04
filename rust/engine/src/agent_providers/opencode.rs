@@ -405,11 +405,7 @@ async fn request_json(
     }
 
     let url = build_url(base, path, query);
-    let response = reqwest::Client::new()
-        .post(url)
-        .json(body)
-        .send()
-        .await?;
+    let response = reqwest::Client::new().post(url).json(body).send().await?;
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
