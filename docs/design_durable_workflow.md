@@ -1244,7 +1244,9 @@ CREATE TABLE sw_workflow_steps (
   run_id TEXT NOT NULL,
   root_run_id TEXT NOT NULL,
 
-  step_kind TEXT NOT NULL CHECK (step_kind IN ('agent', 'workflow')),
+  -- Step kind is validated by application code so new durable step kinds do
+  -- not require changing a database-level CHECK constraint.
+  step_kind TEXT NOT NULL,
   checkpoint_name TEXT NOT NULL,
   input_signature_hash TEXT NOT NULL,
   input_signature_json TEXT NOT NULL CHECK (json_valid(input_signature_json)),
