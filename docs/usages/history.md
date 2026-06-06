@@ -6,11 +6,13 @@ Get workflow runs history.
 smol-wf history [run-id] [history-options]
 ```
 
-By default, `history` reads from:
+By default, `history` reads from the platform app-state database:
 
 ```txt
-smol-workflows.db
+workflows.db
 ```
+
+See [`config.md`](config.md) for the full platform-specific default path.
 
 Use `--db` when the run was created in another database. The database must already exist; `history` does not create a new durable database.
 
@@ -40,7 +42,7 @@ List JSON is an array of workflow run summaries. The workflow label comes only f
 
 ```sh
 smol-wf history run_01kt...
-smol-wf history --db ./runs/smol-workflows.db run_01kt...
+smol-wf history --db ./runs/workflows.db run_01kt...
 ```
 
 Show details as JSON:
@@ -125,8 +127,8 @@ In table detail output, token usage is shown as per-phase and per-step `INPUT`, 
 Read history from a specific durable database.
 
 ```sh
-smol-wf history --db ./runs/smol-workflows.db
-smol-wf history --db ./runs/smol-workflows.db run_01kt...
+smol-wf history --db ./runs/workflows.db
+smol-wf history --db ./runs/workflows.db run_01kt...
 ```
 
 ### `-o, --output <table|json>`
@@ -222,7 +224,7 @@ smol-wf history --name pod-diagnostics --output json
 run_id=$(smol-wf history --state failed --output json | jq -r '.[0].runID')
 
 smol-wf run ./examples/pod-diagnostics.mjs \
-  --db ./smol-workflows.db \
+  --db ./workflows.db \
   --resume-run "$run_id" \
   --agent-provider pi \
   --args-target "coredns pods under kube-system"

@@ -575,17 +575,31 @@ fn evaluate_sandbox_prelude(ctx: &rquickjs::Ctx<'_>) -> anyhow::Result<()> {
 fn js_exception_message(ctx: &rquickjs::Ctx<'_>) -> String {
     let error = ctx.catch();
     if let Some(object) = error.as_object() {
-        if let Ok(message) = object.get::<_, String>("message") {
-            if !message.is_empty() {
-                return message;
-            }
-        }
-        if let Ok(stack) = object.get::<_, String>("stack") {
-            if !stack.is_empty() {
-                return stack;
-            }
+        let message = object
+            .get::<_, String>("message")
+            .ok()
+            .filter(|message| !message.is_empty());
+        let stack = object
+            .get::<_, String>("stack")
+            .ok()
+            .filter(|stack| !stack.is_empty());
+
+        match (message, stack) {
+            (Some(message), Some(stack)) if stack.contains(&message) => return stack,
+            (Some(message), Some(stack)) => return format!("{message}\n{stack}"),
+            (Some(message), None) => return message,
+            (None, Some(stack)) => return stack,
+            (None, None) => {}
         }
     }
+
+    if let Ok(value) = rquickjs_serde::from_value::<serde_json::Value>(error.clone()) {
+        return match value {
+            serde_json::Value::String(message) if !message.is_empty() => message,
+            other => other.to_string(),
+        };
+    }
+
     format!("{error:?}")
 }
 

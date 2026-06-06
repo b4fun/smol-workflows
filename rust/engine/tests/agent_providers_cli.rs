@@ -93,6 +93,37 @@ async fn claude_code_provider_parses_structured_output_and_stdin() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn claude_code_provider_maps_agent_type_to_agent_flag() {
+    let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
+        command: Some(node()),
+        subcommand: vec![fixture("fake-claude-provider.mjs")],
+        ..Default::default()
+    });
+
+    let result = provider
+        .run(AgentProviderRunInput {
+            prompt: "specialized claude".to_string(),
+            options: Some(json!({ "agentType": "reviewer" })),
+            context: Default::default(),
+        })
+        .await
+        .expect("provider should run");
+
+    assert_eq!(
+        result.raw.as_ref().unwrap()["response"]["argv"],
+        json!([
+            "--agent",
+            "reviewer",
+            "--output-format",
+            "json",
+            "--input-format",
+            "text",
+            "--print"
+        ])
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn claude_code_provider_derives_usage_without_double_counting_cache_reads() {
     let provider = ClaudeCodeAgentProvider::new(ClaudeCodeAgentProviderOptions {
         command: Some(node()),

@@ -1,7 +1,13 @@
 {
-  "name": "@smol-workflow/sdk",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for smol-workflow.",
+  "name": "@smol-workflows/sdk",
+  "version": "0.1.0-alpha.2",
+  "description": "TypeScript SDK and workflow runtime types for smol-workflow.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/b4fun/smol-workflows.git",
+    "directory": "ts/sdk"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,8 +18,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "changelogs.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",

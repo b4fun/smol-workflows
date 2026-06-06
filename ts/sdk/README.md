@@ -1,4 +1,4 @@
-# @smol-workflow/sdk
+# @smol-workflows/sdk
 
 Minimal TypeScript SDK package for smol-workflow.
 
@@ -11,7 +11,7 @@ A workflow script is an ES module.
 It must export metadata as `export const meta = {...}`. Metadata must include `name` and `description` and may include `whenToUse` and phase metadata. The SDK separates Dynamic Workflow metadata fields from SDK/engine-specific extensions such as phase-level `provider` hints:
 
 ```ts
-import type { WorkflowMetadata } from "@smol-workflow/sdk";
+import type { WorkflowMetadata } from "@smol-workflows/sdk";
 
 export const meta = {
   name: "stock-investment-analysis",
@@ -64,7 +64,7 @@ return result;
 A workflow may also default export a function:
 
 ```ts
-import type { WorkflowHandler } from "@smol-workflow/sdk";
+import type { WorkflowHandler } from "@smol-workflows/sdk";
 
 const workflow: WorkflowHandler = async (input, ctx) => {
   ctx.phase("Analyze");
@@ -142,7 +142,7 @@ Recommended output shape is JSON-serializable data.
 If an agent call uses `schema`, the SDK can infer the TypeScript result type from a literal JSON Schema:
 
 ```ts
-import type { JSONSchema } from "@smol-workflow/sdk";
+import type { JSONSchema } from "@smol-workflows/sdk";
 
 const schema = {
   type: "object",
@@ -166,7 +166,7 @@ export default result;
 External Workflow tool invocations can be typed with `WorkflowToolInput`:
 
 ```ts
-import type { WorkflowToolInput } from "@smol-workflow/sdk";
+import type { WorkflowToolInput } from "@smol-workflows/sdk";
 
 const input: WorkflowToolInput = {
   scriptPath: "./workflow.js",

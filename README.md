@@ -156,7 +156,7 @@ Explore more workflows under the [`examples`](examples) folder.
 You can inspect persisted run records later with `smol-wf history`:
 
 ```sh
-# List recent workflow runs from the default smol-workflows.db
+# List recent workflow runs from the default platform app-state workflows.db
 smol-wf history
 
 # Show details for a specific run, including attempts, steps, usage, sessions,
@@ -329,13 +329,13 @@ Structured output schemas are validated by the Rust engine, with one retry using
 
 ## Durable backends
 
-Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run.
+Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in the platform app-state `workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run. See [`docs/usages/config.md`](docs/usages/config.md) for default database locations.
 
 ## What is in this repo
 
 - `rust/engine` — Rust workflow engine with a sandboxed QuickJS runtime, metadata extraction, schema validation, budget accounting, built-in agent providers, and a SQLite durable backend.
 - `rust/cli` — `smol-wf` command-line interface for running and discovering workflows.
-- `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
+- `ts/sdk` — TypeScript types for workflow authors (`@smol-workflows/sdk`).
 - `harness` — integrations and skills for code-agent hosts.
 - `examples` — runnable workflow scripts.
 - `docs` — design notes, workflow API reference, and harness capability notes.
@@ -348,6 +348,5 @@ Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend b
 - [ ] environment abstraction
 - [ ] environment sandbox / isolation
 - [ ] remote environment support
-- [ ] pre-defined agents support
 - [ ] human in the loop / steering support
 - [ ] cross-run aggregate budget reporting

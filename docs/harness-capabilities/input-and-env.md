@@ -88,6 +88,31 @@ Provider status:
 
 If the workflow `cwd` is not inside a git repository, `isolation: "worktree"` fails with a clear error. The isolated worktree is intended for agent calls that may modify files without touching the caller's working tree. Temporary prompt/schema/output files may still live outside the isolated worktree. Cleanup is best-effort on failures: normal provider errors still trigger worktree removal and branch deletion, while process-kill or machine-failure scenarios may leave stale git worktree metadata for manual cleanup.
 
+## Agent type selection (`agentType`)
+
+`agentType` is a provider-specific selector for the kind of coding agent/subagent to use for one `agent(prompt, options)` call. It is intentionally separate from `provider` and `model`:
+
+- `provider` selects the harness integration, such as `codex`, `claude-code`, `pi`, or `opencode`.
+- `model` selects the model when the harness exposes a model override.
+- `agentType` selects a named agent/subagent when the harness exposes an agent selector.
+
+Because agent concepts differ across harnesses, providers should only map `agentType` when the target harness has a clear supported mechanism. Providers should not invent ambiguous mappings to skills, system prompts, profiles, or config files unless documented as a provider-specific option.
+
+Current support matrix:
+
+| Provider | Harness support | Current smol-workflows mapping | Expected behavior |
+| --- | --- | --- | --- |
+| `debug` | No external harness agent concept. | Ignored. | Keep as a no-op; useful tests should not depend on external agent selection. |
+| `codex` | Codex supports subagent workflows and custom agents, but `codex exec --help` does not expose a direct `--agent <name>` selector. Built-in/custom subagents are invoked by asking Codex to spawn/use them. | Ignored. | Do not map `agentType` to a CLI flag. Workflow authors can mention Codex subagents in the prompt, or a future explicit Codex-specific option can wrap the prompt to request a subagent. |
+| `claude-code` | Claude Code exposes `--agent <agent>` and `--agents <json>`. | Supported. | CLI mode passes `--agent <agentType>`. Do not overload `agentType` for `--agents <json>`, which defines agents rather than selecting one. |
+| `pi` | Pi exposes skills, extensions, prompt templates, tools, and system prompt options, but no direct named-agent selector in `pi --help`. | Ignored. | Do not map `agentType`; mapping it to `--skill`, `--system-prompt`, or a prompt template would be ambiguous. |
+| `opencode` | OpenCode exposes `--agent <agent>` for CLI mode and an `agent` field in server/session requests. | Supported. | CLI mode passes `--agent <agentType>`; server/structured modes include `"agent": "<agentType>"` in session/message request bodies. |
+
+Provider-specific notes:
+
+- For Codex and Pi, prefer calling out the desired subagent, custom agent, or role behavior directly in the workflow prompt. Codex subagents are prompt-mediated rather than exposed as a root `codex exec --agent` flag, and Pi does not expose a direct named-agent selector. Pi-native mechanisms such as skills/extensions should remain explicit options outside `agentType` if needed.
+
+
 ## Host harness setup
 
 At this stage, `smol-workflows` should avoid extra modifications to the underlying harness/provider environment. Provider integrations should launch or call the harness in the same shape a user would normally use it, except for the minimum flags needed for non-interactive execution, output parsing, prompt transport, structured output, and `cwd` selection.

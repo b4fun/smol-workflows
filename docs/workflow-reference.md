@@ -88,6 +88,7 @@ parallel(thunks: Array<() => Promise<any>>): Promise<any[]>
 - A thunk that throws resolves to `null` — the call never rejects
 - Use `.filter(Boolean)` before consuming results
 - Use ONLY when you genuinely need all results together before proceeding
+- See [`docs/workflow/exception.md`](workflow/exception.md) for full exception semantics, including child workflow failures
 
 ---
 
@@ -104,6 +105,7 @@ pipeline(items, stage1, stage2, ...): Promise<any[]>
 - Use `originalItem`/`index` in later stages to label work without threading context through stage 1's return
 - A stage that throws drops that item to `null` and skips its remaining stages
 - **Default to `pipeline()`.** Only reach for `parallel()` when you need ALL prior-stage results together
+- See [`docs/workflow/exception.md`](workflow/exception.md) for full exception semantics, including child workflow failures
 
 ---
 
