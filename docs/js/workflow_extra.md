@@ -42,13 +42,13 @@ The module specifier intentionally uses a `workflow:` prefix so it is clear that
 
 ## Global and context forms
 
-Runners may also expose the same helper object as a read-only global named `extra`:
+Runners may also expose the same helper object under the smol-workflows runtime namespace:
 
 ```js
-await extra.sleep(500);
+await SW.extra.sleep(500);
 ```
 
-For function-style workflow exports, the helper should also be available on the workflow context:
+For function-style workflow exports, the helper should also be available directly on the workflow context:
 
 ```js
 export default async function workflow(input, ctx) {
@@ -57,7 +57,7 @@ export default async function workflow(input, ctx) {
 }
 ```
 
-The global/context form and the virtual import should refer to the same capabilities. The virtual import is the preferred way to create local top-level bindings such as `sleep`.
+The runtime intentionally does not install a generic global named `extra`. The global/context form and the virtual import should refer to the same capabilities. The virtual import is the preferred way to create local top-level bindings such as `sleep`.
 
 ## API
 
@@ -86,7 +86,7 @@ phase("Run");
 export default await agent("continue after the delay");
 ```
 
-`extra.sleep(ms)` is a promise-based workflow primitive. It is not browser `setTimeout`, Node timers, or QuickJS `os.sleep`.
+`SW.extra.sleep(ms)` is a promise-based workflow primitive. It is not browser `setTimeout`, Node timers, or QuickJS `os.sleep`.
 
 Recommended behavior:
 
@@ -108,6 +108,10 @@ export type WorkflowExtra = {
    * This is a workflow runtime primitive, not browser/Node `setTimeout`.
    */
   sleep(ms: number): Promise<void>;
+};
+
+export type WorkflowRuntimeNamespace = {
+  extra: WorkflowExtra;
 };
 ```
 
@@ -134,8 +138,8 @@ Global declaration:
 
 ```ts
 declare global {
-  /** Runtime helpers that are not part of the base workflow API. */
-  var extra: WorkflowExtra;
+  /** smol-workflows runtime namespace. */
+  var SW: WorkflowRuntimeNamespace;
 }
 ```
 
@@ -144,6 +148,8 @@ Virtual module declaration:
 ```ts
 declare module "workflow:extra" {
   export const sleep: WorkflowExtra["sleep"];
+  const extra: WorkflowExtra;
+  export default extra;
 }
 ```
 
@@ -172,7 +178,7 @@ This preserves the current sandbox posture: workflow scripts do not get filesyst
 
 `setTimeout` and `setInterval` imply browser/Node event-loop semantics: callback timers, cancellation IDs, repeated callbacks, string handlers, and lifecycle questions after workflow completion. Those features are broader than the workflow runtime needs.
 
-`extra.sleep(ms)` is intentionally smaller:
+`SW.extra.sleep(ms)` is intentionally smaller:
 
 - promise-based,
 - easy to type,

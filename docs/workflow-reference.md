@@ -151,6 +151,32 @@ The value passed as Workflow's `args` input, verbatim (`undefined` if not provid
 
 ---
 
+### `SW.extra.sleep(ms)` / `workflow:extra`
+
+Pause workflow execution for at least `ms` milliseconds.
+
+```js
+import { sleep } from "workflow:extra";
+
+await sleep(1000);
+```
+
+```js
+await SW.extra.sleep(1000);
+```
+
+In function-style workflow exports, use the context helper:
+
+```js
+export default async function workflow(input, ctx) {
+  await ctx.extra.sleep(1000);
+}
+```
+
+This is a workflow runtime primitive, not browser/Node `setTimeout`.
+
+---
+
 ### `budget` — token budget object
 
 ```js

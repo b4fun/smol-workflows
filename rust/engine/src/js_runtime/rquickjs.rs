@@ -60,11 +60,13 @@ use super::{
 use anyhow::{anyhow, bail, Context as AnyhowContext};
 use rquickjs::{
     context::intrinsic,
+    loader::{Loader, Resolver},
+    module::Declared,
     object::{Accessor, Property},
     prelude::{Func, MutFn, Opt, Rest},
     promise::PromiseState,
-    CatchResultExt, CaughtError, Context, Exception, Function, Module, Object, Persistent, Promise,
-    Runtime, Undefined, Value,
+    CatchResultExt, CaughtError, Context, Error as RQuickJSError, Exception, Function, Module,
+    Object, Persistent, Promise, Runtime, Undefined, Value,
 };
 use std::{
     cell::RefCell,
@@ -82,6 +84,12 @@ type WorkflowIntrinsics = (
     intrinsic::MapSet,
     intrinsic::RegExp,
 );
+
+const WORKFLOW_EXTRA_MODULE: &str = "workflow:extra";
+// Default safety cap for workflow sleeps. This prevents accidental effectively
+// infinite sleeps while still allowing long durable waits. Embedders can
+// override it with `RQuickJSWorkflowRuntime::with_max_sleep_ms`.
+const DEFAULT_MAX_SLEEP_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
 const BLOCKED_GLOBALS: &[&str] = &[
     "eval",
@@ -105,13 +113,73 @@ const BLOCKED_GLOBALS: &[&str] = &[
 
 const INTERNAL_GLOBALS: &[&str] = &["__readonly"];
 
+#[derive(Debug)]
+struct WorkflowExtraResolver;
+
+impl Resolver for WorkflowExtraResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &rquickjs::Ctx<'js>,
+        base: &str,
+        name: &str,
+    ) -> rquickjs::Result<String> {
+        if name == WORKFLOW_EXTRA_MODULE {
+            Ok(WORKFLOW_EXTRA_MODULE.to_string())
+        } else {
+            Err(RQuickJSError::new_resolving_message(
+                base,
+                name,
+                "workflow imports are restricted; only workflow:extra is available",
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorkflowExtraLoader;
+
+impl Loader for WorkflowExtraLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &rquickjs::Ctx<'js>,
+        name: &str,
+    ) -> rquickjs::Result<Module<'js, Declared>> {
+        if name != WORKFLOW_EXTRA_MODULE {
+            return Err(RQuickJSError::new_loading_message(
+                name,
+                "workflow imports are restricted; only workflow:extra is available",
+            ));
+        }
+        Module::declare(
+            ctx.clone(),
+            WORKFLOW_EXTRA_MODULE,
+            include_str!("rquickjs_js/workflow_extra.js"),
+        )
+    }
+}
+
 /// Workflow JavaScript runtime backed by QuickJS via `rquickjs`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RQuickJSWorkflowRuntime;
+#[derive(Debug, Clone, Copy)]
+pub struct RQuickJSWorkflowRuntime {
+    max_sleep_ms: u64,
+}
+
+impl Default for RQuickJSWorkflowRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RQuickJSWorkflowRuntime {
     pub fn new() -> Self {
-        Self
+        Self {
+            max_sleep_ms: DEFAULT_MAX_SLEEP_MS,
+        }
+    }
+
+    pub fn with_max_sleep_ms(mut self, max_sleep_ms: u64) -> Self {
+        self.max_sleep_ms = max_sleep_ms;
+        self
     }
 }
 
@@ -134,6 +202,7 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
         let runtime = Runtime::new().context("failed to create QuickJS runtime")?;
         runtime.set_memory_limit(input.sandbox.memory_limit_bytes);
         runtime.set_max_stack_size(input.sandbox.max_stack_size_bytes);
+        runtime.set_loader(WorkflowExtraResolver, WorkflowExtraLoader);
 
         let timeout = input.sandbox.timeout;
         let deadline = Arc::new(Mutex::new(Instant::now() + timeout));
@@ -147,7 +216,10 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
             .context("failed to create restricted QuickJS context")?;
 
         let mut execution = RQuickJSWorkflowExecution {
-            state: Rc::new(RefCell::new(RuntimeState::default())),
+            state: Rc::new(RefCell::new(RuntimeState {
+                max_sleep_ms: self.max_sleep_ms,
+                ..RuntimeState::default()
+            })),
             module_namespace: None,
             module_eval_promise: None,
             workflow_promise: None,
@@ -184,6 +256,7 @@ struct RuntimeState {
     next_request_id: u64,
     current_phase: Option<String>,
     budget: super::WorkflowBudgetSnapshot,
+    max_sleep_ms: u64,
 }
 
 #[derive(Clone)]
@@ -294,6 +367,10 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
                 "ok": true,
                 "value": value,
             }),
+            WorkflowRuntimeRequestResolution::OkUndefined => serde_json::json!({
+                "ok": true,
+                "undefined": true,
+            }),
             WorkflowRuntimeRequestResolution::OkWithBudget { value, budget } => {
                 self.state.borrow_mut().budget = budget;
                 serde_json::json!({
@@ -327,9 +404,16 @@ impl WorkflowRuntimeExecution for RQuickJSWorkflowExecution {
                 .context("failed to read request resolution status")?;
 
             let resolved = if ok {
-                let value: Value<'_> = resolution_object
-                    .get("value")
-                    .context("failed to read request resolution value")?;
+                let value: Value<'_> = if resolution_object
+                    .get::<_, bool>("undefined")
+                    .unwrap_or(false)
+                {
+                    Undefined.into_value(ctx.clone())
+                } else {
+                    resolution_object
+                        .get("value")
+                        .context("failed to read request resolution value")?
+                };
                 let resolve = pending
                     .resolve
                     .restore(&ctx)
@@ -612,6 +696,17 @@ fn create_workflow_context_object<'js>(
             .prop(name, Property::from(value).enumerable())
             .with_context(|| format!("failed to install workflow context value {name}"))?;
     }
+
+    let sw: Object<'js> = globals
+        .get("SW")
+        .context("failed to get workflow context SW namespace")?;
+    let extra: Value<'js> = sw
+        .get("extra")
+        .context("failed to get workflow context extra namespace")?;
+    workflow_context
+        .prop("extra", Property::from(extra).enumerable())
+        .context("failed to install workflow context extra namespace")?;
+
     Ok(workflow_context)
 }
 
@@ -635,7 +730,9 @@ fn harden_public_workflow_globals<'js>(
     globals: &Object<'js>,
     readonly: &Persistent<Function<'static>>,
 ) -> anyhow::Result<()> {
-    for name in ["agent", "workflow", "log", "phase", "parallel", "pipeline"] {
+    for name in [
+        "agent", "workflow", "log", "phase", "parallel", "pipeline", "SW",
+    ] {
         let value: Value<'js> = globals
             .get(name)
             .with_context(|| format!("failed to get workflow global {name}"))?;
@@ -914,7 +1011,74 @@ fn install_native_workflow_functions<'js>(
         )
         .context("failed to install workflow child workflow global")?;
 
+    let sw = create_sw_object(globals.ctx(), state)?;
+    globals
+        .prop("SW", Property::from(sw).enumerable().configurable())
+        .context("failed to install workflow SW global")?;
+
     Ok(())
+}
+
+fn create_sw_object<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    state: Rc<RefCell<RuntimeState>>,
+) -> anyhow::Result<Object<'js>> {
+    let sw = Object::new(ctx.clone()).context("failed to create workflow SW object")?;
+    let extra = create_extra_object(ctx, state)?;
+    sw.prop("extra", Property::from(extra).enumerable())
+        .context("failed to install workflow SW.extra object")?;
+    Ok(sw)
+}
+
+fn create_extra_object<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    state: Rc<RefCell<RuntimeState>>,
+) -> anyhow::Result<Object<'js>> {
+    let extra = Object::new(ctx.clone()).context("failed to create workflow extra object")?;
+    let sleep_state = Rc::clone(&state);
+    extra
+        .prop(
+            "sleep",
+            Property::from(Func::from(MutFn::from(
+                move |ctx: rquickjs::Ctx<'js>, duration: Value<'js>| {
+                    let max_sleep_ms = sleep_state.borrow().max_sleep_ms;
+                    let duration_ms = validate_sleep_duration(&ctx, &duration, max_sleep_ms)?;
+                    create_pending_request(&ctx, &sleep_state, |id, _state| {
+                        WorkflowRuntimeRequest::Sleep { id, duration_ms }
+                    })
+                },
+            )))
+            .enumerable(),
+        )
+        .context("failed to install workflow extra sleep function")?;
+    Ok(extra)
+}
+
+fn validate_sleep_duration<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    value: &Value<'js>,
+    max_sleep_ms: u64,
+) -> rquickjs::Result<u64> {
+    let Some(number) = value.as_number() else {
+        return Err(Exception::throw_message(
+            ctx,
+            "sleep(ms) requires a finite non-negative number",
+        ));
+    };
+    if !number.is_finite() || number < 0.0 {
+        return Err(Exception::throw_message(
+            ctx,
+            "sleep(ms) requires a finite non-negative number",
+        ));
+    }
+    let duration_ms = number.ceil();
+    if duration_ms > max_sleep_ms as f64 {
+        return Err(Exception::throw_message(
+            ctx,
+            "sleep(ms) duration exceeds the maximum allowed delay",
+        ));
+    }
+    Ok(duration_ms as u64)
 }
 
 fn create_pending_request<'js>(

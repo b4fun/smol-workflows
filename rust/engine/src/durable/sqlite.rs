@@ -296,10 +296,13 @@ mod tests {
         let mut store = SqliteDurableStore::in_memory().expect("store should open");
         let applied = store.init().expect("migrations should apply");
         assert_eq!(applied, embedded_migrations::MIGRATIONS.len());
-        assert_eq!(store.current_schema_version().unwrap(), 1);
+        assert_eq!(
+            store.current_schema_version().unwrap(),
+            embedded_migrations::MIGRATIONS.last().unwrap().id
+        );
 
         let records = store.migration_records().unwrap();
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), embedded_migrations::MIGRATIONS.len());
         assert_eq!(records[0].id, 1);
         assert_eq!(records[0].introduced_version, env!("CARGO_PKG_VERSION"));
 
@@ -327,9 +330,12 @@ mod tests {
     #[test]
     fn migrations_are_idempotent() {
         let mut store = SqliteDurableStore::in_memory().expect("store should open");
-        assert_eq!(store.init().unwrap(), 1);
+        assert_eq!(store.init().unwrap(), embedded_migrations::MIGRATIONS.len());
         assert_eq!(store.init().unwrap(), 0);
-        assert_eq!(store.migration_records().unwrap().len(), 1);
+        assert_eq!(
+            store.migration_records().unwrap().len(),
+            embedded_migrations::MIGRATIONS.len()
+        );
     }
 
     #[test]

@@ -52,8 +52,9 @@ Recommended validation:
 
 Recommended initial limits:
 
-- `0 <= ms <= MAX_SLEEP_MS`
-- choose `MAX_SLEEP_MS` as a runtime/sandbox setting; if no setting exists, start conservatively and document it.
+- `0 <= ms <= max_sleep_ms`
+- the default runtime cap is one year;
+- embedders may override the cap when constructing the JavaScript runtime.
 
 ## Runtime request shape
 
@@ -109,7 +110,8 @@ Recommended signature payload:
 ```json
 {
   "signatureVersion": 1,
-  "requestType": "sleep",
+  "kind": "sleep",
+  "workflowScope": "root",
   "durationMs": 60000
 }
 ```
@@ -157,7 +159,7 @@ Pseudo-code:
 
 ```txt
 run_sleep(duration_ms):
-  signature = { signatureVersion: 1, requestType: "sleep", durationMs: duration_ms }
+  signature = { signatureVersion: 1, kind: "sleep", workflowScope: "root", durationMs: duration_ms }
   checkpoint_name = next occurrence name for hash(signature)
 
   claim = claim_or_replay_sleep_step(checkpoint_name, signature, duration_ms, now)
@@ -169,10 +171,6 @@ run_sleep(duration_ms):
     wait max(0, wake_at - now)
     complete_sleep_step(step_id, wake_at, now_after_wait)
     return
-
-  if claim is WaitForOtherWorker:
-    sleep short poll interval
-    retry
 ```
 
 `claim_or_replay_sleep_step` behavior:

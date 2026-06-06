@@ -174,6 +174,50 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
             }
         }
     }
+
+    async fn sleep(&self, duration_ms: u64) -> anyhow::Result<()> {
+        let input_signature = sleep_input_signature(duration_ms);
+        let input_signature_json = canonical_json_string(&input_signature)?;
+        let input_signature_hash = short_blake3_hex(&input_signature_json);
+        let base_checkpoint_name = format!("step:sig_{input_signature_hash}");
+        let checkpoint_name = self.next_checkpoint_name(base_checkpoint_name)?;
+
+        loop {
+            let now = now_ms();
+            let claim = {
+                let mut store = SqliteDurableStore::open(&self.db_path)?;
+                store.claim_or_replay_sleep_step(SleepStepClaimInput {
+                    run_id: &self.run_id,
+                    root_run_id: &self.root_run_id,
+                    checkpoint_name: &checkpoint_name,
+                    input_signature_hash: &input_signature_hash,
+                    input_signature_json: &input_signature_json,
+                    duration_ms,
+                    worker_id: &self.worker_id,
+                    lease_expires_at: now + 60_000,
+                    now,
+                })?
+            };
+
+            match claim {
+                SleepStepClaim::Replay => return Ok(()),
+                SleepStepClaim::WaitUntil { step_id, wake_at } => {
+                    let now = now_ms();
+                    if wake_at > now {
+                        tokio::time::sleep(Duration::from_millis((wake_at - now) as u64)).await;
+                    }
+                    let mut store = SqliteDurableStore::open(&self.db_path)?;
+                    store.complete_sleep_step(SleepStepCompleteInput {
+                        step_id: &step_id,
+                        duration_ms,
+                        wake_at,
+                        now: now_ms(),
+                    })?;
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 /// Execute a workflow locally while persisting durable task/run/attempt state.
@@ -819,6 +863,192 @@ impl SqliteDurableStore {
             .context("failed to commit durable agent step completion")
     }
 
+    pub fn claim_or_replay_sleep_step(
+        &mut self,
+        input: SleepStepClaimInput<'_>,
+    ) -> anyhow::Result<SleepStepClaim> {
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("failed to begin durable sleep step claim transaction")?;
+
+        let existing = tx
+            .query_row(
+                r#"
+                SELECT step_id, state, input_signature_json, input_json, lease_expires_at
+                FROM sw_workflow_steps
+                WHERE run_id = ?1 AND checkpoint_name = ?2
+                "#,
+                rusqlite::params![input.run_id, input.checkpoint_name],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to query durable sleep step")?;
+
+        if let Some((step_id, state, stored_signature, input_json, lease_expires_at)) = existing {
+            if stored_signature != input.input_signature_json {
+                bail!(
+                    "durable sleep step input signature mismatch for {}",
+                    input.checkpoint_name
+                );
+            }
+            match state.as_str() {
+                "completed" => {
+                    tx.commit()
+                        .context("failed to commit sleep replay transaction")?;
+                    return Ok(SleepStepClaim::Replay);
+                }
+                "running" | "pending" | "failed" | "cancelled" => {
+                    let input_value = serde_json::from_str::<Value>(&input_json)
+                        .context("failed to deserialize durable sleep input")?;
+                    let wake_at = input_value
+                        .get("wakeAt")
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| anyhow::anyhow!("durable sleep step missing wakeAt"))?;
+                    if wake_at < 0 {
+                        log::warn!(
+                            "durable sleep step {} has negative wakeAt {}; resolving immediately",
+                            step_id,
+                            wake_at
+                        );
+                    }
+                    if state == "running"
+                        && lease_expires_at.is_some_and(|lease| lease > input.now)
+                        && wake_at > input.now
+                    {
+                        tx.commit()
+                            .context("failed to commit sleep wait transaction")?;
+                        return Ok(SleepStepClaim::WaitUntil { step_id, wake_at });
+                    }
+                    tx.execute(
+                        r#"
+                        UPDATE sw_workflow_steps
+                        SET state = 'running',
+                            worker_id = ?1,
+                            lease_expires_at = ?2,
+                            attempts = attempts + 1,
+                            last_attempt_at = ?3,
+                            updated_at = ?3,
+                            failure_reason_json = NULL
+                        WHERE step_id = ?4
+                        "#,
+                        rusqlite::params![
+                            input.worker_id,
+                            input.lease_expires_at,
+                            input.now,
+                            step_id
+                        ],
+                    )
+                    .context("failed to reclaim durable sleep step")?;
+                    tx.commit()
+                        .context("failed to commit durable sleep reclaim transaction")?;
+                    return Ok(SleepStepClaim::WaitUntil { step_id, wake_at });
+                }
+                other => bail!("unknown durable step state: {other}"),
+            }
+        }
+
+        let step_id = new_id("step");
+        let duration_ms_i64 =
+            i64::try_from(input.duration_ms).context("sleep duration is too large to persist")?;
+        let wake_at = input.now.saturating_add(duration_ms_i64);
+        let input_json = serde_json::json!({
+            "durationMs": input.duration_ms,
+            "wakeAt": wake_at,
+        });
+        tx.execute(
+            r#"
+            INSERT INTO sw_workflow_steps (
+                step_id,
+                run_id,
+                root_run_id,
+                step_kind,
+                checkpoint_name,
+                input_signature_hash,
+                input_signature_json,
+                state,
+                input_json,
+                worker_id,
+                lease_expires_at,
+                attempts,
+                last_attempt_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?1, ?2, ?3, 'sleep', ?4, ?5, ?6, 'running', ?7, ?8, ?9, 1, ?10, ?10, ?10)
+            "#,
+            rusqlite::params![
+                step_id,
+                input.run_id,
+                input.root_run_id,
+                input.checkpoint_name,
+                input.input_signature_hash,
+                input.input_signature_json,
+                serde_json::to_string(&input_json)?,
+                input.worker_id,
+                input.lease_expires_at,
+                input.now,
+            ],
+        )
+        .context("failed to insert durable sleep step")?;
+        tx.commit()
+            .context("failed to commit durable sleep step insert")?;
+        Ok(SleepStepClaim::WaitUntil { step_id, wake_at })
+    }
+
+    pub fn complete_sleep_step(&mut self, input: SleepStepCompleteInput<'_>) -> anyhow::Result<()> {
+        let result_json = serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "durationMs": input.duration_ms,
+            "wakeAt": input.wake_at,
+            "completedAt": input.now,
+        }))?;
+        let updated = self
+            .connection_mut()
+            .execute(
+                r#"
+                UPDATE sw_workflow_steps
+                SET state = 'completed',
+                    result_json = ?1,
+                    lease_expires_at = NULL,
+                    updated_at = ?2
+                WHERE step_id = ?3
+                  AND state = 'running'
+                "#,
+                rusqlite::params![result_json, input.now, input.step_id],
+            )
+            .context("failed to mark durable sleep step completed")?;
+        if updated == 1 {
+            return Ok(());
+        }
+
+        let state = self
+            .connection()
+            .query_row(
+                "SELECT state FROM sw_workflow_steps WHERE step_id = ?1",
+                rusqlite::params![input.step_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("failed to inspect durable sleep step after completion race")?;
+        match state.as_deref() {
+            Some("completed") => Ok(()),
+            Some(state) => bail!("cannot complete durable sleep step in state {state}"),
+            None => bail!(
+                "cannot complete missing durable sleep step {}",
+                input.step_id
+            ),
+        }
+    }
+
     pub fn fail_agent_step(&mut self, input: AgentStepFailInput<'_>) -> anyhow::Result<()> {
         let failure = serde_json::to_string(input.failure_reason)?;
         self.connection_mut()
@@ -843,6 +1073,12 @@ pub enum AgentStepClaim {
     Replay(Box<AgentProviderResult>),
     Run { step_id: String },
     Wait,
+}
+
+#[derive(Debug)]
+pub enum SleepStepClaim {
+    Replay,
+    WaitUntil { step_id: String, wake_at: i64 },
 }
 
 fn compact_agent_result_for_replay(result: &AgentProviderResult) -> AgentProviderResult {
@@ -882,6 +1118,25 @@ pub struct AgentStepFailInput<'a> {
     pub now: i64,
 }
 
+pub struct SleepStepClaimInput<'a> {
+    pub run_id: &'a str,
+    pub root_run_id: &'a str,
+    pub checkpoint_name: &'a str,
+    pub input_signature_hash: &'a str,
+    pub input_signature_json: &'a str,
+    pub duration_ms: u64,
+    pub worker_id: &'a str,
+    pub lease_expires_at: i64,
+    pub now: i64,
+}
+
+pub struct SleepStepCompleteInput<'a> {
+    pub step_id: &'a str,
+    pub duration_ms: u64,
+    pub wake_at: i64,
+    pub now: i64,
+}
+
 async fn run_durable_agent_provider(
     default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
@@ -902,6 +1157,15 @@ fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> 
             "phase": input.context.phase,
             "cwd": input.context.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
         }
+    })
+}
+
+fn sleep_input_signature(duration_ms: u64) -> Value {
+    serde_json::json!({
+        "signatureVersion": 1,
+        "kind": "sleep",
+        "workflowScope": "root",
+        "durationMs": duration_ms,
     })
 }
 
@@ -1515,6 +1779,53 @@ export default { id, first, second, third };
             }
         }
         max
+    }
+
+    #[tokio::test]
+    async fn local_durable_run_persists_sleep_step_without_budget_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let script_path = dir.path().join("sleep.workflow.js");
+        fs::write(
+            &script_path,
+            r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "durable-sleep", description: "durable sleep" };
+await sleep(5);
+export default { slept: true };
+"#,
+        )
+        .unwrap();
+
+        let mut store = SqliteDurableStore::open(&db_path).unwrap();
+        let result = run_local_durable_workflow(
+            &mut store,
+            LocalDurableRunOptions::new(
+                script_path,
+                json!({}),
+                Arc::new(CountingProvider {
+                    calls: AtomicUsize::new(0),
+                }),
+            ),
+        )
+        .await
+        .expect("durable workflow should run");
+
+        assert_eq!(result.workflow.output.result, json!({ "slept": true }));
+        let (sleep_steps, budget_entries): (i64, i64) = store
+            .connection()
+            .query_row(
+                r#"
+                SELECT
+                  (SELECT COUNT(*) FROM sw_workflow_steps WHERE step_kind = 'sleep' AND state = 'completed'),
+                  (SELECT COUNT(*) FROM sw_budget_ledger)
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sleep_steps, 1);
+        assert_eq!(budget_entries, 0);
     }
 
     #[tokio::test]

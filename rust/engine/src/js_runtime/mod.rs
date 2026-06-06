@@ -78,7 +78,9 @@ impl Default for SandboxOptions {
 /// Module import policy for workflow JavaScript.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ImportPolicy {
-    /// Do not allow workflow code to import any module.
+    /// Do not allow workflow code to import user, filesystem, package, or host
+    /// platform modules. Runtime-owned virtual modules may still be exposed by
+    /// a concrete engine implementation, such as `workflow:extra`.
     DenyAll,
 }
 
@@ -143,12 +145,20 @@ pub enum WorkflowRuntimeRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<Value>,
     },
+
+    /// Workflow called `sleep(...)` from the `workflow:extra` namespace.
+    #[serde(rename = "sleep")]
+    Sleep {
+        id: String,
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+    },
 }
 
 impl WorkflowRuntimeRequest {
     pub fn id(&self) -> &str {
         match self {
-            Self::Agent { id, .. } | Self::Workflow { id, .. } => id,
+            Self::Agent { id, .. } | Self::Workflow { id, .. } | Self::Sleep { id, .. } => id,
         }
     }
 
@@ -156,6 +166,7 @@ impl WorkflowRuntimeRequest {
         match self {
             Self::Agent { .. } => "agent",
             Self::Workflow { .. } => "workflow",
+            Self::Sleep { .. } => "sleep",
         }
     }
 }
@@ -164,6 +175,7 @@ impl WorkflowRuntimeRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum WorkflowRuntimeRequestResolution {
     Ok(Value),
+    OkUndefined,
     OkWithBudget {
         value: Value,
         budget: WorkflowBudgetSnapshot,

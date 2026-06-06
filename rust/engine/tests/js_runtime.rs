@@ -34,6 +34,12 @@ fn run_to_completion(
                         "workflowRef": workflow_ref,
                         "args": args,
                     }),
+                    WorkflowRuntimeRequest::Sleep { .. } => {
+                        trace.requests.push(request);
+                        execution
+                            .resolve_request(&id, WorkflowRuntimeRequestResolution::OkUndefined)?;
+                        continue;
+                    }
                 };
                 trace.requests.push(request);
                 execution.resolve_request(&id, WorkflowRuntimeRequestResolution::Ok(result))?;
@@ -196,6 +202,171 @@ export default {
             "expected {name} global binding to be readonly"
         );
     }
+}
+
+#[test]
+fn rquickjs_exposes_workflow_extra_sleep_request() {
+    let mut execution = RQuickJSWorkflowRuntime::new()
+        .start_module(WorkflowModuleInput::new(
+            r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "sleep", description: "sleep" };
+const globalSleepType = typeof SW.extra.sleep;
+const genericExtraType = typeof extra;
+const value = await sleep(12);
+export default { valueType: typeof value, globalSleepType, genericExtraType };
+"#,
+            "sleep.workflow.js",
+            json!({}),
+        ))
+        .expect("workflow should start");
+
+    let request = loop {
+        match execution.poll().expect("workflow should poll") {
+            WorkflowRuntimePoll::Request(request) => break request,
+            WorkflowRuntimePoll::Pending => continue,
+            other => panic!("expected sleep request, got {other:?}"),
+        }
+    };
+
+    let id = match request {
+        WorkflowRuntimeRequest::Sleep { id, duration_ms } => {
+            assert_eq!(duration_ms, 12);
+            id
+        }
+        other => panic!("expected sleep request, got {other:?}"),
+    };
+
+    execution
+        .resolve_request(&id, WorkflowRuntimeRequestResolution::OkUndefined)
+        .expect("sleep should resolve");
+
+    let output = loop {
+        match execution.poll().expect("workflow should poll") {
+            WorkflowRuntimePoll::Complete(output) => break output,
+            WorkflowRuntimePoll::Pending => continue,
+            other => panic!("expected completion, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        output.result,
+        json!({
+            "valueType": "undefined",
+            "globalSleepType": "function",
+            "genericExtraType": "undefined",
+        })
+    );
+}
+
+#[test]
+fn rquickjs_exposes_extra_on_workflow_context_without_global_extra() {
+    let (output, _trace) = run_to_completion(WorkflowModuleInput::new(
+        r#"
+export const meta = { name: "ctx-extra", description: "ctx extra" };
+export default async function workflow(input, ctx) {
+  const value = await ctx.extra.sleep(1);
+  return {
+    valueType: typeof value,
+    ctxExtraSleepType: typeof ctx.extra.sleep,
+    ctxSwType: typeof ctx.SW,
+    globalExtraType: typeof extra,
+  };
+}
+"#,
+        "ctx-extra.workflow.js",
+        json!({}),
+    ))
+    .expect("workflow should execute");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "valueType": "undefined",
+            "ctxExtraSleepType": "function",
+            "ctxSwType": "undefined",
+            "globalExtraType": "undefined",
+        })
+    );
+}
+
+#[test]
+fn rquickjs_validates_workflow_extra_sleep_bounds() {
+    fn expect_sleep_rejection(source: &str, max_sleep_ms: u64, expected: &str) {
+        let mut execution = RQuickJSWorkflowRuntime::new()
+            .with_max_sleep_ms(max_sleep_ms)
+            .start_module(WorkflowModuleInput::new(
+                source,
+                "sleep-invalid.workflow.js",
+                json!({}),
+            ))
+            .expect("workflow should start");
+
+        for _ in 0..20 {
+            match execution.poll() {
+                Ok(WorkflowRuntimePoll::Pending) => continue,
+                Ok(other) => panic!("expected sleep validation rejection, got {other:?}"),
+                Err(error) => {
+                    assert!(
+                        format!("{error:#}").contains(expected),
+                        "unexpected error: {error:#}"
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("workflow did not reject invalid sleep within poll limit");
+    }
+
+    expect_sleep_rejection(
+        r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "sleep-invalid", description: "sleep-invalid" };
+export default await sleep(11);
+"#,
+        10,
+        "duration exceeds the maximum",
+    );
+    expect_sleep_rejection(
+        r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "sleep-invalid", description: "sleep-invalid" };
+export default await sleep(-1);
+"#,
+        10,
+        "finite non-negative number",
+    );
+    expect_sleep_rejection(
+        r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "sleep-invalid", description: "sleep-invalid" };
+export default await sleep(Infinity);
+"#,
+        10,
+        "finite non-negative number",
+    );
+}
+
+#[test]
+fn rquickjs_blocks_non_extra_imports() {
+    let result = RQuickJSWorkflowRuntime::new().start_module(WorkflowModuleInput::new(
+        r#"
+import fs from "node:fs";
+export const meta = { name: "blocked", description: "blocked" };
+export default fs;
+"#,
+        "blocked.workflow.js",
+        json!({}),
+    ));
+    let error = match result {
+        Ok(_) => panic!("workflow should reject non-extra imports"),
+        Err(error) => error,
+    };
+
+    assert!(
+        format!("{error:#}").contains("workflow imports are restricted"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]
@@ -440,13 +611,16 @@ fn rquickjs_hides_internal_helpers_and_blocks_additional_host_access() {
             r#"
 export const meta = { name: "sandbox", description: "sandbox" };
 const mutationBlocked = [];
-for (const name of ['args', 'budget', 'agent', 'workflow', 'log', 'phase', 'parallel', 'pipeline']) {
+for (const name of ['args', 'budget', 'agent', 'workflow', 'log', 'phase', 'parallel', 'pipeline', 'SW']) {
   try { globalThis[name] = null; } catch { mutationBlocked.push(name); }
 }
 
 export default {
   dateType: typeof Date,
   readonlyType: typeof __readonly,
+  extraType: typeof extra,
+  swExtraSleepType: typeof SW.extra.sleep,
+  swExtraMutationBlocked: (() => { try { SW.extra.sleep = null; return false; } catch { return true; } })(),
   randomBlocked: (() => { try { Math.random(); return false; } catch { return true; } })(),
   mutationBlocked,
 };
@@ -469,8 +643,11 @@ export default {
         json!({
             "dateType": "undefined",
             "readonlyType": "undefined",
+            "extraType": "undefined",
+            "swExtraSleepType": "function",
+            "swExtraMutationBlocked": true,
             "randomBlocked": true,
-            "mutationBlocked": ["args", "budget", "agent", "workflow", "log", "phase", "parallel", "pipeline"],
+            "mutationBlocked": ["args", "budget", "agent", "workflow", "log", "phase", "parallel", "pipeline", "SW"],
         })
     );
 }

@@ -33,6 +33,11 @@ pub trait WorkflowAgentRunner: Send + Sync {
         provider_override: Option<String>,
         input: AgentProviderRunInput,
     ) -> anyhow::Result<AgentProviderResult>;
+
+    async fn sleep(&self, duration_ms: u64) -> anyhow::Result<()> {
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -185,13 +190,19 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
 
     let mut pending_requests = VecDeque::<WorkflowRuntimeRequest>::new();
     let mut agent_tasks = JoinSet::<AgentTaskCompletion>::new();
+    let mut sleep_tasks = JoinSet::<SleepTaskCompletion>::new();
 
     loop {
         state
-            .start_pending_requests(&mut pending_requests, &mut agent_tasks, &js_commands)
+            .start_pending_requests(
+                &mut pending_requests,
+                &mut agent_tasks,
+                &mut sleep_tasks,
+                &js_commands,
+            )
             .await?;
 
-        if agent_tasks.is_empty() {
+        if agent_tasks.is_empty() && sleep_tasks.is_empty() {
             let event = js_events
                 .recv()
                 .await
@@ -211,7 +222,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                     return Ok(result);
                 }
             }
-            completion = agent_tasks.join_next() => {
+            completion = agent_tasks.join_next(), if !agent_tasks.is_empty() => {
                 let completion = completion
                     .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
                     .map_err(|error| anyhow!("agent provider task failed: {error}"))?;
@@ -223,6 +234,19 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                         value,
                         budget: state.budget.clone(),
                     },
+                    Err(error) => WorkflowRuntimeRequestResolution::Err {
+                        message: error.to_string(),
+                    },
+                };
+                send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await?;
+            }
+            completion = sleep_tasks.join_next(), if !sleep_tasks.is_empty() => {
+                let completion = completion
+                    .ok_or_else(|| anyhow!("sleep task set ended unexpectedly"))?
+                    .map_err(|error| anyhow!("sleep task failed: {error}"))?;
+                let SleepTaskCompletion { id, result } = completion;
+                let resolution = match result {
+                    Ok(()) => WorkflowRuntimeRequestResolution::OkUndefined,
                     Err(error) => WorkflowRuntimeRequestResolution::Err {
                         message: error.to_string(),
                     },
@@ -347,6 +371,11 @@ struct AgentTaskCompletion {
     result: anyhow::Result<AgentProviderResult>,
 }
 
+struct SleepTaskCompletion {
+    id: String,
+    result: anyhow::Result<()>,
+}
+
 fn add_usage(total: &mut WorkflowTokenUsage, usage: Option<&AgentUsage>) {
     let Some(usage) = usage else {
         return;
@@ -452,6 +481,7 @@ impl<'a> RunState<'a> {
         &mut self,
         pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
         agent_tasks: &mut JoinSet<AgentTaskCompletion>,
+        sleep_tasks: &mut JoinSet<SleepTaskCompletion>,
         js_commands: &mpsc::Sender<JsCommand>,
     ) -> anyhow::Result<()> {
         loop {
@@ -471,6 +501,9 @@ impl<'a> RunState<'a> {
                 WorkflowRuntimeRequest::Agent { .. } => {
                     let (id, prepared) = self.prepare_agent_request(request);
                     self.spawn_agent_task(agent_tasks, id, prepared);
+                }
+                WorkflowRuntimeRequest::Sleep { id, duration_ms } => {
+                    self.spawn_sleep_task(sleep_tasks, id, duration_ms);
                 }
                 WorkflowRuntimeRequest::Workflow {
                     id,
@@ -541,7 +574,7 @@ impl<'a> RunState<'a> {
                 });
                 (id, self.prepare_agent_run(prompt, options))
             }
-            WorkflowRuntimeRequest::Workflow { .. } => {
+            WorkflowRuntimeRequest::Workflow { .. } | WorkflowRuntimeRequest::Sleep { .. } => {
                 unreachable!("prepare_agent_request only accepts agent requests")
             }
         }
@@ -579,6 +612,26 @@ impl<'a> RunState<'a> {
                 result: agent_runner
                     .run_agent(default_provider, prepared.provider_override, prepared.input)
                     .await,
+            }
+        });
+    }
+
+    fn spawn_sleep_task(
+        &self,
+        sleep_tasks: &mut JoinSet<SleepTaskCompletion>,
+        id: String,
+        duration_ms: u64,
+    ) {
+        let agent_runner = Arc::clone(&self.agent_runner);
+        log::debug!(
+            "starting sleep request id={} duration_ms={}",
+            id,
+            duration_ms
+        );
+        sleep_tasks.spawn(async move {
+            SleepTaskCompletion {
+                id,
+                result: agent_runner.sleep(duration_ms).await,
             }
         });
     }

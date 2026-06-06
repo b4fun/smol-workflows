@@ -188,6 +188,7 @@ The runner injects these globals:
 - `budget` — shared output-token budget with `total`, `spent()`, and `remaining()`
 - `log(...values)` — write workflow logs
 - `phase(name)` — mark workflow phase
+- `SW.extra.sleep(ms)` / `ctx.extra.sleep(ms)` / `import { sleep } from "workflow:extra"` — pause workflow execution
 
 ## Scripts
 
