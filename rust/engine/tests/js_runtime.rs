@@ -60,6 +60,71 @@ fn echo_agent_result(prompt: &str, options: Option<&Value>) -> Value {
 }
 
 #[test]
+fn rquickjs_exception_messages_include_stack_for_module_errors() {
+    let source =
+        fs::read_to_string("tests/fixtures/stack-error.workflow.js").expect("fixture should exist");
+
+    let error = run_to_completion(WorkflowModuleInput::new(
+        source,
+        "stack-error.workflow.js",
+        json!({}),
+    ))
+    .unwrap_err();
+    let error = format!("{error:#}");
+
+    assert!(
+        error.contains("workflow module evaluation rejected: boom from module"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("at fail (stack-error.workflow.js:"),
+        "expected stack frame in error: {error}"
+    );
+}
+
+#[test]
+fn rquickjs_exception_messages_include_stack_for_default_function_errors() {
+    let source = fs::read_to_string("tests/fixtures/function-stack-error.workflow.js")
+        .expect("fixture should exist");
+
+    let error = run_to_completion(WorkflowModuleInput::new(
+        source,
+        "function-stack-error.workflow.js",
+        json!({}),
+    ))
+    .unwrap_err();
+    let error = format!("{error:#}");
+
+    assert!(
+        error.contains("workflow module rejected: boom from function"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("at fail (function-stack-error.workflow.js:"),
+        "expected stack frame in error: {error}"
+    );
+}
+
+#[test]
+fn rquickjs_exception_messages_render_thrown_strings() {
+    let source = fs::read_to_string("tests/fixtures/string-error.workflow.js")
+        .expect("fixture should exist");
+
+    let error = run_to_completion(WorkflowModuleInput::new(
+        source,
+        "string-error.workflow.js",
+        json!({}),
+    ))
+    .unwrap_err();
+    let error = format!("{error:#}");
+
+    assert!(
+        error.contains("workflow module evaluation rejected: boom from string"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rquickjs_executes_default_async_workflow_fixture() {
     let source = fs::read_to_string("tests/fixtures/injected-globals.workflow.js")
         .expect("fixture should exist");
