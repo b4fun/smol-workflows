@@ -321,12 +321,18 @@ workflow.run task
 
 The durable engine should explicitly classify workflow runtime requests by whether they are retryable durable steps.
 
-Retryable requests:
+Retryable base workflow requests:
 
 | Request | Durable step kind | Why retryable |
 | --- | --- | --- |
 | `agent(prompt, options?)` | `agent` | Calls an external model/provider and may be expensive, nondeterministic, or side-effecting. The full provider result, including usage/raw/session metadata, must be persisted. |
 | `workflow(nameOrRef, args?)` | `workflow` | Runs a child workflow that may perform its own retryable calls. The parent should persist the child result and budget delta so retry does not rerun the child unnecessarily. |
+
+Retryable `workflow:extra` requests:
+
+| Request | Durable step kind | Why retryable |
+| --- | --- | --- |
+| `sleep(ms)` | `sleep` | Records an absolute wake deadline so retry/resume waits only the remaining time instead of restarting the full sleep. |
 
 Non-retryable runtime calls:
 
@@ -339,7 +345,7 @@ Non-retryable runtime calls:
 | `pipeline(...)` | Pure JavaScript scheduling helper. The helper itself is not retryable; retryable calls inside it are durable steps. |
 | `args` | Read-only workflow input. Not retryable. |
 
-Future retryable requests can use the same step machinery if they cross a nondeterministic or side-effecting boundary, for example external tools, HTTP calls, human approval, sleeps/timers, or environment operations.
+Future retryable requests can use the same step machinery if they cross a nondeterministic or side-effecting boundary, for example external tools, HTTP calls, human approval, or environment operations.
 
 Rule of thumb:
 
@@ -1244,7 +1250,9 @@ CREATE TABLE sw_workflow_steps (
   run_id TEXT NOT NULL,
   root_run_id TEXT NOT NULL,
 
-  step_kind TEXT NOT NULL CHECK (step_kind IN ('agent', 'workflow')),
+  -- Step kind is validated by application code so new durable step kinds do
+  -- not require changing a database-level CHECK constraint.
+  step_kind TEXT NOT NULL,
   checkpoint_name TEXT NOT NULL,
   input_signature_hash TEXT NOT NULL,
   input_signature_json TEXT NOT NULL CHECK (json_valid(input_signature_json)),

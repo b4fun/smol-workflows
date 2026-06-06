@@ -327,6 +327,30 @@ fn run_debug(
     .expect("workflow should run")
 }
 
+#[test]
+fn runs_workflow_extra_sleep_before_agent() {
+    let result = run_debug(fixture_path("sleep.workflow.js"), json!({}));
+    assert_eq!(result.output.result["slept"], true);
+    assert_eq!(result.output.result["result"], "echo: after sleep");
+    assert_eq!(result.agent_calls.len(), 1);
+}
+
+#[test]
+fn runs_child_workflow_that_uses_workflow_extra_sleep() {
+    let result = run_debug(fixture_path("sleep-parent.workflow.js"), json!({}));
+    assert_eq!(
+        result.output.result,
+        json!({
+            "parentSlept": true,
+            "child": {
+                "childSlept": true,
+                "value": "from-parent",
+            },
+        })
+    );
+    assert_eq!(result.workflow_calls.len(), 1);
+}
+
 fn run_with_provider(
     script_path: PathBuf,
     provider: Arc<dyn AgentProvider>,

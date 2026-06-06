@@ -150,6 +150,17 @@ export type AgentRunFn = Agent["run"];
 /** Marks the current workflow phase for tracing and observability. */
 export type PhaseFn = (name: string) => void;
 
+/** Runtime helpers that are not part of the base workflow API. */
+export type WorkflowExtra = {
+  /** Pause workflow execution for at least `ms` milliseconds. */
+  sleep(ms: number): Promise<void>;
+};
+
+/** smol-workflows runtime namespace exposed to workflow scripts. */
+export type WorkflowRuntimeNamespace = {
+  extra: WorkflowExtra;
+};
+
 /** Explicit workflow capabilities passed as the second argument to a workflow. */
 export type WorkflowContext = {
   args: WorkflowArgs;
@@ -160,6 +171,7 @@ export type WorkflowContext = {
   budget: WorkflowBudget;
   log: WorkflowLogFn;
   phase: PhaseFn;
+  extra: WorkflowExtra;
 };
 
 /** The default export shape expected from a workflow script. */
@@ -167,6 +179,13 @@ export type WorkflowHandler<Input = unknown, Output = unknown> = (
   input: Input,
   ctx: WorkflowContext,
 ) => Awaitable<Output>;
+
+// @ts-ignore TS2664: workflow:extra is a host-provided virtual module.
+declare module "workflow:extra" {
+  export const sleep: WorkflowExtra["sleep"];
+  const extra: WorkflowExtra;
+  export default extra;
+}
 
 declare global {
   /** Global workflow arguments injected by the isolated workflow runner. */
@@ -185,6 +204,8 @@ declare global {
   var log: WorkflowLogFn;
   /** Global phase helper injected by the isolated workflow runner. */
   var phase: PhaseFn;
+  /** smol-workflows runtime namespace. */
+  var SW: WorkflowRuntimeNamespace;
 }
 
 export {};
