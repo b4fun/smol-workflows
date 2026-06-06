@@ -9,3 +9,17 @@ Examples:
 - Put QuickJS runtime helpers under `rust/engine/src/js_runtime/rquickjs_js/`.
 - Include them from Rust with `include_str!("rquickjs_js/<file>.js")`.
 - Keep inline Rust JS strings only for very small snippets where a separate asset would make the code less clear.
+
+After making Rust workspace changes, run the relevant format, lint, and test commands before handing off. At minimum, prefer:
+
+```sh
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+If the change also touches the TypeScript SDK or generated workflow-facing types, also run:
+
+```sh
+npm --prefix ts/sdk run build
+```

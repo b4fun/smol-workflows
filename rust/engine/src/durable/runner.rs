@@ -182,39 +182,37 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
         let base_checkpoint_name = format!("step:sig_{input_signature_hash}");
         let checkpoint_name = self.next_checkpoint_name(base_checkpoint_name)?;
 
-        loop {
-            let now = now_ms();
-            let claim = {
-                let mut store = SqliteDurableStore::open(&self.db_path)?;
-                store.claim_or_replay_sleep_step(SleepStepClaimInput {
-                    run_id: &self.run_id,
-                    root_run_id: &self.root_run_id,
-                    checkpoint_name: &checkpoint_name,
-                    input_signature_hash: &input_signature_hash,
-                    input_signature_json: &input_signature_json,
-                    duration_ms,
-                    worker_id: &self.worker_id,
-                    lease_expires_at: now + 60_000,
-                    now,
-                })?
-            };
+        let now = now_ms();
+        let claim = {
+            let mut store = SqliteDurableStore::open(&self.db_path)?;
+            store.claim_or_replay_sleep_step(SleepStepClaimInput {
+                run_id: &self.run_id,
+                root_run_id: &self.root_run_id,
+                checkpoint_name: &checkpoint_name,
+                input_signature_hash: &input_signature_hash,
+                input_signature_json: &input_signature_json,
+                duration_ms,
+                worker_id: &self.worker_id,
+                lease_expires_at: now + 60_000,
+                now,
+            })?
+        };
 
-            match claim {
-                SleepStepClaim::Replay => return Ok(()),
-                SleepStepClaim::WaitUntil { step_id, wake_at } => {
-                    let now = now_ms();
-                    if wake_at > now {
-                        tokio::time::sleep(Duration::from_millis((wake_at - now) as u64)).await;
-                    }
-                    let mut store = SqliteDurableStore::open(&self.db_path)?;
-                    store.complete_sleep_step(SleepStepCompleteInput {
-                        step_id: &step_id,
-                        duration_ms,
-                        wake_at,
-                        now: now_ms(),
-                    })?;
-                    return Ok(());
+        match claim {
+            SleepStepClaim::Replay => Ok(()),
+            SleepStepClaim::WaitUntil { step_id, wake_at } => {
+                let now = now_ms();
+                if wake_at > now {
+                    tokio::time::sleep(Duration::from_millis((wake_at - now) as u64)).await;
                 }
+                let mut store = SqliteDurableStore::open(&self.db_path)?;
+                store.complete_sleep_step(SleepStepCompleteInput {
+                    step_id: &step_id,
+                    duration_ms,
+                    wake_at,
+                    now: now_ms(),
+                })?;
+                Ok(())
             }
         }
     }
