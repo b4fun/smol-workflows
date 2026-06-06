@@ -6,7 +6,7 @@ Track user-visible changes to `@smol-workflows/sdk`, especially public TypeScrip
 
 No unpublished changes yet.
 
-## 0.1.0-alpha.1
+## 0.1.0-alpha.2
 
 Initial SDK types for workflow authors.
 
