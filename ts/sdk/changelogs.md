@@ -4,6 +4,10 @@ Track user-visible changes to `@smol-workflow/sdk`, especially public TypeScript
 
 ## Unpublished
 
+No unpublished changes yet.
+
+## 0.1.0-alpha.0
+
 Initial SDK types for workflow authors.
 
 - Added workflow metadata types, including phase metadata and provider hints.
