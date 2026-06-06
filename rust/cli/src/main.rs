@@ -1,4 +1,5 @@
 mod dto_history;
+mod paths;
 
 use clap::{Arg, Command as ClapCommand};
 use comfy_table::{presets::NOTHING, Cell, Table};
@@ -8,6 +9,7 @@ use dto_history::{
     OutputFormat,
 };
 use log::{LevelFilter, Log, Metadata, Record};
+use paths::default_database_path;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -108,7 +110,7 @@ async fn history_command(argv: Vec<String>) -> anyhow::Result<()> {
 
 fn parse_history_options(argv: Vec<String>) -> anyhow::Result<(Option<String>, HistoryOptions)> {
     let mut run_id = None;
-    let mut db_path = PathBuf::from("smol-workflows.db");
+    let mut db_path = None;
     let mut format = OutputFormat::Table;
     let mut state = None;
     let mut name = None;
@@ -125,7 +127,7 @@ fn parse_history_options(argv: Vec<String>) -> anyhow::Result<(Option<String>, H
                 argv.get(index + 1).map(String::as_str),
                 "--db",
             )?;
-            db_path = PathBuf::from(parsed.value);
+            db_path = Some(PathBuf::from(parsed.value));
             if parsed.consumed_next {
                 index += 1;
             }
@@ -234,7 +236,10 @@ fn parse_history_options(argv: Vec<String>) -> anyhow::Result<(Option<String>, H
     Ok((
         run_id,
         HistoryOptions {
-            db_path,
+            db_path: match db_path {
+                Some(db_path) => db_path,
+                None => default_database_path()?,
+            },
             format,
             state,
             name,
@@ -1098,6 +1103,16 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         let _ = writeln!(stderr, "[log] {values}");
         let _ = stderr.flush();
     };
+    if options.db_path_is_default {
+        if let Some(parent) = options.db_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to create default database directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
     let mut store = SqliteDurableStore::open(&options.db_path)?;
     let mut durable_options = LocalDurableRunOptions::new(
         PathBuf::from(script_path),
@@ -1139,6 +1154,7 @@ struct RunCliOptions {
     budget_allowance: Option<u64>,
     max_parallel_agent_requests: Option<usize>,
     db_path: PathBuf,
+    db_path_is_default: bool,
     resume_run_id: Option<String>,
     log_level: LevelFilter,
     save_raw_sessions: Option<PathBuf>,
@@ -1150,7 +1166,8 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut budget_allowance = None;
     let mut log_level = LevelFilter::Off;
     let mut resume_run_id = None;
-    let mut db_path = PathBuf::from("smol-workflows.db");
+    let mut db_path = None;
+    let mut db_path_is_default = true;
     let mut max_parallel_agent_requests = None;
     let mut save_raw_sessions = None;
     let mut index = 0;
@@ -1180,7 +1197,8 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
 
         if token == "--db" || token.starts_with("--db=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
-            db_path = PathBuf::from(parsed.value);
+            db_path = Some(PathBuf::from(parsed.value));
+            db_path_is_default = false;
             if parsed.consumed_next {
                 index += 1;
             }
@@ -1268,7 +1286,11 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
         max_parallel_agent_requests,
-        db_path,
+        db_path: match db_path {
+            Some(db_path) => db_path,
+            None => default_database_path()?,
+        },
+        db_path_is_default,
         resume_run_id,
         log_level,
         save_raw_sessions,
@@ -1567,7 +1589,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --db smol-workflows.db\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
                 ),
         )
         .subcommand(
@@ -1590,7 +1612,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "History options:\n  --db smol-workflows.db\n  -o, --output table|json\n  --state pending|running|completed|failed|cancelled\n  --name metadata-name-substring\n  --since unixEpochMs\n  --until unixEpochMs\n  --limit count",
+                    "History options:\n  --db path (default: platform app state workflows.db)\n  -o, --output table|json\n  --state pending|running|completed|failed|cancelled\n  --name metadata-name-substring\n  --since unixEpochMs\n  --until unixEpochMs\n  --limit count",
                 ),
         )
         .subcommand(

@@ -156,7 +156,7 @@ Explore more workflows under the [`examples`](examples) folder.
 You can inspect persisted run records later with `smol-wf history`:
 
 ```sh
-# List recent workflow runs from the default smol-workflows.db
+# List recent workflow runs from the default platform app-state workflows.db
 smol-wf history
 
 # Show details for a specific run, including attempts, steps, usage, sessions,
@@ -329,7 +329,7 @@ Structured output schemas are validated by the Rust engine, with one retry using
 
 ## Durable backends
 
-Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in `smol-workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run.
+Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend by default and stores run/task/step state, completed agent checkpoints, provider results, and budget ledger entries in the platform app-state `workflows.db` unless `--db` is provided. Use `--resume-run <run-id>` to continue an existing run. See [`docs/usages/config.md`](docs/usages/config.md) for default database locations.
 
 ## What is in this repo
 

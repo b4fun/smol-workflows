@@ -66,11 +66,13 @@ A workflow can still override the provider for individual calls with `agent(prom
 
 Use a specific SQLite durable workflow database.
 
-Default:
+By default, `run` uses the platform app-state database:
 
 ```txt
-smol-workflows.db
+workflows.db
 ```
+
+See [`config.md`](config.md) for the full platform-specific default path.
 
 Example:
 
@@ -314,7 +316,7 @@ find "$raw_dir" -type f
 
 ```sh
 smol-wf run ./examples/pod-diagnostics.mjs \
-  --db ./smol-workflows.db \
+  --db ./workflows.db \
   --resume-run run_01kt... \
   --agent-provider pi \
   --args-target "coredns pods under kube-system"

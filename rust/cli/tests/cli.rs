@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -51,6 +51,44 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("temp dir should be created");
     path
+}
+
+fn configure_default_app_dir(command: &mut Command, root: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        command.env("APPDATA", root.join("appdata"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command.env("HOME", root.join("home"));
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        command.env("XDG_STATE_HOME", root.join("state"));
+    }
+}
+
+fn expected_default_db_path(root: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        root.join("appdata")
+            .join("smol-workflows")
+            .join("workflows.db")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        root.join("home")
+            .join("Library")
+            .join("Application Support")
+            .join("smol-workflows")
+            .join("workflows.db")
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        root.join("state")
+            .join("smol-workflows")
+            .join("workflows.db")
+    }
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -540,7 +578,9 @@ export default await agent("isolated cli", { isolation: "worktree" });
     )
     .expect("workflow fixture should be written");
 
-    let output = smol_wf()
+    let mut command = smol_wf();
+    configure_default_app_dir(&mut command, &root);
+    let output = command
         .current_dir(&root)
         .args(["run", "workflow.mjs", "--agent-provider", "debug"])
         .output()
@@ -861,6 +901,56 @@ fn history_reports_missing_database() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("history database"));
     assert!(!db_path.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_uses_platform_default_database_path_when_db_is_omitted() {
+    let dir = temp_dir("default-db-path");
+    let script_path = dir.join("default-db.workflow.mjs");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "cli-default-db", description: "CLI default DB" };
+export default { result: await agent("default db") };
+"#,
+    )
+    .expect("workflow fixture should be written");
+
+    let mut run = smol_wf();
+    configure_default_app_dir(&mut run, &dir);
+    let output = run
+        .args(["run", script_path.to_str().expect("path should be utf8")])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let db_path = expected_default_db_path(&dir);
+    assert!(
+        db_path.exists(),
+        "default DB should be created at {db_path:?}"
+    );
+    assert!(
+        !dir.join("smol-workflows.db").exists(),
+        "legacy cwd default DB should not be created"
+    );
+
+    let mut history = smol_wf();
+    configure_default_app_dir(&mut history, &dir);
+    let history_output = history
+        .args(["history", "--output", "json"])
+        .output()
+        .expect("smol-wf history should run");
+    assert!(
+        history_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&history_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&history_output.stdout).contains("cli-default-db"));
     let _ = fs::remove_dir_all(&dir);
 }
 
