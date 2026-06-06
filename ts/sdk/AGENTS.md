@@ -1,6 +1,6 @@
 # SDK maintenance notes
 
-This directory contains the `@smol-workflow/sdk` TypeScript package. The package provides workflow authoring types and ambient declarations for runtime-injected workflow APIs.
+This directory contains the `@smol-workflows/sdk` TypeScript package. The package provides workflow authoring types and ambient declarations for runtime-injected workflow APIs.
 
 When changing public SDK APIs:
 
@@ -10,4 +10,4 @@ When changing public SDK APIs:
 - Bump `package.json` version when preparing a publishable release.
 - Run `npm run typecheck` and `npm run build` from this directory before release.
 
-Publishing is handled by GitHub Actions from the repository root workflow `.github/workflows/npm-sdk-publish.yml`. To publish, ensure the repository has an `NPM_TOKEN` secret with publish access, then push a tag named `ts/sdk/v<package-version>` or run the workflow manually.
+Publishing is handled by GitHub Actions from the repository root workflow `.github/workflows/npm-sdk-publish.yml`. Publishing uses npm trusted publishing / GitHub OIDC, so configure the `@smol-workflows/sdk` package on npm with this repository, workflow, and the `npm-publish` GitHub environment as a trusted publisher. To publish, push a tag named `ts/sdk/v<package-version>` or run the workflow manually.

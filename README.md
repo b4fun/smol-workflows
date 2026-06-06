@@ -335,7 +335,7 @@ Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend b
 
 - `rust/engine` — Rust workflow engine with a sandboxed QuickJS runtime, metadata extraction, schema validation, budget accounting, built-in agent providers, and a SQLite durable backend.
 - `rust/cli` — `smol-wf` command-line interface for running and discovering workflows.
-- `ts/sdk` — TypeScript types for workflow authors (`@smol-workflow/sdk`).
+- `ts/sdk` — TypeScript types for workflow authors (`@smol-workflows/sdk`).
 - `harness` — integrations and skills for code-agent hosts.
 - `examples` — runnable workflow scripts.
 - `docs` — design notes, workflow API reference, and harness capability notes.

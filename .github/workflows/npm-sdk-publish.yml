@@ -12,8 +12,9 @@ permissions:
 
 jobs:
   publish:
-    name: Publish @smol-workflow/sdk
+    name: Publish @smol-workflows/sdk
     runs-on: ubuntu-latest
+    environment: npm-publish
     defaults:
       run:
         working-directory: ts/sdk
@@ -68,5 +69,3 @@ jobs:
 
       - name: Publish
         run: npm publish --access public --provenance --tag "${{ steps.dist_tag.outputs.tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

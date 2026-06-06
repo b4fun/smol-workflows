@@ -1,6 +1,6 @@
 # Changelogs
 
-Track user-visible changes to `@smol-workflow/sdk`, especially public TypeScript types and workflow authoring APIs.
+Track user-visible changes to `@smol-workflows/sdk`, especially public TypeScript types and workflow authoring APIs.
 
 ## Unpublished
 

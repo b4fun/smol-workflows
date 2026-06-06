@@ -88,7 +88,7 @@ A workflow script is expected to be an ES module with:
 The preferred style is a top-level ESM workflow where the default export is the final workflow result:
 
 ```ts
-import type { WorkflowMetadata } from "@smol-workflow/sdk";
+import type { WorkflowMetadata } from "@smol-workflows/sdk";
 
 export const meta = {
   name: "example",
@@ -106,7 +106,7 @@ export default output;
 The supported function style default exports a workflow function:
 
 ```ts
-import type { WorkflowHandler } from "@smol-workflow/sdk";
+import type { WorkflowHandler } from "@smol-workflows/sdk";
 
 const workflow: WorkflowHandler = async (input, ctx) => {
   ctx.log("workflow args", input);
@@ -401,7 +401,7 @@ These strings are not only for human UI display. They may also be used for traci
 Recommended usage:
 
 ```ts
-import type { WorkflowMetadata } from "@smol-workflow/sdk";
+import type { WorkflowMetadata } from "@smol-workflows/sdk";
 
 export const meta = {
   name: "stock-investment-analysis",
@@ -426,12 +426,12 @@ Reasons:
 - It can be validated at runtime with libraries such as AJV.
 - It can also be consumed by LLM structured-output APIs that accept JSON Schema-like schemas.
 
-The SDK includes JSON Schema typing and exports it from `@smol-workflow/sdk`.
+The SDK includes JSON Schema typing and exports it from `@smol-workflows/sdk`.
 
 Example:
 
 ```ts
-import type { JSONSchema } from "@smol-workflow/sdk";
+import type { JSONSchema } from "@smol-workflows/sdk";
 
 const schema = {
   type: "object",
@@ -485,7 +485,7 @@ ts/sdk
 Package name:
 
 ```txt
-@smol-workflow/sdk
+@smol-workflows/sdk
 ```
 
 The SDK is currently a minimal ESM TypeScript package. It provides types only; runtime implementations of `args`, `agent`, `parallel`, `log`, and `phase` are injected by the isolated runner.
