@@ -348,6 +348,5 @@ Retryable workflow runs use the Rust SQLite backend. The CLI uses this backend b
 - [ ] environment abstraction
 - [ ] environment sandbox / isolation
 - [ ] remote environment support
-- [ ] pre-defined agents support
 - [ ] human in the loop / steering support
 - [ ] cross-run aggregate budget reporting
