@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: 'isolation-demo',
   description: 'Run file-mutating agent experiments in temporary git worktrees',
@@ -15,6 +16,7 @@ const goal = typeof args.goal === 'string'
   ? args.goal
   : 'make the documentation clearer for a first-time user'
 
+/** @satisfies {import('@smol-workflows/sdk').JSONSchema} */
 const PROPOSAL_SCHEMA = {
   type: 'object',
   properties: {
@@ -34,7 +36,7 @@ log(`Preparing isolated change experiments for ${target}`)
 
 const plan = await agent(
   `We want to improve ${target}. Goal: ${goal}.\n\nCreate a brief implementation plan.`,
-  { key: `isolation-plan:${target}`, phase: 'Plan' },
+  { phase: 'Plan' },
 )
 
 phase('Explore')
@@ -66,7 +68,6 @@ const proposals = await parallel(variants.map((variant) => async () => {
       'Return the approach, changed files, diff, and any notes.',
     ].join('\n'),
     {
-      key: `isolation-proposal:${variant.name}:${target}`,
       phase: 'Explore',
       isolation: 'worktree',
       schema: PROPOSAL_SCHEMA,
@@ -88,7 +89,7 @@ const recommendation = await agent(
     'Recommend which proposal to apply, or describe a merged approach.',
     'Remember: the isolated worktrees were temporary; only the returned diffs/reports remain.',
   ].join('\n'),
-  { key: `isolation-recommendation:${target}`, phase: 'Synthesize' },
+  { phase: 'Synthesize' },
 )
 
 export default {

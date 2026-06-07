@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: "budget-aware-research",
   description: "Budget-aware research workflow that stops optional agent calls when the remaining output-token budget is low",

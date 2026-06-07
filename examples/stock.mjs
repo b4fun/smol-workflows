@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: 'stock-investment-analysis',
   description: 'Three-phase stock investment analysis: decompose → research → synthesize',
@@ -8,12 +9,13 @@ export const meta = {
   ],
 }
 
-const STOCKS = args && args.stocks ? args.stocks : ['NVDA', 'SPCE']
+const STOCKS = Array.isArray(args.stocks) ? args.stocks.map(String) : ['NVDA', 'SPCE']
 
 // ── Phase 1: Analyze the ask ──────────────────────────────────────────────────
 phase('Analyze')
 log(`Decomposing investment analysis for: ${STOCKS.join(', ')}`)
 
+/** @satisfies {import('@smol-workflows/sdk').JSONSchema} */
 const DIMENSION_SCHEMA = {
   type: 'object',
   properties: {
@@ -34,7 +36,7 @@ const DIMENSION_SCHEMA = {
   required: ['dimensions', 'investorContext'],
 }
 
-const decomposition = await agent(
+const decomposition = /** @type {{ investorContext: string, dimensions: Array<{ key: string, label: string, prompt: string }> }} */ (await agent(
   `You are a senior equity research strategist. The user wants to analyze these stocks for potential investment: ${STOCKS.join(', ')}.
 
 Decompose this into 5 research dimensions that would give a comprehensive investment picture. For each dimension, write a specific research prompt that a financial analyst agent should answer using web search.
@@ -45,7 +47,7 @@ Return a JSON object with:
 - dimensions: array of {key, label, prompt} — 5 dimensions total
 - investorContext: a 2-sentence framing of what kind of investor would be interested in these two stocks together and what the key comparison tension is`,
   { schema: DIMENSION_SCHEMA, phase: 'Analyze' }
-)
+) ?? { investorContext: '', dimensions: [] })
 
 log(`Investor context: ${decomposition.investorContext}`)
 log(`Research dimensions: ${decomposition.dimensions.map(d => d.label).join(', ')}`)
@@ -54,6 +56,7 @@ log(`Research dimensions: ${decomposition.dimensions.map(d => d.label).join(', '
 phase('Research')
 log(`Spawning ${STOCKS.length * decomposition.dimensions.length} research agents (${STOCKS.length} stocks × ${decomposition.dimensions.length} dimensions)`)
 
+/** @satisfies {import('@smol-workflows/sdk').JSONSchema} */
 const FINDING_SCHEMA = {
   type: 'object',
   properties: {
@@ -105,6 +108,7 @@ log(`Collected ${validFindings.length} research findings`)
 // ── Phase 3: Synthesize ───────────────────────────────────────────────────────
 phase('Synthesize')
 
+/** @satisfies {import('@smol-workflows/sdk').JSONSchema} */
 const SYNTHESIS_SCHEMA = {
   type: 'object',
   properties: {

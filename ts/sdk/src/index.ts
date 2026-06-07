@@ -180,13 +180,6 @@ export type WorkflowHandler<Input = unknown, Output = unknown> = (
   ctx: WorkflowContext,
 ) => Awaitable<Output>;
 
-// @ts-ignore TS2664: workflow:extra is a host-provided virtual module.
-declare module "workflow:extra" {
-  export const sleep: WorkflowExtra["sleep"];
-  const extra: WorkflowExtra;
-  export default extra;
-}
-
 declare global {
   /** Global workflow arguments injected by the isolated workflow runner. */
   var args: WorkflowArgs;

@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: 'pod-diagnostics',
   description: 'Diagnose Kubernetes pod status with agent, parallel, and pipeline primitives',
@@ -12,6 +13,7 @@ const target = typeof args.target === 'string'
   ? args.target
   : 'pods that look unhealthy in the current Kubernetes context'
 
+/** @satisfies {import('@smol-workflows/sdk').JSONSchema} */
 const POD_LIST_SCHEMA = {
   type: 'object',
   properties: {
@@ -34,10 +36,10 @@ const POD_LIST_SCHEMA = {
 }
 
 phase('Discover')
-const { pods } = await agent(
+const { pods } = /** @type {{ pods: Array<{ namespace: string, name: string, reason: string }> }} */ (await agent(
   `List Kubernetes pods to inspect for this request: ${target}. Use kubectl if needed.`,
   { schema: POD_LIST_SCHEMA },
-)
+) ?? { pods: [] })
 
 phase('Inspect')
 const inspections = await parallel(pods.map((pod) => async () => {

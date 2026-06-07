@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: 'example-child-workflow',
   description: 'Child workflow used by examples/workflow-parent.mjs',
