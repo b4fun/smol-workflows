@@ -11,7 +11,8 @@ use crate::durable::json::{
 use crate::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventSink};
 use crate::metadata::read_workflow_metadata;
 use crate::workflow::{
-    run_agent_provider, run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner,
+    run_agent_provider_with_retry, run_workflow, RunWorkflowOptions, RunWorkflowResult,
+    WorkflowAgentRunner,
 };
 use anyhow::{bail, Context};
 use rusqlite::OptionalExtension;
@@ -25,17 +26,17 @@ use tokio::sync::watch;
 use super::sqlite::{new_id, now_ms, SqliteDurableStore};
 
 const WORKFLOW_TASK_NAME: &str = "workflow.run";
-const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const LOCAL_CLAIM_SCOPE: &str = "local";
+const DEFAULT_STEP_LEASE_MS: u64 = 60_000;
 
 /// Options for a local durable workflow run.
 pub struct LocalDurableRunOptions {
     pub script_path: PathBuf,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
+    pub model_map: BTreeMap<String, String>,
     pub budget_total: Option<u64>,
     pub max_parallel_agent_requests: Option<usize>,
-    pub max_attempts: u32,
     pub resume_run_id: Option<String>,
     pub cancel_rx: Option<watch::Receiver<bool>>,
     pub event_sink: Option<Arc<dyn crate::workflow::WorkflowEventSink>>,
@@ -48,9 +49,9 @@ impl LocalDurableRunOptions {
             script_path,
             args,
             agent_provider,
+            model_map: BTreeMap::new(),
             budget_total: None,
             max_parallel_agent_requests: None,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
             resume_run_id: None,
             cancel_rx: None,
             event_sink: None,
@@ -117,6 +118,18 @@ fn elapsed_nanos(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+fn durable_agent_step_lease_expires_at(
+    now: i64,
+    retry_policy: crate::workflow::AgentRetryPolicy,
+) -> i64 {
+    let retry_backoff_budget = retry_policy
+        .backoff_ms
+        .saturating_mul(u64::from(retry_policy.max_attempts.saturating_sub(1)));
+    let lease_ms = DEFAULT_STEP_LEASE_MS.saturating_add(retry_backoff_budget);
+    let lease_ms = i64::try_from(lease_ms).unwrap_or(i64::MAX);
+    now.saturating_add(lease_ms)
+}
+
 fn rfc3339_now() -> anyhow::Result<String> {
     Ok(time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?)
 }
@@ -136,16 +149,24 @@ pub struct SqliteDurableAgentRunner {
     run_id: String,
     root_run_id: String,
     worker_id: String,
+    cancel_rx: Option<watch::Receiver<bool>>,
     occurrences: Mutex<HashMap<String, u64>>,
 }
 
 impl SqliteDurableAgentRunner {
-    pub fn new(db_path: PathBuf, run_id: String, root_run_id: String, worker_id: String) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        run_id: String,
+        root_run_id: String,
+        worker_id: String,
+        cancel_rx: Option<watch::Receiver<bool>>,
+    ) -> Self {
         Self {
             db_path,
             run_id,
             root_run_id,
             worker_id,
+            cancel_rx,
             occurrences: Mutex::new(HashMap::new()),
         }
     }
@@ -167,6 +188,10 @@ impl SqliteDurableAgentRunner {
 
 #[async_trait::async_trait]
 impl WorkflowAgentRunner for SqliteDurableAgentRunner {
+    fn retry_in_runtime(&self) -> bool {
+        false
+    }
+
     async fn run_agent(
         &self,
         default_provider: Arc<dyn AgentProvider>,
@@ -184,6 +209,7 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
         let checkpoint_name = self.next_checkpoint_name(base_checkpoint_name)?;
         let input_json = serde_json::to_value(&input_signature)
             .context("failed to serialize durable agent input")?;
+        let retry_policy = crate::workflow::agent_retry_policy(&input.options)?;
 
         loop {
             let claim = {
@@ -196,7 +222,7 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
                     input_signature_json: &input_signature_json,
                     input_json: &input_json,
                     worker_id: &self.worker_id,
-                    lease_expires_at: now_ms() + 60_000,
+                    lease_expires_at: durable_agent_step_lease_expires_at(now_ms(), retry_policy),
                     now: now_ms(),
                 })?
             };
@@ -204,9 +230,13 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
             match claim {
                 AgentStepClaim::Replay(result) => return Ok(*result),
                 AgentStepClaim::Run { step_id } => {
-                    let provider_result =
-                        run_durable_agent_provider(default_provider, provider_override, input)
-                            .await;
+                    let provider_result = run_durable_agent_provider(
+                        default_provider,
+                        provider_override,
+                        input,
+                        self.cancel_rx.clone(),
+                    )
+                    .await;
                     let mut store = SqliteDurableStore::open(&self.db_path)?;
                     match provider_result {
                         Ok(result) => {
@@ -291,7 +321,6 @@ pub async fn run_local_durable_workflow(
 
     let owner_id = new_id("owner");
     let now = now_ms();
-    let max_attempts = options.max_attempts.max(1);
     let params_json = serde_json::to_value(LocalTaskParamsJSON {
         mode: DurableRunMode::Local,
         script_path: options.script_path.clone(),
@@ -319,7 +348,7 @@ pub async fn run_local_durable_workflow(
             workflow_run_json: &workflow_run_json,
             args_json: &options.args,
             budget_total: options.budget_total,
-            max_attempts,
+            max_attempts: 1,
             now,
         })?;
         (task_id, run_id, 1)
@@ -338,121 +367,109 @@ pub async fn run_local_durable_workflow(
             .context("failed to emit workflow started event")?;
     }
 
-    let last_attempt = first_attempt + max_attempts - 1;
-    let mut last_error: Option<anyhow::Error> = None;
-    for attempt in first_attempt..=last_attempt {
-        let attempt_id = new_id("attempt");
-        store.start_attempt(LocalAttemptStart {
-            task_id: &task_id,
-            run_id: &run_id,
-            attempt_id: &attempt_id,
-            owner_id: &owner_id,
-            attempt,
-            lease_expires_at: now_ms() + 60_000,
-            now: now_ms(),
-        })?;
+    let attempt = first_attempt;
+    let attempt_id = new_id("attempt");
+    store.start_attempt(LocalAttemptStart {
+        task_id: &task_id,
+        run_id: &run_id,
+        attempt_id: &attempt_id,
+        owner_id: &owner_id,
+        attempt,
+        lease_expires_at: now_ms() + 60_000,
+        now: now_ms(),
+    })?;
 
-        let agent_runner = store.path().map(|db_path| {
-            Arc::new(SqliteDurableAgentRunner::new(
-                db_path.to_path_buf(),
-                run_id.clone(),
-                run_id.clone(),
-                owner_id.clone(),
-            )) as Arc<dyn WorkflowAgentRunner>
-        });
+    let agent_runner = store.path().map(|db_path| {
+        Arc::new(SqliteDurableAgentRunner::new(
+            db_path.to_path_buf(),
+            run_id.clone(),
+            run_id.clone(),
+            owner_id.clone(),
+            options.cancel_rx.clone(),
+        )) as Arc<dyn WorkflowAgentRunner>
+    });
 
-        let result = run_workflow(RunWorkflowOptions {
-            script_path: options.script_path.clone(),
-            args: options.args.clone(),
-            agent_provider: Arc::clone(&options.agent_provider),
-            budget_total: options.budget_total,
-            budget_spent: 0,
-            nesting_depth: 0,
-            max_parallel_agent_requests: options.max_parallel_agent_requests,
-            agent_runner,
-            cancel_rx: options.cancel_rx.clone(),
-            event_sink: workflow_event_sink
-                .as_ref()
-                .map(|sink| Arc::clone(sink) as Arc<dyn WorkflowEventSink>),
-            event_parent_step_id: None,
-            event_stream_start: workflow_event_sink.as_ref().map(|sink| sink.start),
-            session_log_sink: options.session_log_sink.clone(),
-        })
-        .await;
+    let result = run_workflow(RunWorkflowOptions {
+        script_path: options.script_path.clone(),
+        args: options.args.clone(),
+        agent_provider: Arc::clone(&options.agent_provider),
+        model_map: options.model_map.clone(),
+        budget_total: options.budget_total,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: options.max_parallel_agent_requests,
+        agent_runner,
+        cancel_rx: options.cancel_rx.clone(),
+        event_sink: workflow_event_sink
+            .as_ref()
+            .map(|sink| Arc::clone(sink) as Arc<dyn WorkflowEventSink>),
+        event_parent_step_id: None,
+        event_stream_start: workflow_event_sink.as_ref().map(|sink| sink.start),
+        session_log_sink: options.session_log_sink.clone(),
+    })
+    .await;
 
-        match result {
-            Ok(workflow) => {
-                let completed_payload = serde_json::to_value(&workflow.output)
-                    .context("failed to serialize durable workflow output")?;
-                store.complete_attempt_and_task(LocalAttemptComplete {
+    match result {
+        Ok(workflow) => {
+            let completed_payload = serde_json::to_value(&workflow.output)
+                .context("failed to serialize durable workflow output")?;
+            store.complete_attempt_and_task(LocalAttemptComplete {
+                task_id: &task_id,
+                run_id: &run_id,
+                attempt_id: &attempt_id,
+                completed_payload: &completed_payload,
+                budget_spent: workflow.budget.spent,
+                now: now_ms(),
+            })?;
+            if let Some(event_sink) = workflow_event_sink.as_ref() {
+                event_sink
+                    .emit_scoped(WorkflowEvent::result(
+                        workflow.token_usage.input_tokens,
+                        workflow.token_usage.output_tokens,
+                        workflow.token_usage.total_tokens,
+                        workflow.output.result.clone(),
+                    ))
+                    .await
+                    .context("failed to emit workflow result event")?;
+            }
+            Ok(LocalDurableRunResult {
+                task_id,
+                run_id,
+                attempts: attempt,
+                workflow,
+            })
+        }
+        Err(error) => {
+            let failure_reason = serde_json::to_value(FailureReasonJSON {
+                message: error.to_string(),
+            })?;
+            if cancellation_requested(&options.cancel_rx) {
+                store.cancel_attempt_and_task(LocalAttemptCancel {
                     task_id: &task_id,
                     run_id: &run_id,
                     attempt_id: &attempt_id,
-                    completed_payload: &completed_payload,
-                    budget_spent: workflow.budget.spent,
+                    failure_reason: &failure_reason,
                     now: now_ms(),
                 })?;
-                if let Some(event_sink) = workflow_event_sink.as_ref() {
-                    event_sink
-                        .emit_scoped(WorkflowEvent::result(
-                            workflow.token_usage.input_tokens,
-                            workflow.token_usage.output_tokens,
-                            workflow.token_usage.total_tokens,
-                            workflow.output.result.clone(),
-                        ))
-                        .await
-                        .context("failed to emit workflow result event")?;
-                }
-                return Ok(LocalDurableRunResult {
-                    task_id,
-                    run_id,
-                    attempts: attempt,
-                    workflow,
-                });
-            }
-            Err(error) => {
-                let failure_reason = serde_json::to_value(FailureReasonJSON {
-                    message: error.to_string(),
-                })?;
-                if cancellation_requested(&options.cancel_rx) {
-                    store.cancel_attempt_and_task(LocalAttemptCancel {
-                        task_id: &task_id,
-                        run_id: &run_id,
-                        attempt_id: &attempt_id,
-                        failure_reason: &failure_reason,
-                        now: now_ms(),
-                    })?;
-                    if let Some(event_sink) = workflow_event_sink.as_ref() {
-                        event_sink
-                            .emit_scoped(WorkflowEvent::error(error.to_string(), None))
-                            .await
-                            .context("failed to emit workflow error event")?;
-                    }
-                    return Err(error);
-                }
-                let terminal = attempt >= last_attempt;
+            } else {
                 store.fail_attempt(LocalAttemptFail {
                     task_id: &task_id,
                     run_id: &run_id,
                     attempt_id: &attempt_id,
                     failure_reason: &failure_reason,
-                    terminal,
+                    terminal: true,
                     now: now_ms(),
                 })?;
-                if terminal {
-                    if let Some(event_sink) = workflow_event_sink.as_ref() {
-                        event_sink
-                            .emit_scoped(WorkflowEvent::error(error.to_string(), None))
-                            .await
-                            .context("failed to emit workflow error event")?;
-                    }
-                }
-                last_error = Some(error);
             }
+            if let Some(event_sink) = workflow_event_sink.as_ref() {
+                event_sink
+                    .emit_scoped(WorkflowEvent::error(error.to_string(), None))
+                    .await
+                    .context("failed to emit workflow error event")?;
+            }
+            Err(error)
         }
     }
-
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("durable workflow failed without an error")))
 }
 
 pub struct LocalTaskAndRunInsert<'a> {
@@ -1313,8 +1330,9 @@ async fn run_durable_agent_provider(
     default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
     input: AgentProviderRunInput,
+    cancel_rx: Option<watch::Receiver<bool>>,
 ) -> anyhow::Result<AgentProviderResult> {
-    run_agent_provider(default_provider, provider_override, input).await
+    run_agent_provider_with_retry(default_provider, provider_override, input, cancel_rx).await
 }
 
 fn agent_input_signature(provider_name: &str, input: &AgentProviderRunInput) -> Value {
@@ -1388,6 +1406,10 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct FlakyOnceProvider {
+        calls: AtomicUsize,
+    }
+
     struct TimedProvider {
         events: Mutex<Vec<TimedProviderEvent>>,
     }
@@ -1420,6 +1442,33 @@ mod tests {
             let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(AgentProviderResult {
                 output: json!(format!("{}:{count}", input.prompt)),
+                session_id: None,
+                model: None,
+                usage: None,
+                isolation: None,
+                raw: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentProvider for FlakyOnceProvider {
+        fn name(&self) -> &str {
+            "flaky-once"
+        }
+        fn schema_mode(&self) -> AgentProviderSchemaMode {
+            AgentProviderSchemaMode::Builtin
+        }
+        fn usage_mode(&self) -> AgentProviderUsageMode {
+            AgentProviderUsageMode::Builtin
+        }
+        async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                bail!("temporary provider failure")
+            }
+            Ok(AgentProviderResult {
+                output: json!(format!("recovered: {}", input.prompt)),
                 session_id: None,
                 model: None,
                 usage: None,
@@ -1595,6 +1644,23 @@ mod tests {
             lease_expires_at,
             now,
         }
+    }
+
+    #[test]
+    fn durable_agent_retry_backoff_extends_step_lease_deadline() {
+        let no_retry = crate::workflow::AgentRetryPolicy {
+            max_attempts: 1,
+            backoff_ms: 0,
+        };
+        let long_backoff = crate::workflow::AgentRetryPolicy {
+            max_attempts: 3,
+            backoff_ms: 120_000,
+        };
+        assert_eq!(durable_agent_step_lease_expires_at(1_000, no_retry), 61_000);
+        assert_eq!(
+            durable_agent_step_lease_expires_at(1_000, long_backoff),
+            301_000
+        );
     }
 
     #[test]
@@ -2207,7 +2273,6 @@ throw new Error("middle failure");
         });
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
-        options.max_attempts = 1;
         options.session_log_sink = Some(Arc::new(TestSessionLogSink {
             root: raw_dir.clone(),
             saved_tx: None,
@@ -2336,7 +2401,7 @@ export default { result: await agent("hello") };
     }
 
     #[tokio::test]
-    async fn local_durable_run_replays_agent_step_on_retry() {
+    async fn local_durable_run_uses_runtime_agent_retry_without_global_retry() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("durable.db");
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
@@ -2344,7 +2409,55 @@ export default { result: await agent("hello") };
         fs::write(
             &script_path,
             r#"
-export const meta = { name: "durable-retry", description: "durable retry" };
+export const meta = { name: "durable-runtime-retry", description: "durable runtime retry" };
+export default { result: await agent("hello", { retry: { maxAttempts: 2, backoffMs: 0 } }) };
+"#,
+        )
+        .unwrap();
+        let provider = Arc::new(FlakyOnceProvider {
+            calls: AtomicUsize::new(0),
+        });
+
+        let result = run_local_durable_workflow(
+            &mut store,
+            LocalDurableRunOptions::new(script_path, json!({}), provider.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.workflow.output.result,
+            json!({ "result": "recovered: hello" })
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        let (workflow_attempts, completed_steps, failed_steps): (i64, i64, i64) = store
+            .connection()
+            .query_row(
+                r#"
+                SELECT
+                  (SELECT COUNT(*) FROM sw_workflow_attempts),
+                  (SELECT COUNT(*) FROM sw_workflow_steps WHERE step_kind = 'agent' AND state = 'completed'),
+                  (SELECT COUNT(*) FROM sw_workflow_steps WHERE step_kind = 'agent' AND state = 'failed')
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(workflow_attempts, 1);
+        assert_eq!(completed_steps, 1);
+        assert_eq!(failed_steps, 0);
+    }
+
+    #[tokio::test]
+    async fn local_durable_run_records_one_attempt_without_global_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        let script_path = dir.path().join("workflow.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export const meta = { name: "durable-no-global-retry", description: "durable no global retry" };
 await agent("hello");
 throw new Error("boom");
 export default { unreachable: true };
@@ -2354,8 +2467,7 @@ export default { unreachable: true };
         let provider = Arc::new(CountingProvider {
             calls: AtomicUsize::new(0),
         });
-        let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider.clone());
-        options.max_attempts = 2;
+        let options = LocalDurableRunOptions::new(script_path, json!({}), provider.clone());
 
         let error = run_local_durable_workflow(&mut store, options)
             .await
@@ -2369,7 +2481,7 @@ export default { unreachable: true };
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(attempts, 2);
+        assert_eq!(attempts, 1);
         let completed_steps: i64 = store
             .connection()
             .query_row(
@@ -2417,9 +2529,8 @@ export default { value };
         let provider = Arc::new(CountingProvider {
             calls: AtomicUsize::new(0),
         });
-        let mut first_options =
+        let first_options =
             LocalDurableRunOptions::new(script_path.clone(), json!({}), provider.clone());
-        first_options.max_attempts = 1;
         let first_error = run_local_durable_workflow(&mut store, first_options)
             .await
             .unwrap_err();
@@ -2442,7 +2553,6 @@ export default { value };
         .unwrap();
         let mut resume_options =
             LocalDurableRunOptions::new(script_path.clone(), json!({}), provider.clone());
-        resume_options.max_attempts = 1;
         resume_options.resume_run_id = Some(run_id);
         let resumed = run_local_durable_workflow(&mut store, resume_options)
             .await

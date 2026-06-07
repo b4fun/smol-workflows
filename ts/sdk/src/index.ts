@@ -93,6 +93,20 @@ export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
   tasks: Tasks,
 ) => Promise<ParallelResults<Tasks>>;
 
+/** Retry policy for an individual agent call. */
+export type AgentRetryOptions = {
+  /**
+   * Total number of provider attempts for this agent call, including the first try.
+   * Defaults to `1` when omitted.
+   */
+  maxAttempts?: number;
+  /**
+   * Fixed delay in milliseconds before each retry after a failed provider attempt.
+   * Defaults to `0` when omitted.
+   */
+  backoffMs?: number;
+};
+
 /** Agent options mirrored from the Dynamic Workflow reference. */
 export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
   /** Optional stable checkpoint key for durable replay; defaults to occurrence-based keys when omitted. */
@@ -120,6 +134,8 @@ export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchem
   isolation?: "worktree";
   /** Optional provider-specific subagent/agent type, such as `Explore` or `code-reviewer`. */
   agentType?: string;
+  /** Optional per-call retry policy for transient provider failures. */
+  retry?: AgentRetryOptions;
 };
 
 /** Options for a single agent run supported by this SDK. */

@@ -770,6 +770,86 @@ fn run_supports_agent_provider_debug() {
 }
 
 #[test]
+fn run_accepts_model_map_flag() {
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args([
+            "--agent-provider",
+            "debug",
+            "--model-map",
+            "deep:gpt-5.5?provider=github-copilot&thinking=medium",
+            "--args-my-arg1",
+            "model-map",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout["results"]["result"], "echo: hello model-map");
+}
+
+#[test]
+fn run_persists_resolved_model_map_in_durable_steps() {
+    let dir = temp_dir("model-map-db");
+    let db_path = dir.join("model-map.db");
+    let script = dir.join("model-map.mjs");
+    fs::write(
+        &script,
+        r#"
+export const meta = { name: "model-map-db", description: "Model map DB" };
+export default { result: await agent("mapped", { model: "deep" }) };
+"#,
+    )
+    .expect("workflow should be written");
+
+    let output = smol_wf()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-provider",
+            "debug",
+            "--model-map",
+            "deep:gpt-5.5?provider=github-copilot&thinking=medium",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let connection = Connection::open(&db_path).expect("db should open");
+    let (input_json, result_json): (String, String) = connection
+        .query_row(
+            "SELECT input_json, result_json FROM sw_workflow_steps WHERE step_kind = 'agent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("agent step should be stored");
+    let input: serde_json::Value = serde_json::from_str(&input_json).expect("input JSON");
+    let result: serde_json::Value = serde_json::from_str(&result_json).expect("result JSON");
+
+    assert_eq!(input["options"]["model"], "github-copilot/gpt-5.5");
+    assert_eq!(input["options"]["requestedModel"], "deep");
+    assert_eq!(
+        input["options"]["modelSelector"],
+        "gpt-5.5?provider=github-copilot&thinking=medium"
+    );
+    assert_eq!(input["options"]["modelProvider"], "github-copilot");
+    assert_eq!(input["options"]["thinking"], "medium");
+    assert_eq!(result["model"], "github-copilot/gpt-5.5");
+}
+
+#[test]
 fn run_supports_dim_debug_logging() {
     let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args(["--log-level", "debug", "--args-my-arg1", "logging"])

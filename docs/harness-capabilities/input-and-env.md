@@ -15,10 +15,11 @@ For now, it focuses on **transporting the prompt safely** and on the minimum exe
 3. **Use prompt files when stdin is not the harness contract:** for CLIs that support file references in the initial message, write the prompt to a temporary file and pass the file reference instead of the full prompt.
 4. **Use API request bodies for server harnesses:** when a provider uses a server/session API, put prompt text in the JSON request body rather than in the process argv.
 5. **Keep argv for flags and small selectors:** model names, agent types, output modes, schema-file paths, and other short configuration values are appropriate CLI arguments.
-6. **Honor `cwd`:** every provider must run the harness in the workflow working directory, or pass the equivalent project/directory field when using a server/API transport.
-7. **Support engine-managed worktree isolation:** when `agent(..., { isolation: "worktree" })` is requested, the workflow engine creates a fresh git worktree from the workflow `cwd` repository and passes that worktree as the provider `cwd` for the call.
-8. **Do not reshape the host harness by default:** at this stage, providers should not add extra harness/provider modifications beyond the requested agent call. They should follow the host's normal setup, including pre-installed skills, instructions, context files, extensions, plugins, or agent configuration when the harness would normally load them.
-9. **Preserve diagnostics without leaking prompt text:** logs may include prompt length, temp-file paths, cwd, and argument shapes, but should avoid dumping full prompts.
+6. **Honor explicit model selection:** when `options.model` is present after workflow/phase defaulting, providers must map it to the harness's supported model selector instead of burying it in the prompt or silently ignoring it.
+7. **Honor `cwd`:** every provider must run the harness in the workflow working directory, or pass the equivalent project/directory field when using a server/API transport.
+8. **Support engine-managed worktree isolation:** when `agent(..., { isolation: "worktree" })` is requested, the workflow engine creates a fresh git worktree from the workflow `cwd` repository and passes that worktree as the provider `cwd` for the call.
+9. **Do not reshape the host harness by default:** at this stage, providers should not add extra harness/provider modifications beyond the requested agent call. They should follow the host's normal setup, including pre-installed skills, instructions, context files, extensions, plugins, or agent configuration when the harness would normally load them.
+10. **Preserve diagnostics without leaking prompt text:** logs may include prompt length, temp-file paths, cwd, and argument shapes, but should avoid dumping full prompts.
 
 ## Cross-provider input transport rules
 
@@ -87,6 +88,100 @@ Provider status:
 6. removes the worktree and deletes the temporary branch after the agent run completes.
 
 If the workflow `cwd` is not inside a git repository, `isolation: "worktree"` fails with a clear error. The isolated worktree is intended for agent calls that may modify files without touching the caller's working tree. Temporary prompt/schema/output files may still live outside the isolated worktree. Cleanup is best-effort on failures: normal provider errors still trigger worktree removal and branch deletion, while process-kill or machine-failure scenarios may leave stale git worktree metadata for manual cleanup.
+
+## Model selection (`model`)
+
+`model` is a provider-specific selector for the model to use for one `agent(prompt, options)` call. It is intentionally separate from `provider`:
+
+- `provider` selects the harness integration, such as `codex`, `claude-code`, `pi`, or `opencode`.
+- `model` selects the model within the chosen harness when that harness exposes a model override.
+
+Expected selection logic:
+
+1. Apply workflow/runtime defaulting first, including any phase-level `model` metadata that should apply to the current `phase(...)`.
+2. If no effective model is present, do not pass a model flag or API field; let the selected harness use its normal default/session model.
+3. If an effective model is present, resolve any runner-supported aliases for the selected provider before invoking the harness.
+4. Pass the resolved model through the harness's supported model selector, such as `--model <model>` for CLI providers or a request-body `model` field for server/session providers.
+5. If a supplied model cannot be resolved or represented for the selected provider, fail the call with a clear configuration error rather than silently falling back to the harness default.
+6. Preserve the originally requested `options.model` for diagnostics and fallback reporting, but report the observed/resolved model from provider metadata separately as described in [`budget-and-usage.md`](./budget-and-usage.md#model-reporting).
+
+Provider status:
+
+| Provider | Expected model transport |
+| --- | --- |
+| `debug` | No external selection; may echo `options.model` in diagnostics/result metadata when supplied. |
+| `codex` | Pass the resolved model with `codex exec --model <model>`. |
+| `claude-code` | Pass the resolved model with `claude --model <model>`. |
+| `pi` | Pass the resolved model with `pi --model <model>`. |
+| `opencode` | CLI mode passes `opencode run --model <model>`; server/session mode converts the resolved model into the API `model` body shape expected by OpenCode, including `providerID`/`modelID` when required. |
+
+Model resolution should never be prompt-mediated. If a harness does not expose a model selector for a future provider, that provider should reject explicit `model` values or document a provider-specific exception.
+
+### Thinking/reasoning settings
+
+The workflow SDK does not currently expose a generic `thinking`, `effort`, `reasoning`, or `variant` agent option. Provider integrations should therefore not infer thinking settings from the generic `model` field except where the target harness explicitly defines that syntax and the runner's model-alias layer intentionally resolves to it.
+
+Expected behavior:
+
+1. Do not prompt-mediate thinking/reasoning settings.
+2. Do not overload `model` with provider-specific effort settings unless the harness documents that combined syntax, such as Pi's `model:<thinking>` shorthand.
+3. If a future alias-resolution layer maps one workflow alias to multiple provider settings, such as `{ model, thinking }` or `{ model, variant }`, apply those settings through the harness's native flags/API fields and preserve the expanded values in diagnostics.
+4. If a provider exposes a thinking display flag separately from a reasoning-effort setting, keep those concepts separate. Displaying thinking blocks is not the same as selecting a reasoning effort.
+
+Provider status from current help output:
+
+| Provider | Help surface | Expected mapping today |
+| --- | --- | --- |
+| `debug` | No external harness thinking concept. | No-op; useful tests should not depend on thinking selection. |
+| `codex` | `codex exec --help` documents `--model` and generic `-c key=value` config overrides, but no first-class thinking/reasoning-effort flag. | Do not map a generic workflow option today. A future Codex-specific option may use documented config keys through `-c`, but should not be inferred from `model`. |
+| `claude-code` | `claude --help` documents `--effort <level>` with `low`, `medium`, `high`, `xhigh`, and `max`. | No generic workflow mapping today. A future provider-specific option can pass `--effort <level>`; do not encode effort in `model`. |
+| `pi` | `pi --help` documents `--thinking <level>` with `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`; `--model <pattern>` also supports optional `:<thinking>`. | Preserve `:<thinking>` only when the resolved Pi model string intentionally includes it. Otherwise, a future provider-specific option should pass `--thinking <level>` separately. |
+| `opencode` | `opencode run --help` documents `--variant` as provider-specific reasoning effort and `--thinking` as a boolean to show thinking blocks. | Treat `--variant` as reasoning-effort selection and `--thinking` as display control. Neither is part of generic `model` today. |
+
+### Model selector syntax and alias resolution
+
+The workflow `model` string is treated as a runner-resolved selector before it is handed to a provider. The selector syntax is:
+
+```txt
+<model-id>[?provider=<model-provider>&thinking=<level>]
+```
+
+Examples:
+
+```txt
+gpt-5.5
+gpt-5.5?provider=github-copilot
+gpt-5.5?provider=github-copilot&thinking=medium
+github-copilot/gpt-5.5
+```
+
+Semantics:
+
+- `<model-id>` is the model identifier within a model provider.
+- `provider` is the model provider qualifier, not the smol-workflows agent provider selected by `agent(..., { provider })` or `--agent-provider`.
+- `thinking` is a portable reasoning-effort hint. It is resolved with the model selector but applied through provider-specific reasoning controls, not through prompt text.
+- A slash-qualified model such as `github-copilot/gpt-5.5` is equivalent to `gpt-5.5?provider=github-copilot` for harnesses that use `provider/model` syntax.
+- If both slash qualification and `?provider=...` are present, they must agree. Conflicting provider qualifiers are configuration errors.
+- Unknown query parameters are configuration errors. They should not be silently ignored because misspellings would otherwise change model selection.
+
+Model aliases can be supplied by the runner, for example from repeated CLI flags such as:
+
+```sh
+--model-map='deep:gpt-5.5?provider=github-copilot&thinking=medium'
+--model-map='fast:gpt-5.4-nano?provider=github-copilot&thinking=low'
+```
+
+Alias resolution order:
+
+1. Determine the effective workflow model string after per-call options, phase metadata, and runtime defaults are applied.
+2. If the effective string exactly matches a model-map alias key, replace it with that alias value.
+3. If there is no alias match, treat the effective string as a literal model selector so provider-native names such as `sonnet` continue to work.
+4. Expand aliases at most once. Alias values are parsed directly as selectors, even if they happen to match another alias key.
+5. Parse the resulting value as the model selector syntax above.
+6. Validate that the selected agent provider can represent the resolved model provider and thinking settings.
+7. Invoke the harness using native model and reasoning controls.
+
+For example, `model: "deep"` with `--model-map=deep:gpt-5.5?provider=github-copilot&thinking=medium` resolves to model ID `gpt-5.5`, model provider `github-copilot`, and thinking level `medium`. A provider that supports provider-qualified model IDs should pass the model as `github-copilot/gpt-5.5`, then pass `medium` through the harness's reasoning setting.
 
 ## Agent type selection (`agentType`)
 
@@ -250,12 +345,27 @@ Current `pi --help` documents:
 Usage:
   pi [options] [@files...] [messages...]
 
+Options:
+  --provider <name>              Provider name (default: google)
+  --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
+  --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
+  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
+
 Examples:
   # Include files in initial message
   pi @prompt.md @image.png "What color is the sky?"
 
   # Non-interactive mode (process and exit)
   pi -p "List all .ts files in src/"
+
+  # Use different model
+  pi --provider openai --model gpt-4o-mini "Help me refactor this code"
+
+  # Use model with provider prefix (no --provider needed)
+  pi --model openai/gpt-4o "Help me refactor this code"
+
+  # Use model with thinking level shorthand
+  pi --model sonnet:high "Solve this complex problem"
 ```
 
 ### Current behavior
@@ -277,6 +387,10 @@ Implementation requirements:
 - Write long prompts to a temporary text/Markdown file.
 - Pass the prompt file as `@<path>`.
 - Keep generated structured-output extensions as separate `--extension <path>` files.
+- When an effective workflow `model` is present, pass it via Pi's model selector, not in the prompt.
+- Prefer the fully qualified `provider/model` form when the model resolution layer knows the provider, because Pi help documents that this form avoids needing a separate `--provider` flag.
+- If the selected model intentionally includes Pi's thinking shorthand, preserve the `:<thinking>` suffix; otherwise pass resolved `thinking` as `--thinking <level>`.
+- Do not use Pi's `--models` cycling list for one-off workflow model selection; it is an interactive cycling setting, while `agent(..., { model })` should select a single model.
 - Consider always using `@file` for generated/schema-augmented prompts if consistency is more important than avoiding temp-file creation.
 
 ### References
@@ -297,8 +411,25 @@ Positionals:
   message  message to send
 
 Options:
+  -m, --model                         model to use in the format of provider/model
+      --agent                         agent to use
+      --format                        format: default (formatted) or json (raw JSON events)
   -f, --file                          file(s) to attach to message
-  --format                            format: default (formatted) or json (raw JSON events)
+      --dir                           directory to run in, path on remote server if attaching
+      --variant                       model variant (provider-specific reasoning effort, e.g., high,
+                                      max, minimal)
+      --thinking                      show thinking blocks
+```
+
+Current `opencode --help` also documents related provider/model commands and top-level selection:
+
+```txt
+Commands:
+  opencode providers           manage AI providers and credentials
+  opencode models [provider]   list all available models
+
+Options:
+  -m, --model                  model to use in the format of provider/model
 ```
 
 The help shows message text as positional argv and `--file` as an attachment mechanism. It does not document stdin as the initial-message transport for `opencode run`, and `--file` should not be assumed to be equivalent to replacing the prompt with file contents.
@@ -332,6 +463,17 @@ Implementation requirements:
   - use the API path for all OpenCode calls for consistency.
 - Do not treat `--file <prompt-file>` as a prompt replacement unless OpenCode documents that exact semantics.
 - Keep CLI positional message use only for short prompts if the provider remains CLI-based.
+- When an effective workflow `model` is present in CLI mode, pass it as `--model <provider/model>`.
+- When using the server/session API, split the same resolved `provider/model` value into OpenCode's request-body model object, e.g. `{ "providerID": "<provider>", "modelID": "<model>" }`.
+- Require an OpenCode model value to include a provider component before invoking the harness, because the documented `--model` format is `provider/model` and the server API needs provider identity separately.
+- Treat resolved `thinking` as OpenCode's model variant/reasoning-effort selector: pass it as `--variant <level>` in CLI mode and as top-level request body field `"variant": "<level>"` in server/session mode.
+- Keep OpenCode's `--thinking` boolean separate; it controls whether thinking blocks are shown and is not the same as selecting reasoning effort.
+
+OpenCode implementation notes:
+
+- The generated OpenCode JS SDK for `POST /session/{sessionID}/message` includes body fields `model`, `agent`, `format`, `parts`, and `variant`.
+- The generated OpenCode types model session messages with `model: { providerID, modelID, variant? }`.
+- OpenCode core applies `session.model?.variant` through catalog model variants before constructing the provider request.
 
 ### References
 
