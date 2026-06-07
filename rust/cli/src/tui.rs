@@ -34,7 +34,8 @@ const MAX_REPLAY_SPEED: f64 = 64.0;
 const SEARCH_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
 const LIVE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(33);
 const LIVE_EVENTS_PER_TICK: usize = 256;
-const SPINNER_INTERVAL_NANOS: i128 = 100_000_000;
+const TIMELINE_BOTTOM_MARGIN: u16 = 2;
+const BREATHING_LIGHT_INTERVAL_NANOS: i128 = 140_000_000;
 
 #[derive(Clone)]
 pub struct ReplayCommandOptions {
@@ -1319,13 +1320,20 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
 
     let query = app.search_query.to_ascii_lowercase();
     let height = usize::from(content_area.height).max(1);
-    let start = scroll_start(app.selected, rows.len(), height);
-    let items = rows
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(row_index, row)| {
+    let bottom_margin = usize::from(TIMELINE_BOTTOM_MARGIN);
+    let virtual_len = rows.len().saturating_add(bottom_margin);
+    let virtual_selected = if rows.is_empty() {
+        0
+    } else {
+        app.selected.saturating_add(bottom_margin)
+    };
+    let start = scroll_start(virtual_selected, virtual_len, height);
+    let end = start.saturating_add(height).min(virtual_len);
+    let items = (start..end)
+        .map(|row_index| {
+            let Some(row) = rows.get(row_index) else {
+                return ListItem::new(Line::from(""));
+            };
             let event_index = row.event_index();
             let summary = timeline_row_summary(app, row);
             let selected = row_index == app.selected;
@@ -1507,13 +1515,14 @@ fn centered_rect(
         .split(vertical[1])[1]
 }
 
-fn running_spinner() -> &'static str {
-    const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-    let tick = (OffsetDateTime::now_utc().unix_timestamp_nanos() / SPINNER_INTERVAL_NANOS) as usize;
+fn breathing_light() -> &'static str {
+    const FRAMES: [&str; 8] = ["·", "∙", "•", "●", "●", "•", "∙", "·"];
+    let tick = (OffsetDateTime::now_utc().unix_timestamp_nanos() / BREATHING_LIGHT_INTERVAL_NANOS)
+        as usize;
     FRAMES[tick % FRAMES.len()]
 }
 
-fn status_line(app: &TuiReplayApp) -> String {
+fn status_line(app: &TuiReplayApp) -> Line<'static> {
     let run_id = app
         .events
         .first()
@@ -1531,37 +1540,53 @@ fn status_line(app: &TuiReplayApp) -> String {
     };
     if let Some(live_status) = app.live_status {
         let status = match live_status {
-            LiveStatus::Running => format!("{} LIVE_RUNNING", running_spinner()),
-            LiveStatus::Cancelling => format!("{} LIVE_CANCELLING", running_spinner()),
-            LiveStatus::Done => "✓ LIVE_DONE".to_string(),
-            LiveStatus::Failed => "✗ LIVE_FAILED".to_string(),
+            LiveStatus::Running => format!("{} LIVE RUNNING", breathing_light()),
+            LiveStatus::Cancelling => format!("{} LIVE CANCELLING", breathing_light()),
+            LiveStatus::Done => "✓ LIVE DONE".to_string(),
+            LiveStatus::Failed => "✗ LIVE FAILED".to_string(),
         };
         let error = app
             .live_error
             .as_ref()
             .map(|error| format!("  error: {}", truncate(error, 80)))
             .unwrap_or_default();
-        return format!(
-            " {status}  {run_id}  events {}  tab {}/{}  time {time_mode}{error}",
-            app.events.len(),
-            app.active_tab + 1,
-            app.tabs.len(),
-        );
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                status,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  {run_id}  events {}  tab {}/{}  time {time_mode}{error}",
+                app.events.len(),
+                app.active_tab + 1,
+                app.tabs.len(),
+            )),
+        ]);
     }
     let playback = match app.playback {
-        PlaybackState::Playing => "REPLAY_PLAYING",
-        PlaybackState::Paused if app.replay_complete() => "REPLAY_DONE",
-        PlaybackState::Paused => "REPLAY_PAUSED",
+        PlaybackState::Playing => "REPLAY PLAYING",
+        PlaybackState::Paused if app.replay_complete() => "REPLAY DONE",
+        PlaybackState::Paused => "REPLAY PAUSED",
     };
-    format!(
-        " {playback}  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x  time {time_mode}{}",
-        app.events.len(),
-        app.source_events.len(),
-        app.active_tab + 1,
-        app.tabs.len(),
-        app.speed,
-        warnings
-    )
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            playback.to_string(),
+            Style::default()
+                .fg(Color::Rgb(255, 165, 0))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x  time {time_mode}{}",
+            app.events.len(),
+            app.source_events.len(),
+            app.active_tab + 1,
+            app.tabs.len(),
+            app.speed,
+            warnings
+        )),
+    ])
 }
 
 fn timeline_row_summary(app: &TuiReplayApp, row: &TimelineRow) -> String {

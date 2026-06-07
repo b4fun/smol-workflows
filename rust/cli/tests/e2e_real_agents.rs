@@ -3,9 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::{Duration, Instant};
+
+fn smol_wf_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_smol-wf")
+}
 
 fn smol_wf() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_smol-wf"))
+    Command::new(smol_wf_bin())
 }
 
 struct TempWorkspace {
@@ -308,6 +313,20 @@ fn assert_event_envelopes(provider: &str, events: &[Value]) {
                 );
                 previous_elapsed = assert_elapsed(provider, index, event, previous_elapsed);
             }
+            "workflow.agent_started" => {
+                let step_id = event["metadata"]["stepId"].as_str().unwrap_or_else(|| {
+                    panic!("provider={provider} agent_started should include stepId: {event:#?}")
+                });
+                assert!(
+                    step_id.starts_with("step_") && step_id.len() > "step_".len(),
+                    "provider={provider} stepId should be opaque step_* id, got {step_id}: {event:#?}"
+                );
+                assert_eq!(
+                    event["metadata"]["provider"], provider,
+                    "provider={provider} agent_started provider metadata mismatch: {event:#?}"
+                );
+                previous_elapsed = assert_elapsed(provider, index, event, previous_elapsed);
+            }
             "workflow.agent_event" => {
                 let step_id = event["metadata"]["stepId"].as_str().unwrap_or_else(|| {
                     panic!("provider={provider} agent event should include stepId: {event:#?}")
@@ -325,10 +344,42 @@ fn assert_event_envelopes(provider: &str, events: &[Value]) {
                     "provider={provider} agent event should include sessionId: {event:#?}"
                 );
                 assert!(
-                    event["data"].is_object() || event["data"].is_array(),
-                    "provider={provider} agent event data should be raw provider object/array: {event:#?}"
+                    event["data"].is_object(),
+                    "provider={provider} agent event data should be session-event wrapper object: {event:#?}"
+                );
+                assert_eq!(
+                    event["data"]["provider"], provider,
+                    "provider={provider} agent event data provider mismatch: {event:#?}"
+                );
+                assert_eq!(
+                    event["data"]["sessionId"], event["metadata"]["sessionId"],
+                    "provider={provider} agent event data sessionId should mirror metadata: {event:#?}"
+                );
+                assert!(
+                    !event["data"]["providerEvent"].is_null(),
+                    "provider={provider} agent event should include providerEvent: {event:#?}"
                 );
                 previous_elapsed = assert_elapsed(provider, index, event, previous_elapsed);
+            }
+            "workflow.agent_completed" => {
+                assert!(
+                    event["metadata"]["stepId"].as_str().is_some(),
+                    "provider={provider} agent_completed should include stepId: {event:#?}"
+                );
+                assert_eq!(
+                    event["metadata"]["provider"], provider,
+                    "provider={provider} agent_completed provider metadata mismatch: {event:#?}"
+                );
+                assert!(
+                    event["metadata"]["sessionId"].as_str().is_some(),
+                    "provider={provider} agent_completed should include sessionId: {event:#?}"
+                );
+                previous_elapsed = assert_elapsed(provider, index, event, previous_elapsed);
+            }
+            "workflow.agent_failed" => {
+                panic!(
+                    "provider={provider} successful e2e should not emit agent_failed: {event:#?}"
+                );
             }
             "workflow.result" => {
                 assert!(
@@ -461,15 +512,15 @@ fn assert_provider_agent_event_format(provider: &str, agent_events: &[&Value]) {
             let session = agent_events
                 .iter()
                 .find(|event| {
-                    event["data"]["type"] == "session_meta"
-                        || event["data"]["type"] == "thread.started"
+                    event["data"]["providerEvent"]["type"] == "session_meta"
+                        || event["data"]["providerEvent"]["type"] == "thread.started"
                 })
                 .unwrap_or_else(|| {
                     panic!("codex should emit session_meta/thread.started event: {agent_events:#?}")
                 });
-            let payload_session_id = session["data"]["payload"]["id"]
+            let payload_session_id = session["data"]["providerEvent"]["payload"]["id"]
                 .as_str()
-                .or_else(|| session["data"]["thread_id"].as_str());
+                .or_else(|| session["data"]["providerEvent"]["thread_id"].as_str());
             assert_eq!(
                 payload_session_id,
                 session["metadata"]["sessionId"].as_str(),
@@ -477,8 +528,8 @@ fn assert_provider_agent_event_format(provider: &str, agent_events: &[&Value]) {
             );
             assert!(
                 agent_events.iter().any(|event| {
-                    event["data"]["type"] == "turn_complete"
-                        || event["data"]["type"] == "turn.completed"
+                    event["data"]["providerEvent"]["type"] == "turn_complete"
+                        || event["data"]["providerEvent"]["type"] == "turn.completed"
                 }),
                 "codex should emit turn completion event: {agent_events:#?}"
             );
@@ -487,14 +538,16 @@ fn assert_provider_agent_event_format(provider: &str, agent_events: &[&Value]) {
             assert!(
                 agent_events
                     .iter()
-                    .any(|event| event["data"]["type"].as_str().is_some()),
+                    .any(|event| event["data"]["providerEvent"]["type"].as_str().is_some()),
                 "pi should emit typed raw session events: {agent_events:#?}"
             );
             assert!(
                 agent_events.iter().any(|event| {
-                    event["data"]["id"] == event["metadata"]["sessionId"]
-                        || event["data"]["sessionId"] == event["metadata"]["sessionId"]
-                        || event["data"]["session_id"] == event["metadata"]["sessionId"]
+                    event["data"]["providerEvent"]["id"] == event["metadata"]["sessionId"]
+                        || event["data"]["providerEvent"]["sessionId"]
+                            == event["metadata"]["sessionId"]
+                        || event["data"]["providerEvent"]["session_id"]
+                            == event["metadata"]["sessionId"]
                 }),
                 "pi should emit at least one event carrying the session id: {agent_events:#?}"
             );
@@ -502,34 +555,33 @@ fn assert_provider_agent_event_format(provider: &str, agent_events: &[&Value]) {
         "claude-code" => {
             let event = agent_events
                 .iter()
-                .find(|event| event["data"]["response"].is_object())
+                .find(|event| event["data"]["providerEvent"].is_object())
                 .unwrap_or_else(|| {
-                    panic!("claude-code should emit response wrapper: {agent_events:#?}")
+                    panic!("claude-code should emit providerEvent wrapper: {agent_events:#?}")
                 });
             assert_eq!(
-                event["data"]["response"]["session_id"], event["metadata"]["sessionId"],
-                "claude-code response session_id should match metadata sessionId"
+                event["data"]["providerEvent"]["session_id"], event["metadata"]["sessionId"],
+                "claude-code providerEvent session_id should match metadata sessionId"
             );
             assert!(
-                event["data"]["response"]["type"].as_str().is_some()
-                    || event["data"]["response"]["result"].is_string(),
-                "claude-code response should include provider result shape: {event:#?}"
+                event["data"]["providerEvent"]["type"].as_str().is_some()
+                    || event["data"]["providerEvent"]["result"].is_string(),
+                "claude-code providerEvent should include provider result shape: {event:#?}"
             );
         }
         "opencode" => {
             let event = agent_events
                 .iter()
-                .find(|event| {
-                    event["data"]["response"].is_object()
-                        || event["data"]["response"].is_array()
-                        || event["data"]["session"].is_object()
-                })
+                .find(|event| event["data"]["providerEvent"].is_object())
                 .unwrap_or_else(|| {
-                    panic!("opencode should emit response/session wrapper: {agent_events:#?}")
+                    panic!("opencode should emit providerEvent wrapper: {agent_events:#?}")
                 });
             assert!(
-                contains_value(&event["data"], &event["metadata"]["sessionId"]),
-                "opencode raw payload should contain metadata sessionId: {event:#?}"
+                contains_value(
+                    &event["data"]["providerEvent"],
+                    &event["metadata"]["sessionId"]
+                ),
+                "opencode providerEvent should contain metadata sessionId: {event:#?}"
             );
         }
         other => panic!("unsupported e2e provider for event format assertions: {other}"),
@@ -618,6 +670,190 @@ fn run_provider_examples(provider: &str) {
     assert!(
         parent_results["synthesis"].is_string(),
         "provider={provider}"
+    );
+}
+
+fn tmux(args: &[&str]) -> std::process::Output {
+    Command::new("tmux")
+        .args(args)
+        .output()
+        .expect("tmux command should execute")
+}
+
+fn require_tmux() {
+    let output = Command::new("tmux").arg("-V").output();
+    assert!(
+        output.as_ref().is_ok_and(|output| output.status.success()),
+        "tmux is required for this e2e test"
+    );
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn tui_tmux_command(provider: &str, workspace: &TempWorkspace) -> String {
+    let db_path = workspace.path.join(format!("tui-{provider}.db"));
+    let max_parallel = max_parallel_agents();
+    [
+        shell_quote(smol_wf_bin()),
+        "tui".to_string(),
+        "run".to_string(),
+        shell_quote(&workspace.script("events.mjs")),
+        "--db".to_string(),
+        shell_quote(&db_path.to_string_lossy()),
+        "--agent-provider".to_string(),
+        shell_quote(provider),
+        "--max-parallel-agents".to_string(),
+        shell_quote(&max_parallel),
+        "--args-provider".to_string(),
+        shell_quote(provider),
+    ]
+    .join(" ")
+}
+
+fn tmux_capture_pane(pane: &str) -> String {
+    let output = tmux(&["capture-pane", "-p", "-t", pane]);
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[test]
+#[ignore = "requires tmux and configured real agent providers; opens one smol-wf tui run pane per provider"]
+fn e2e_real_agents_tui_tmux_panes() {
+    require_tmux();
+    let providers = real_agent_providers();
+    assert!(
+        !providers.is_empty(),
+        "SMOL_WF_E2E_AGENT_PROVIDERS must include at least one provider"
+    );
+
+    let session = format!("smol-wf-e2e-{}", std::process::id());
+    let timeout_secs = std::env::var("SMOL_WF_E2E_TMUX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let attach = env_flag("SMOL_WF_E2E_TMUX_ATTACH");
+    let keep_session = attach || env_flag("SMOL_WF_E2E_TMUX_KEEP_SESSION");
+    let workspaces = providers
+        .iter()
+        .map(|provider| TempWorkspace::new(provider))
+        .collect::<Vec<_>>();
+    let mut panes = Vec::<(String, String)>::new();
+
+    let first_cmd = format!(
+        "sh -lc {}",
+        shell_quote(&tui_tmux_command(&providers[0], &workspaces[0]))
+    );
+    let output = tmux(&[
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        &session,
+        "-n",
+        "providers",
+        &first_cmd,
+    ]);
+    assert!(
+        output.status.success(),
+        "failed to create tmux session: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    panes.push((
+        providers[0].clone(),
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ));
+
+    for (index, provider) in providers.iter().enumerate().skip(1) {
+        let cmd = format!(
+            "sh -lc {}",
+            shell_quote(&tui_tmux_command(provider, &workspaces[index]))
+        );
+        let output = tmux(&[
+            "split-window",
+            "-t",
+            &session,
+            "-v",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ]);
+        assert!(
+            output.status.success(),
+            "failed to split tmux pane for provider={provider}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        panes.push((
+            provider.clone(),
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+        let _ = tmux(&["select-layout", "-t", &session, "tiled"]);
+    }
+
+    eprintln!("tmux live-TUI e2e session: {session}");
+    eprintln!("attach with: tmux attach-session -t {session}");
+    if attach {
+        let status = Command::new("tmux")
+            .args(["attach-session", "-t", &session])
+            .status()
+            .expect("tmux attach-session should execute");
+        assert!(status.success(), "tmux attach-session failed");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut done = vec![false; panes.len()];
+    while Instant::now() < deadline && done.iter().any(|done| !*done) {
+        for (index, (provider, pane)) in panes.iter().enumerate() {
+            if done[index] {
+                continue;
+            }
+            let capture = tmux_capture_pane(pane);
+            if capture.contains("LIVE FAILED") || capture.contains("workflow task stopped") {
+                if !keep_session {
+                    let _ = tmux(&["kill-session", "-t", &session]);
+                }
+                panic!("provider={provider} TUI pane failed:\n{capture}");
+            }
+            if capture.contains("LIVE DONE") {
+                done[index] = true;
+                if !keep_session {
+                    let _ = tmux(&["send-keys", "-t", pane, "q"]);
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    let captures = panes
+        .iter()
+        .map(|(provider, pane)| {
+            format!(
+                "provider={provider} pane={pane}\n{}",
+                tmux_capture_pane(pane)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    if keep_session {
+        eprintln!("leaving tmux session alive for inspection: tmux attach-session -t {session}");
+    } else {
+        let _ = tmux(&["kill-session", "-t", &session]);
+    }
+    assert!(
+        done.iter().all(|done| *done),
+        "not all provider TUI panes reached LIVE DONE before {timeout_secs}s:\n{captures}"
     );
 }
 
