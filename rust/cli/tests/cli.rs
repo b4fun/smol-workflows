@@ -153,10 +153,80 @@ fn llm_txt_prints_llm_usage() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("smol-wf LLM usage"));
     assert!(stdout.contains("smol-wf llm list-workflows"));
+    assert!(stdout.contains("smol-wf llm skills [--claude]"));
+    assert!(stdout.contains(".agents|.claude/skills/smol-workflows"));
     assert!(stdout.contains("smol-wf run <workflow-script>"));
     assert!(stdout.contains("Workflow primitives syntax"));
     assert!(stdout.contains("pipeline(items, stage1, stage2, ...)"));
     assert!(stdout.contains("tokenUsage"));
+}
+
+#[test]
+fn llm_skills_installs_workspace_skill_files() {
+    let root = temp_dir("llm-skills");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["llm", "skills"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Installed smol-workflows skills"));
+    assert!(stdout.contains("Files layout:"));
+    assert!(stdout.contains(".agents/skills/smol-workflows/"));
+
+    let skills_root = root.join(".agents/skills/smol-workflows");
+    assert!(skills_root.join("create/SKILL.md").is_file());
+    assert!(skills_root.join("list/SKILL.md").is_file());
+    assert!(skills_root.join("run/SKILL.md").is_file());
+    assert!(skills_root.join("scripts/smol-wf.sh").is_file());
+
+    let list_skill = fs::read_to_string(skills_root.join("list/SKILL.md"))
+        .expect("list skill should be readable");
+    assert!(list_skill.contains("List smol-workflows"));
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(skills_root.join("scripts/smol-wf.sh"))
+            .expect("script metadata should be readable");
+        assert_ne!(metadata.permissions().mode() & 0o111, 0);
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn llm_skills_claude_installs_under_claude_dir() {
+    let root = temp_dir("llm-skills-claude");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["llm", "skills", "--claude"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(".claude/skills/smol-workflows/"));
+
+    let skills_root = root.join(".claude/skills/smol-workflows");
+    assert!(skills_root.join("create/SKILL.md").is_file());
+    assert!(skills_root.join("list/SKILL.md").is_file());
+    assert!(skills_root.join("run/SKILL.md").is_file());
+    assert!(skills_root.join("scripts/smol-wf.sh").is_file());
+    assert!(!root.join(".agents/skills/smol-workflows").exists());
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

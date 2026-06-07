@@ -38,6 +38,36 @@ The output is plain text and includes:
 
 The embedded source text for this command lives in `rust/cli/assets/llm.txt`.
 
+## `skills`
+
+Install smol-workflows skill files into the current workspace.
+
+```sh
+smol-wf llm skills [--claude]
+```
+
+The command resolves the current Git repository root when possible, otherwise it uses the current directory. By default, it writes this workspace-local layout:
+
+```txt
+.agents/skills/smol-workflows/
+  create/SKILL.md        Skill for authoring workflow scripts
+  list/SKILL.md          Skill for discovering available workflows
+  run/SKILL.md           Skill for running workflow scripts
+  scripts/smol-wf.sh     Shared helper used by the skills
+```
+
+With `--claude`, it writes the same files under `.claude` instead:
+
+```txt
+.claude/skills/smol-workflows/
+  create/SKILL.md        Skill for authoring workflow scripts
+  list/SKILL.md          Skill for discovering available workflows
+  run/SKILL.md           Skill for running workflow scripts
+  scripts/smol-wf.sh     Shared helper used by the skills
+```
+
+Existing files at these paths are overwritten with the bundled versions, which makes the command useful for both initial installation and refreshing the skill files after upgrading `smol-wf`.
+
 ## `list-workflows`
 
 List workflow scripts discoverable from the current Git repository.

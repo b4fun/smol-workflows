@@ -12,6 +12,9 @@ Commands:
   smol-wf llm txt
     Print this LLM-oriented usage text.
 
+  smol-wf llm skills [--claude]
+    Install smol-workflows skills under .agents|.claude/skills/smol-workflows.
+
   smol-wf llm list-workflows
     List discoverable workflow scripts from the current Git repository.
     Searches .agents/workflows and .claude/workflows for .js/.mjs files

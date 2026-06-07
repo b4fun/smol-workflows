@@ -75,6 +75,16 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
         }
         Some(("llm", matches)) => match matches.subcommand() {
             Some(("txt", _)) => llm_txt_command(Vec::new()).await,
+            Some(("skills", matches)) => {
+                llm_skills_command(LlmSkillsOptions {
+                    target: if matches.get_flag("claude") {
+                        SkillInstallTarget::Claude
+                    } else {
+                        SkillInstallTarget::Agents
+                    },
+                })
+                .await
+            }
             Some(("list-workflows", _)) => list_workflows_command(Vec::new()).await,
             _ => Ok(()),
         },
@@ -952,6 +962,98 @@ async fn llm_txt_command(argv: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct SkillAsset {
+    relative_path: &'static str,
+    content: &'static str,
+    executable: bool,
+}
+
+const SKILL_ASSETS: &[SkillAsset] = &[
+    SkillAsset {
+        relative_path: "create/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/create/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "list/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/list/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "run/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/run/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "scripts/smol-wf.sh",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/scripts/smol-wf.sh"),
+        executable: true,
+    },
+];
+
+#[derive(Clone, Copy)]
+enum SkillInstallTarget {
+    Agents,
+    Claude,
+}
+
+struct LlmSkillsOptions {
+    target: SkillInstallTarget,
+}
+
+impl SkillInstallTarget {
+    fn root_relative_path(self) -> &'static str {
+        match self {
+            SkillInstallTarget::Agents => ".agents/skills/smol-workflows",
+            SkillInstallTarget::Claude => ".claude/skills/smol-workflows",
+        }
+    }
+}
+
+async fn llm_skills_command(options: LlmSkillsOptions) -> anyhow::Result<()> {
+    let cwd = env::current_dir()?;
+    let workspace_root = find_repo_root(&cwd).unwrap_or(cwd);
+    let skills_root = workspace_root.join(options.target.root_relative_path());
+    fs::create_dir_all(&skills_root)?;
+
+    for asset in SKILL_ASSETS {
+        let destination = skills_root.join(asset.relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, asset.content)?;
+        set_asset_permissions(&destination, asset.executable)?;
+    }
+
+    println!(
+        "Installed smol-workflows skills into {}",
+        skills_root.display()
+    );
+    println!();
+    println!("Files layout:");
+    println!("  {}/", options.target.root_relative_path());
+    println!("    create/SKILL.md        Skill for authoring workflow scripts");
+    println!("    list/SKILL.md          Skill for discovering available workflows");
+    println!("    run/SKILL.md           Skill for running workflow scripts");
+    println!("    scripts/smol-wf.sh     Shared helper used by the skills");
+    Ok(())
+}
+
+fn set_asset_permissions(path: &Path, executable: bool) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = executable;
+    }
+    Ok(())
+}
+
 async fn list_workflows_command(argv: Vec<String>) -> anyhow::Result<()> {
     if !argv.is_empty() {
         anyhow::bail!("llm list-workflows does not accept options yet");
@@ -1771,6 +1873,16 @@ fn cli_command() -> ClapCommand {
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(ClapCommand::new("txt").about("Print LLM-oriented usage text"))
+                .subcommand(
+                    ClapCommand::new("skills")
+                        .about("Install smol-workflows skills into the current workspace")
+                        .arg(
+                            Arg::new("claude")
+                                .long("claude")
+                                .help("Install under .claude/skills instead of .agents/skills")
+                                .action(clap::ArgAction::SetTrue),
+                        ),
+                )
                 .subcommand(ClapCommand::new("list-workflows").about("List discoverable workflows")),
         )
 }
