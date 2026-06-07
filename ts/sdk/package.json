@@ -1,6 +1,6 @@
 {
   "name": "@smol-workflows/sdk",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "TypeScript SDK and workflow runtime types for smol-workflow.",
   "license": "MIT",
   "repository": {
