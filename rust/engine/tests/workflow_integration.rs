@@ -332,6 +332,7 @@ fn run_debug(
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run")
 }
@@ -377,6 +378,7 @@ fn run_with_provider(
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
 }
 
@@ -537,6 +539,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .unwrap_err();
     assert!(no_meta
@@ -556,6 +559,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .unwrap_err();
     assert!(missing_default
@@ -628,6 +632,7 @@ fn rejects_nested_child_workflow_fixture() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .unwrap_err();
 
@@ -657,6 +662,7 @@ fn applies_phase_metadata_defaults() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -694,6 +700,7 @@ fn agent_provider_option_overrides_default_provider() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -721,6 +728,7 @@ fn runs_parallel_agent_requests_concurrently() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -751,6 +759,7 @@ fn starts_follow_up_agent_requests_when_capacity_frees() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -781,6 +790,7 @@ fn honors_parallel_agent_request_limit() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -811,6 +821,7 @@ fn honors_serial_parallel_agent_request_limit() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -842,6 +853,7 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 
@@ -909,6 +921,7 @@ fn validates_schema_backed_agent_output_and_retries_once() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should retry and run");
 
@@ -938,6 +951,7 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .unwrap_err();
 
@@ -964,6 +978,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
         on_log: None,
         on_phase: None,
         on_agent_result: None,
+        on_agent_finished: None,
     }))
     .expect("workflow should run");
 

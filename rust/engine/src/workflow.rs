@@ -24,6 +24,8 @@ pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
 pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
 pub type WorkflowAgentResultCallback<'a> =
     &'a dyn Fn(&str, &str, &AgentProviderResult) -> anyhow::Result<()>;
+pub type WorkflowAgentFinishedCallback =
+    Arc<dyn Fn(&str, &str, &AgentProviderResult) -> anyhow::Result<()> + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait WorkflowAgentRunner: Send + Sync {
@@ -68,6 +70,7 @@ pub struct RunWorkflowOptions<'a> {
     pub on_log: Option<WorkflowLogCallback<'a>>,
     pub on_phase: Option<WorkflowPhaseCallback<'a>>,
     pub on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
+    pub on_agent_finished: Option<WorkflowAgentFinishedCallback>,
 }
 
 #[derive(Debug)]
@@ -189,6 +192,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
         on_log: options.on_log,
         on_phase: options.on_phase,
         on_agent_result: options.on_agent_result,
+        on_agent_finished: options.on_agent_finished,
     };
 
     let mut pending_requests = VecDeque::<WorkflowRuntimeRequest>::new();
@@ -362,6 +366,7 @@ struct RunState<'a> {
     on_log: Option<WorkflowLogCallback<'a>>,
     on_phase: Option<WorkflowPhaseCallback<'a>>,
     on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
+    on_agent_finished: Option<WorkflowAgentFinishedCallback>,
 }
 
 struct PreparedAgentRun {
@@ -578,7 +583,7 @@ impl<'a> RunState<'a> {
         self.reject_active_sleep_requests_for_cancellation(sleep_tasks, js_commands)
             .await;
 
-        if self.on_agent_result.is_some() {
+        if self.should_drain_agent_tasks_on_cancel() {
             while let Some(completion) = agent_tasks.join_next().await {
                 match completion {
                     Ok(AgentTaskCompletion {
@@ -591,8 +596,10 @@ impl<'a> RunState<'a> {
                         let provider_name = provider
                             .as_deref()
                             .unwrap_or_else(|| self.agent_provider.name());
-                        if let Some(on_agent_result) = self.on_agent_result {
-                            on_agent_result(&id, provider_name, &result)?;
+                        if self.on_agent_finished.is_none() {
+                            if let Some(on_agent_result) = self.on_agent_result {
+                                on_agent_result(&id, provider_name, &result)?;
+                            }
                         }
                         self.record_agent_run(&id, &input, provider, &result);
                         self.reject_request_for_cancellation(id, js_commands).await;
@@ -713,6 +720,10 @@ impl<'a> RunState<'a> {
         }
     }
 
+    fn should_drain_agent_tasks_on_cancel(&self) -> bool {
+        self.on_agent_result.is_some() || self.on_agent_finished.is_some()
+    }
+
     fn handle_call(&mut self, call: WorkflowRuntimeCall) {
         match call {
             WorkflowRuntimeCall::Log { values } => {
@@ -776,6 +787,7 @@ impl<'a> RunState<'a> {
             .provider_override
             .clone()
             .or(Some(default_provider_name));
+        let on_agent_finished = self.on_agent_finished.clone();
         let max_parallel = self
             .max_parallel_agent_requests
             .filter(|value| *value > 0)
@@ -788,13 +800,23 @@ impl<'a> RunState<'a> {
         );
         self.active_request_ids.insert(id.clone());
         agent_tasks.spawn(async move {
+            let result = agent_runner
+                .run_agent(default_provider, prepared.provider_override, prepared.input)
+                .await
+                .and_then(|result| {
+                    if let Some(on_agent_finished) = on_agent_finished.as_ref() {
+                        let provider_name = completion_provider
+                            .as_deref()
+                            .expect("completion provider should always be set");
+                        on_agent_finished(&id, provider_name, &result)?;
+                    }
+                    Ok(result)
+                });
             AgentTaskCompletion {
                 id,
                 input: completion_input,
                 provider: completion_provider,
-                result: agent_runner
-                    .run_agent(default_provider, prepared.provider_override, prepared.input)
-                    .await,
+                result,
             }
         });
     }
@@ -867,8 +889,10 @@ impl<'a> RunState<'a> {
         let provider_name = provider
             .as_deref()
             .unwrap_or_else(|| self.agent_provider.name());
-        if let Some(on_agent_result) = self.on_agent_result {
-            on_agent_result(id, provider_name, &result)?;
+        if self.on_agent_finished.is_none() {
+            if let Some(on_agent_result) = self.on_agent_result {
+                on_agent_result(id, provider_name, &result)?;
+            }
         }
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
@@ -942,6 +966,7 @@ impl<'a> RunState<'a> {
             on_log: self.on_log,
             on_phase: self.on_phase,
             on_agent_result: self.on_agent_result,
+            on_agent_finished: self.on_agent_finished.clone(),
         }))
         .await?;
         self.budget = child.budget;

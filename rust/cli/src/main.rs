@@ -1129,17 +1129,14 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         let _ = cancel_tx.send(true);
     });
     durable_options.cancel_rx = Some(cancel_rx);
-    let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
-        let dir = options
-            .save_raw_sessions
-            .as_deref()
-            .expect("agent result callback is only installed when raw session export is requested");
-        save_raw_session(dir, provider, result)
-    };
     durable_options.on_log = Some(&on_log);
     durable_options.on_phase = Some(&on_phase);
-    if options.save_raw_sessions.is_some() {
-        durable_options.on_agent_result = Some(&on_agent_result);
+    if let Some(raw_session_dir) = options.save_raw_sessions.clone() {
+        durable_options.on_agent_finished = Some(Arc::new(
+            move |_: &str, provider: &str, result: &AgentProviderResult| {
+                save_raw_session(&raw_session_dir, provider, result)
+            },
+        ));
     }
     let result = run_local_durable_workflow(&mut store, durable_options).await;
     cancel_task.abort();

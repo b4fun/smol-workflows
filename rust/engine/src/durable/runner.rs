@@ -40,6 +40,7 @@ pub struct LocalDurableRunOptions<'a> {
     pub on_log: Option<crate::workflow::WorkflowLogCallback<'a>>,
     pub on_phase: Option<crate::workflow::WorkflowPhaseCallback<'a>>,
     pub on_agent_result: Option<crate::workflow::WorkflowAgentResultCallback<'a>>,
+    pub on_agent_finished: Option<crate::workflow::WorkflowAgentFinishedCallback>,
 }
 
 impl<'a> LocalDurableRunOptions<'a> {
@@ -56,6 +57,7 @@ impl<'a> LocalDurableRunOptions<'a> {
             on_log: None,
             on_phase: None,
             on_agent_result: None,
+            on_agent_finished: None,
         }
     }
 }
@@ -300,6 +302,7 @@ pub async fn run_local_durable_workflow(
             on_log: options.on_log,
             on_phase: options.on_phase,
             on_agent_result: options.on_agent_result,
+            on_agent_finished: options.on_agent_finished.clone(),
         })
         .await;
 
@@ -2014,6 +2017,60 @@ export default { result: await agent("hello") };
     }
 
     #[tokio::test]
+    async fn local_durable_run_exports_raw_session_before_workflow_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let raw_dir = dir.path().join("raw");
+        let script_path = dir.path().join("workflow.mjs");
+        fs::write(
+            &script_path,
+            r#"
+import { sleep } from "workflow:extra";
+export const meta = { name: "durable-early-session", description: "durable early session" };
+await agent("before long sleep");
+await sleep(100);
+export default { ok: true };
+"#,
+        )
+        .unwrap();
+        let provider = Arc::new(SessionProvider {
+            session_id: "early-session-1",
+            cancel_on_run: None,
+            delay_ms: 0,
+        });
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
+        let (saved_tx, mut saved_rx) = tokio::sync::watch::channel(false);
+        let raw_session_dir = raw_dir.clone();
+        options.on_agent_finished = Some(Arc::new(
+            move |_: &str, provider: &str, result: &AgentProviderResult| {
+                write_test_raw_session(&raw_session_dir, provider, result)?;
+                let _ = saved_tx.send(true);
+                Ok(())
+            },
+        ));
+
+        let run = run_local_durable_workflow(&mut store, options);
+        tokio::pin!(run);
+        tokio::select! {
+            changed = saved_rx.changed() => {
+                changed.expect("raw session notification should be sent");
+                assert!(*saved_rx.borrow());
+                assert!(
+                    raw_dir.join("session/early-session-1.jsonl").exists(),
+                    "raw session file should be written before workflow completion"
+                );
+            }
+            result = &mut run => {
+                panic!("workflow completed before raw session export notification: {result:?}");
+            }
+        }
+
+        let result = run.await.expect("workflow should complete");
+        assert_eq!(result.workflow.output.result, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
     async fn local_durable_run_exports_raw_session_before_failed_terminal_state() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("durable.db");
@@ -2036,10 +2093,12 @@ throw new Error("middle failure");
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
         options.max_attempts = 1;
-        let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
-            write_test_raw_session(&raw_dir, provider, result)
-        };
-        options.on_agent_result = Some(&on_agent_result);
+        let raw_session_dir = raw_dir.clone();
+        options.on_agent_finished = Some(Arc::new(
+            move |_: &str, provider: &str, result: &AgentProviderResult| {
+                write_test_raw_session(&raw_session_dir, provider, result)
+            },
+        ));
 
         let error = run_local_durable_workflow(&mut store, options)
             .await
@@ -2083,10 +2142,12 @@ export default { result: await agent("before cancel") };
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
         options.cancel_rx = Some(cancel_rx);
-        let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
-            write_test_raw_session(&raw_dir, provider, result)
-        };
-        options.on_agent_result = Some(&on_agent_result);
+        let raw_session_dir = raw_dir.clone();
+        options.on_agent_finished = Some(Arc::new(
+            move |_: &str, provider: &str, result: &AgentProviderResult| {
+                write_test_raw_session(&raw_session_dir, provider, result)
+            },
+        ));
 
         let error = run_local_durable_workflow(&mut store, options)
             .await
