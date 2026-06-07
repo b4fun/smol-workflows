@@ -5,6 +5,7 @@
 
 pub mod agent_providers;
 pub mod durable;
+pub mod events;
 pub mod js_runtime;
 pub mod metadata;
 pub mod workflow;

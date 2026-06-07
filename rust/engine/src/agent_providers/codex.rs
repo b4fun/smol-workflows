@@ -69,6 +69,9 @@ async fn run_codex(
     let command = options.command.as_deref().unwrap_or("codex");
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());
+    if args.is_empty() {
+        args.push("exec".into());
+    }
     args.extend(options.args.clone());
     if cfg!(feature = "integration-test") && !args.iter().any(|arg| arg == "--skip-git-repo-check")
     {
@@ -315,6 +318,11 @@ fn extract_session_id(events: &[Value]) -> Option<String> {
     for event in events {
         if event.get("type").and_then(Value::as_str) == Some("session_meta") {
             if let Some(id) = get_path(event, &["payload", "id"]).and_then(Value::as_str) {
+                return Some(id.to_string());
+            }
+        }
+        if event.get("type").and_then(Value::as_str) == Some("thread.started") {
+            if let Some(id) = event.get("thread_id").and_then(Value::as_str) {
                 return Some(id.to_string());
             }
         }

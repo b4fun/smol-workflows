@@ -60,3 +60,5 @@ The CLI-backed providers mirror the TypeScript command construction, output extr
 ## Integration-test feature
 
 The crate has an `integration-test` feature for real-provider e2e tests that run in temporary workspaces. It enables test-only provider conveniences such as passing Codex `--skip-git-repo-check` automatically. This feature should not be enabled for normal builds unless that behavior is desired.
+
+The Codex provider invokes the real Codex CLI through the non-interactive `codex exec` subcommand by default. Tests that supply a custom `CodexAgentProviderOptions::subcommand` keep full control of the command arguments, which is how the fake Codex fixtures are exercised.

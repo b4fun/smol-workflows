@@ -293,6 +293,320 @@ fn run_supports_budget_allowance_flag() {
 }
 
 #[test]
+fn run_events_emits_jsonl_lifecycle_and_suppresses_final_report() {
+    let root = temp_dir("run-events");
+    let script = root.join("events.workflow.mjs");
+    fs::write(
+        &script,
+        r#"
+export const meta = { name: "events-test", description: "Events test" };
+phase("Inspect");
+log("checking", { target: "world" });
+export default { ok: true };
+"#,
+    )
+    .expect("workflow should be written");
+
+    let output = smol_wf_run(script.to_str().expect("script path should be utf8"))
+        .arg("--events")
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).is_empty(),
+        "human progress should not be written when --events is set"
+    );
+    let events = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line should be JSON"))
+        .collect();
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["type"], "workflow.started");
+    let run_id = events[0]["metadata"]["runId"]
+        .as_str()
+        .expect("run id should be present");
+    assert!(events[0]["data"]["startTime"].as_str().is_some());
+    assert_eq!(events[1]["type"], "workflow.phase");
+    assert_eq!(events[1]["metadata"]["runId"], run_id);
+    assert!(events[1]["elapsedNanos"].as_u64().is_some());
+    assert_eq!(events[1]["data"]["name"], "Inspect");
+    assert_eq!(events[2]["type"], "workflow.log");
+    assert_eq!(
+        events[2]["data"]["message"],
+        "checking {\"target\":\"world\"}"
+    );
+    assert_eq!(events[3]["type"], "workflow.result");
+    assert_eq!(events[3]["data"]["results"], json!({ "ok": true }));
+    assert_eq!(events[3]["metadata"]["runId"], run_id);
+}
+
+#[test]
+fn run_events_emits_child_workflow_lifecycle_with_scope_metadata() {
+    let root = temp_dir("run-events-child");
+    let parent = root.join("parent.workflow.mjs");
+    let child = root.join("child.workflow.mjs");
+    fs::write(
+        &parent,
+        r#"
+export const meta = { name: "cli-parent-events", description: "CLI parent events" };
+log("parent before");
+const child = await workflow({ scriptPath: "./child.workflow.mjs" }, { item: "cli" });
+log("parent after");
+export default { child };
+"#,
+    )
+    .expect("parent workflow should be written");
+    fs::write(
+        &child,
+        r#"
+export const meta = { name: "cli-child-events", description: "CLI child events" };
+phase("Child");
+log("child", args.item);
+export default { item: args.item };
+"#,
+    )
+    .expect("child workflow should be written");
+
+    let output = smol_wf_run(parent.to_str().expect("script path should be utf8"))
+        .arg("--events")
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line should be JSON"))
+        .collect();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        event_types,
+        vec![
+            "workflow.started",
+            "workflow.log",
+            "workflow.started",
+            "workflow.phase",
+            "workflow.log",
+            "workflow.result",
+            "workflow.log",
+            "workflow.result",
+        ]
+    );
+
+    let run_id = events[0]["metadata"]["runId"]
+        .as_str()
+        .expect("runId should be present")
+        .to_string();
+    for event in &events {
+        assert_eq!(event["metadata"]["runId"], run_id);
+    }
+    assert_eq!(events[0]["metadata"]["workflowDepth"], 0);
+    assert_eq!(events[2]["metadata"]["workflowDepth"], 1);
+    let parent_step_id = events[2]["metadata"]["parentStepId"]
+        .as_str()
+        .expect("child started should include parentStepId")
+        .to_string();
+    assert!(!parent_step_id.is_empty());
+    for event in &events[2..=5] {
+        assert_eq!(event["metadata"]["workflowDepth"], 1);
+        assert_eq!(event["metadata"]["parentStepId"], parent_step_id);
+        assert!(event["elapsedNanos"].as_u64().is_some());
+    }
+    assert_eq!(events.last().unwrap()["metadata"]["workflowDepth"], 0);
+    assert_eq!(
+        events.last().unwrap()["data"]["results"],
+        json!({ "child": { "item": "cli" } })
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn run_events_emits_codex_agent_events_from_provider_raw_events() {
+    let root = temp_dir("run-events-codex-agent");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+    let fake_codex = fs::canonicalize("../engine/tests/fixtures/fake-codex-provider.mjs")
+        .expect("fake codex fixture should exist");
+    let wrapper = bin_dir.join("codex");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec {} {} \"$@\"\n",
+            node(),
+            fake_codex.display()
+        ),
+    )
+    .expect("wrapper should be written");
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args([
+            "--agent-provider",
+            "codex",
+            "--events",
+            "--args-my-arg1",
+            "codex-events",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line should be JSON"))
+        .collect();
+    let agent_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["type"] == "workflow.agent_event")
+        .collect();
+    assert!(
+        agent_events.len() >= 3,
+        "codex raw events should be emitted as workflow.agent_event: {events:#?}"
+    );
+    assert_eq!(agent_events[0]["metadata"]["provider"], "codex");
+    assert_eq!(agent_events[0]["metadata"]["sessionId"], "codex-session-1");
+    assert!(agent_events[0]["metadata"]["stepId"].as_str().is_some());
+    assert_eq!(agent_events[0]["data"]["type"], "session_meta");
+    assert_eq!(agent_events[0]["data"]["payload"]["id"], "codex-session-1");
+    assert!(agent_events
+        .iter()
+        .any(|event| event["data"]["type"] == "turn_complete"));
+    assert_eq!(events.last().unwrap()["type"], "workflow.result");
+}
+
+#[test]
+#[cfg(unix)]
+fn run_events_emits_agent_events_from_provider_raw_result() {
+    let root = temp_dir("run-events-agent");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+    let fake_claude = fs::canonicalize("../engine/tests/fixtures/fake-claude-provider.mjs")
+        .expect("fake claude fixture should exist");
+    let wrapper = bin_dir.join("claude");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec {} {} \"$@\"\n",
+            node(),
+            fake_claude.display()
+        ),
+    )
+    .expect("wrapper should be written");
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args([
+            "--agent-provider",
+            "claude-code",
+            "--events",
+            "--args-my-arg1",
+            "events",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line should be JSON"))
+        .collect();
+    let agent_event = events
+        .iter()
+        .find(|event| event["type"] == "workflow.agent_event")
+        .expect("agent event should be emitted");
+    assert_eq!(agent_event["metadata"]["provider"], "claude-code");
+    assert_eq!(agent_event["metadata"]["sessionId"], "claude-session-1");
+    assert!(agent_event["metadata"]["stepId"].as_str().is_some());
+    assert_eq!(
+        agent_event["data"]["response"]["session_id"],
+        "claude-session-1"
+    );
+    assert_eq!(events.last().unwrap()["type"], "workflow.result");
+}
+
+#[test]
+fn run_events_emits_terminal_error_on_workflow_failure() {
+    let root = temp_dir("run-events-error");
+    let script = root.join("events-error.workflow.mjs");
+    fs::write(
+        &script,
+        r#"
+export const meta = { name: "events-error-test", description: "Events error test" };
+log("before failure");
+throw new Error("boom");
+"#,
+    )
+    .expect("workflow should be written");
+
+    let output = smol_wf_run(script.to_str().expect("script path should be utf8"))
+        .arg("--events")
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(!output.status.success());
+    let events = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line should be JSON"))
+        .collect();
+    assert_eq!(events[0]["type"], "workflow.started");
+    assert_eq!(events[1]["type"], "workflow.log");
+    assert_eq!(events.last().unwrap()["type"], "workflow.error");
+    assert!(events.last().unwrap()["data"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("boom"));
+}
+
+#[test]
 fn run_rejects_missing_raw_sessions_directory() {
     let missing = std::env::temp_dir().join(format!(
         "smol-wf-cli-missing-raw-sessions-{}",

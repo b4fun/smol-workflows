@@ -17,15 +17,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinSet, LocalSet};
 
-pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
-pub type WorkflowPhaseCallback<'a> = &'a dyn Fn(&WorkflowPhaseCall);
-pub type WorkflowAgentResultCallback<'a> =
-    &'a dyn Fn(&str, &str, &AgentProviderResult) -> anyhow::Result<()>;
-pub type WorkflowAgentFinishedCallback =
-    Arc<dyn Fn(&str, &str, &AgentProviderResult) -> anyhow::Result<()> + Send + Sync>;
+pub use crate::events::{
+    WorkflowEvent, WorkflowEventMetadata, WorkflowEventSink, WorkflowEventType,
+};
+
+#[async_trait::async_trait]
+pub trait AgentSessionLogSink: Send + Sync {
+    async fn write_agent_result(
+        &self,
+        provider: &str,
+        result: &AgentProviderResult,
+    ) -> anyhow::Result<()>;
+}
 
 #[async_trait::async_trait]
 pub trait WorkflowAgentRunner: Send + Sync {
@@ -57,7 +64,7 @@ impl WorkflowAgentRunner for DirectWorkflowAgentRunner {
     }
 }
 
-pub struct RunWorkflowOptions<'a> {
+pub struct RunWorkflowOptions {
     pub script_path: PathBuf,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
@@ -67,10 +74,10 @@ pub struct RunWorkflowOptions<'a> {
     pub max_parallel_agent_requests: Option<usize>,
     pub agent_runner: Option<Arc<dyn WorkflowAgentRunner>>,
     pub cancel_rx: Option<watch::Receiver<bool>>,
-    pub on_log: Option<WorkflowLogCallback<'a>>,
-    pub on_phase: Option<WorkflowPhaseCallback<'a>>,
-    pub on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
-    pub on_agent_finished: Option<WorkflowAgentFinishedCallback>,
+    pub event_sink: Option<Arc<dyn WorkflowEventSink>>,
+    pub event_parent_step_id: Option<String>,
+    pub event_stream_start: Option<Instant>,
+    pub session_log_sink: Option<Arc<dyn AgentSessionLogSink>>,
 }
 
 #[derive(Debug)]
@@ -122,11 +129,11 @@ pub struct WorkflowPhaseCall {
     pub options: Option<Value>,
 }
 
-pub async fn run_workflow(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
+pub async fn run_workflow(options: RunWorkflowOptions) -> anyhow::Result<RunWorkflowResult> {
     LocalSet::new().run_until(run_workflow_inner(options)).await
 }
 
-async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<RunWorkflowResult> {
+async fn run_workflow_inner(options: RunWorkflowOptions) -> anyhow::Result<RunWorkflowResult> {
     log::debug!(
         "run_workflow start script={} provider={} nesting_depth={} budget_total={:?} budget_spent={}",
         options.script_path.display(),
@@ -165,11 +172,15 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
 
     let (js_commands, js_command_rx) = mpsc::channel::<JsCommand>(64);
     let (js_event_tx, mut js_events) = mpsc::channel::<JsEvent>(64);
-    tokio::task::spawn_local(js_runtime_actor(execution, js_command_rx, js_event_tx));
+    let js_task = tokio::task::spawn_local(js_runtime_actor(execution, js_command_rx, js_event_tx));
+
+    let emit_lifecycle_events = options.event_sink.is_some();
+    let event_start = options.event_stream_start.unwrap_or_else(Instant::now);
 
     let mut state = RunState {
         script_path,
         metadata,
+        event_start,
         agent_provider: options.agent_provider,
         logs: Vec::new(),
         phases: Vec::new(),
@@ -189,30 +200,43 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
             .agent_runner
             .unwrap_or_else(|| Arc::new(DirectWorkflowAgentRunner)),
         cancel_rx: options.cancel_rx,
-        on_log: options.on_log,
-        on_phase: options.on_phase,
-        on_agent_result: options.on_agent_result,
-        on_agent_finished: options.on_agent_finished,
+        event_sink: options.event_sink,
+        event_parent_step_id: options.event_parent_step_id,
+        session_log_sink: options.session_log_sink,
     };
 
     let mut pending_requests = VecDeque::<WorkflowRuntimeRequest>::new();
     let mut agent_tasks = JoinSet::<AgentTaskCompletion>::new();
     let mut sleep_tasks = JoinSet::<SleepTaskCompletion>::new();
 
-    loop {
-        state
+    if emit_lifecycle_events {
+        if let Err(error) = state
+            .emit_event(WorkflowEvent::started(rfc3339_now()?))
+            .await
+        {
+            let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
+            let _ = js_task.await;
+            return Err(error);
+        }
+    }
+
+    let workflow_result: anyhow::Result<RunWorkflowResult> = loop {
+        if let Err(error) = state
             .start_pending_requests(
                 &mut pending_requests,
                 &mut agent_tasks,
                 &mut sleep_tasks,
                 &js_commands,
             )
-            .await?;
+            .await
+        {
+            break Err(error);
+        }
 
         tokio::select! {
             biased;
             () = wait_for_cancellation(&mut state.cancel_rx) => {
-                return state.cancel_workflow(
+                break state.cancel_workflow(
                     &mut pending_requests,
                     &mut agent_tasks,
                     &mut sleep_tasks,
@@ -221,35 +245,48 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                 ).await;
             }
             event = js_events.recv() => {
-                let event = event.ok_or_else(|| anyhow!("JavaScript runtime actor stopped unexpectedly"))?;
-                if let Some(result) = state.handle_js_event(event, &mut pending_requests).await? {
-                    let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
-                    return Ok(result);
+                let event = match event {
+                    Some(event) => event,
+                    None => break Err(anyhow!("JavaScript runtime actor stopped unexpectedly")),
+                };
+                match state.handle_js_event(event, &mut pending_requests).await {
+                    Ok(Some(result)) => break Ok(result),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
                 }
             }
             completion = agent_tasks.join_next(), if !agent_tasks.is_empty() => {
-                let completion = completion
-                    .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
-                    .map_err(|error| anyhow!("agent provider task failed: {error}"))?;
+                let completion = match completion {
+                    Some(Ok(completion)) => completion,
+                    Some(Err(error)) => break Err(anyhow!("agent provider task failed: {error}")),
+                    None => break Err(anyhow!("agent task set ended unexpectedly")),
+                };
                 let AgentTaskCompletion { id, input, provider, result } = completion;
                 state.active_request_ids.remove(&id);
-                let resolution = match result
-                    .and_then(|result| state.apply_agent_result(&id, &input, provider, result))
-                {
-                    Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
-                        value,
-                        budget: state.budget.clone(),
+                let resolution = match result {
+                    Ok(result) => match state.apply_agent_result(&id, &input, provider, result).await {
+                        Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
+                            value,
+                            budget: state.budget.clone(),
+                        },
+                        Err(error) => WorkflowRuntimeRequestResolution::Err {
+                            message: error.to_string(),
+                        },
                     },
                     Err(error) => WorkflowRuntimeRequestResolution::Err {
                         message: error.to_string(),
                     },
                 };
-                send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await?;
+                if let Err(error) = send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await {
+                    break Err(error);
+                }
             }
             completion = sleep_tasks.join_next(), if !sleep_tasks.is_empty() => {
-                let completion = completion
-                    .ok_or_else(|| anyhow!("sleep task set ended unexpectedly"))?
-                    .map_err(|error| anyhow!("sleep task failed: {error}"))?;
+                let completion = match completion {
+                    Some(Ok(completion)) => completion,
+                    Some(Err(error)) => break Err(anyhow!("sleep task failed: {error}")),
+                    None => break Err(anyhow!("sleep task set ended unexpectedly")),
+                };
                 let SleepTaskCompletion { id, result } = completion;
                 state.active_request_ids.remove(&id);
                 let resolution = match result {
@@ -258,10 +295,37 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                         message: error.to_string(),
                     },
                 };
-                send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await?;
+                if let Err(error) = send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await {
+                    break Err(error);
+                }
+            }
+        }
+    };
+
+    let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
+    let _ = js_task.await;
+
+    if emit_lifecycle_events {
+        match &workflow_result {
+            Ok(result) => {
+                state
+                    .emit_event(WorkflowEvent::result(
+                        result.token_usage.input_tokens,
+                        result.token_usage.output_tokens,
+                        result.token_usage.total_tokens,
+                        result.output.result.clone(),
+                    ))
+                    .await?
+            }
+            Err(error) => {
+                state
+                    .emit_event(WorkflowEvent::error(error.to_string(), None))
+                    .await?;
             }
         }
     }
+
+    workflow_result
 }
 
 enum JsCommand {
@@ -346,9 +410,10 @@ async fn send_js_command(
         .map_err(|_| anyhow!("JavaScript runtime actor stopped unexpectedly"))
 }
 
-struct RunState<'a> {
+struct RunState {
     script_path: PathBuf,
     metadata: WorkflowMetadata,
+    event_start: Instant,
     agent_provider: Arc<dyn AgentProvider>,
     logs: Vec<Vec<Value>>,
     phases: Vec<WorkflowPhaseCall>,
@@ -363,10 +428,9 @@ struct RunState<'a> {
     max_parallel_agent_requests: Option<usize>,
     agent_runner: Arc<dyn WorkflowAgentRunner>,
     cancel_rx: Option<watch::Receiver<bool>>,
-    on_log: Option<WorkflowLogCallback<'a>>,
-    on_phase: Option<WorkflowPhaseCallback<'a>>,
-    on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
-    on_agent_finished: Option<WorkflowAgentFinishedCallback>,
+    event_sink: Option<Arc<dyn WorkflowEventSink>>,
+    event_parent_step_id: Option<String>,
+    session_log_sink: Option<Arc<dyn AgentSessionLogSink>>,
 }
 
 struct PreparedAgentRun {
@@ -441,6 +505,35 @@ fn merge_cost(left: Option<&AgentUsageCost>, right: &AgentUsageCost) -> AgentUsa
     }
 }
 
+fn elapsed_nanos(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn rfc3339_now() -> anyhow::Result<String> {
+    Ok(time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?)
+}
+
+fn raw_agent_event_payloads(raw: &Value) -> Vec<Value> {
+    if let Some(events) = raw.get("events").and_then(Value::as_array) {
+        events.clone()
+    } else if let Some(items) = raw.as_array() {
+        items.clone()
+    } else {
+        vec![raw.clone()]
+    }
+}
+
+fn format_log_message(values: &[Value]) -> String {
+    values
+        .iter()
+        .map(|value| match value {
+            Value::String(value) => value.clone(),
+            value => serde_json::to_string(value).unwrap_or_else(|_| String::from("<unprintable>")),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
         (None, None) => None,
@@ -460,14 +553,14 @@ async fn wait_for_cancellation(cancel_rx: &mut Option<watch::Receiver<bool>>) {
     }
 }
 
-impl<'a> RunState<'a> {
+impl RunState {
     async fn handle_js_event(
         &mut self,
         event: JsEvent,
         pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
     ) -> anyhow::Result<Option<RunWorkflowResult>> {
         match event {
-            JsEvent::Call(call) => self.handle_call(call),
+            JsEvent::Call(call) => self.handle_call(call).await?,
             JsEvent::Request(request) => {
                 log::debug!(
                     "workflow runtime request id={} kind={}",
@@ -537,7 +630,11 @@ impl<'a> RunState<'a> {
                         workflow_ref: workflow_ref.clone(),
                         args: args.clone(),
                     });
-                    let resolution = match self.handle_workflow(workflow_ref, args).await {
+                    let parent_event_step_id = self.event_step_id(&id);
+                    let resolution = match self
+                        .handle_workflow(parent_event_step_id, workflow_ref, args)
+                        .await
+                    {
                         Ok(value) => WorkflowRuntimeRequestResolution::OkWithBudget {
                             value,
                             budget: self.budget.clone(),
@@ -583,7 +680,7 @@ impl<'a> RunState<'a> {
         self.reject_active_sleep_requests_for_cancellation(sleep_tasks, js_commands)
             .await;
 
-        if self.should_drain_agent_tasks_on_cancel() {
+        if self.session_log_sink.is_some() {
             while let Some(completion) = agent_tasks.join_next().await {
                 match completion {
                     Ok(AgentTaskCompletion {
@@ -593,13 +690,11 @@ impl<'a> RunState<'a> {
                         result: Ok(result),
                     }) => {
                         self.active_request_ids.remove(&id);
-                        let provider_name = provider
-                            .as_deref()
-                            .unwrap_or_else(|| self.agent_provider.name());
-                        if self.on_agent_finished.is_none() {
-                            if let Some(on_agent_result) = self.on_agent_result {
-                                on_agent_result(&id, provider_name, &result)?;
-                            }
+                        if let Err(error) = self
+                            .emit_agent_result_events(&id, provider.as_deref(), &result)
+                            .await
+                        {
+                            log::debug!("failed to emit drained agent events during cancellation: {error:#}");
                         }
                         self.record_agent_run(&id, &input, provider, &result);
                         self.reject_request_for_cancellation(id, js_commands).await;
@@ -641,7 +736,9 @@ impl<'a> RunState<'a> {
     ) -> bool {
         loop {
             match js_events.recv().await {
-                Some(JsEvent::Call(call)) => self.handle_call(call),
+                Some(JsEvent::Call(call)) => {
+                    let _ = self.handle_call(call).await;
+                }
                 Some(JsEvent::Request(request)) => {
                     self.reject_request_for_cancellation(request.id().to_string(), js_commands)
                         .await;
@@ -707,7 +804,9 @@ impl<'a> RunState<'a> {
     async fn drain_runtime_after_cancellation(&mut self, js_events: &mut mpsc::Receiver<JsEvent>) {
         while let Some(event) = js_events.recv().await {
             match event {
-                JsEvent::Call(call) => self.handle_call(call),
+                JsEvent::Call(call) => {
+                    let _ = self.handle_call(call).await;
+                }
                 JsEvent::Request(request) => {
                     log::debug!(
                         "ignoring request after cancellation id={} kind={}",
@@ -720,26 +819,53 @@ impl<'a> RunState<'a> {
         }
     }
 
-    fn should_drain_agent_tasks_on_cancel(&self) -> bool {
-        self.on_agent_result.is_some() || self.on_agent_finished.is_some()
+    fn event_step_id(&self, runtime_request_id: &str) -> String {
+        let parent = self.event_parent_step_id.as_deref().unwrap_or("");
+        let hash = blake3::hash(
+            format!("{parent}:{}:{runtime_request_id}", self.nesting_depth).as_bytes(),
+        );
+        format!("step_{}", &hash.to_hex()[..16])
     }
 
-    fn handle_call(&mut self, call: WorkflowRuntimeCall) {
+    async fn emit_event(&self, mut event: WorkflowEvent) -> anyhow::Result<()> {
+        if (event.event_type.as_str() != "workflow.started" || self.nesting_depth > 0)
+            && event.elapsed_nanos.is_none()
+        {
+            event.elapsed_nanos = Some(elapsed_nanos(self.event_start));
+        }
+        let metadata = event
+            .metadata
+            .get_or_insert_with(WorkflowEventMetadata::default);
+        if metadata.workflow_depth.is_none() {
+            metadata.workflow_depth = Some(u32::try_from(self.nesting_depth).unwrap_or(u32::MAX));
+        }
+        if metadata.parent_step_id.is_none() {
+            metadata.parent_step_id = self.event_parent_step_id.clone();
+        }
+        if let Some(event_sink) = self.event_sink.as_ref() {
+            event_sink.emit(event).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_call(&mut self, call: WorkflowRuntimeCall) -> anyhow::Result<()> {
         match call {
             WorkflowRuntimeCall::Log { values } => {
-                if let Some(on_log) = self.on_log {
-                    on_log(&values);
-                }
+                self.emit_event(WorkflowEvent::log(format_log_message(&values)))
+                    .await?;
                 self.logs.push(values);
             }
             WorkflowRuntimeCall::Phase { name, options } => {
                 let phase = WorkflowPhaseCall { name, options };
-                if let Some(on_phase) = self.on_phase {
-                    on_phase(&phase);
-                }
+                self.emit_event(WorkflowEvent::phase(
+                    phase.name.clone(),
+                    phase.options.clone(),
+                ))
+                .await?;
                 self.phases.push(phase);
             }
         }
+        Ok(())
     }
 
     fn agent_capacity_available(&self, in_flight: usize) -> bool {
@@ -787,7 +913,7 @@ impl<'a> RunState<'a> {
             .provider_override
             .clone()
             .or(Some(default_provider_name));
-        let on_agent_finished = self.on_agent_finished.clone();
+        let session_log_sink = self.session_log_sink.clone();
         let max_parallel = self
             .max_parallel_agent_requests
             .filter(|value| *value > 0)
@@ -800,18 +926,28 @@ impl<'a> RunState<'a> {
         );
         self.active_request_ids.insert(id.clone());
         agent_tasks.spawn(async move {
-            let result = agent_runner
+            let result = match agent_runner
                 .run_agent(default_provider, prepared.provider_override, prepared.input)
                 .await
-                .and_then(|result| {
-                    if let Some(on_agent_finished) = on_agent_finished.as_ref() {
+            {
+                Ok(result) => {
+                    if let Some(session_log_sink) = session_log_sink.as_ref() {
                         let provider_name = completion_provider
                             .as_deref()
                             .expect("completion provider should always be set");
-                        on_agent_finished(&id, provider_name, &result)?;
+                        match session_log_sink
+                            .write_agent_result(provider_name, &result)
+                            .await
+                        {
+                            Ok(()) => Ok(result),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        Ok(result)
                     }
-                    Ok(result)
-                });
+                }
+                Err(error) => Err(error),
+            };
             AgentTaskCompletion {
                 id,
                 input: completion_input,
@@ -879,24 +1015,18 @@ impl<'a> RunState<'a> {
         }
     }
 
-    fn apply_agent_result(
+    async fn apply_agent_result(
         &mut self,
         id: &str,
         input: &AgentProviderRunInput,
         provider: Option<String>,
         result: AgentProviderResult,
     ) -> anyhow::Result<Value> {
-        let provider_name = provider
-            .as_deref()
-            .unwrap_or_else(|| self.agent_provider.name());
-        if self.on_agent_finished.is_none() {
-            if let Some(on_agent_result) = self.on_agent_result {
-                on_agent_result(id, provider_name, &result)?;
-            }
-        }
         if let Some(output_tokens) = result.usage.as_ref().and_then(|usage| usage.output_tokens) {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
+        self.emit_agent_result_events(id, provider.as_deref(), &result)
+            .await?;
         self.record_agent_run(id, input, provider, &result);
         log::debug!(
             "agent call complete session_id={:?} output_tokens={:?} budget_spent={}",
@@ -905,6 +1035,33 @@ impl<'a> RunState<'a> {
             self.budget.spent
         );
         Ok(result.output)
+    }
+
+    async fn emit_agent_result_events(
+        &self,
+        id: &str,
+        provider: Option<&str>,
+        result: &AgentProviderResult,
+    ) -> anyhow::Result<()> {
+        let Some(raw) = result.raw.as_ref() else {
+            return Ok(());
+        };
+        let provider = provider
+            .unwrap_or_else(|| self.agent_provider.name())
+            .to_string();
+        let metadata = WorkflowEventMetadata {
+            run_id: None,
+            step_id: Some(self.event_step_id(id)),
+            provider: Some(provider),
+            session_id: result.session_id.clone(),
+            workflow_depth: None,
+            parent_step_id: None,
+        };
+        for event_data in raw_agent_event_payloads(raw) {
+            self.emit_event(WorkflowEvent::agent_event(event_data, metadata.clone()))
+                .await?;
+        }
+        Ok(())
     }
 
     fn record_agent_run(
@@ -940,6 +1097,7 @@ impl<'a> RunState<'a> {
 
     async fn handle_workflow(
         &mut self,
+        parent_step_id: String,
         workflow_ref: WorkflowRef,
         args: Option<Value>,
     ) -> anyhow::Result<Value> {
@@ -963,10 +1121,10 @@ impl<'a> RunState<'a> {
             max_parallel_agent_requests: self.max_parallel_agent_requests,
             agent_runner: Some(Arc::clone(&self.agent_runner)),
             cancel_rx: self.cancel_rx.clone(),
-            on_log: self.on_log,
-            on_phase: self.on_phase,
-            on_agent_result: self.on_agent_result,
-            on_agent_finished: self.on_agent_finished.clone(),
+            event_sink: self.event_sink.clone(),
+            event_parent_step_id: Some(parent_step_id),
+            event_stream_start: Some(self.event_start),
+            session_log_sink: self.session_log_sink.clone(),
         }))
         .await?;
         self.budget = child.budget;

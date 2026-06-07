@@ -17,22 +17,35 @@ use smol_workflow_engine::agent_providers::{create_agent_provider, AgentProvider
 use smol_workflow_engine::durable::json::WorkflowRunJSON;
 use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
+use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
 use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
+use smol_workflow_engine::workflow::AgentSessionLogSink;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(error) = run_cli(env::args().skip(1).collect()).await {
+        if is_broken_pipe(&error) {
+            return;
+        }
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+    })
 }
 
 async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
@@ -1076,33 +1089,7 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
 
     let provider: Arc<dyn smol_workflow_engine::agent_providers::AgentProvider> =
         Arc::from(create_agent_provider(&options.agent_provider)?);
-    let on_phase = |phase: &smol_workflow_engine::workflow::WorkflowPhaseCall| {
-        let mut stderr = io::stderr().lock();
-        match &phase.options {
-            Some(options) => {
-                let _ = writeln!(
-                    stderr,
-                    "[phase] {} {}",
-                    phase.name,
-                    format_log_value(options)
-                );
-            }
-            None => {
-                let _ = writeln!(stderr, "[phase] {}", phase.name);
-            }
-        }
-        let _ = stderr.flush();
-    };
-    let on_log = |values: &[Value]| {
-        let values = values
-            .iter()
-            .map(format_log_value)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut stderr = io::stderr().lock();
-        let _ = writeln!(stderr, "[log] {values}");
-        let _ = stderr.flush();
-    };
+
     if options.db_path_is_default {
         if let Some(parent) = options.db_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -1129,14 +1116,15 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         let _ = cancel_tx.send(true);
     });
     durable_options.cancel_rx = Some(cancel_rx);
-    durable_options.on_log = Some(&on_log);
-    durable_options.on_phase = Some(&on_phase);
+    durable_options.event_sink = if options.events {
+        Some(Arc::new(JsonlWorkflowEventSink::default()) as Arc<dyn WorkflowEventSink>)
+    } else {
+        Some(Arc::new(CliWorkflowEventSink) as Arc<dyn WorkflowEventSink>)
+    };
     if let Some(raw_session_dir) = options.save_raw_sessions.clone() {
-        durable_options.on_agent_finished = Some(Arc::new(
-            move |_: &str, provider: &str, result: &AgentProviderResult| {
-                save_raw_session(&raw_session_dir, provider, result)
-            },
-        ));
+        durable_options.session_log_sink = Some(Arc::new(FileAgentSessionLogSink {
+            root: raw_session_dir,
+        }));
     }
     let result = run_local_durable_workflow(&mut store, durable_options).await;
     cancel_task.abort();
@@ -1152,7 +1140,9 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         results: workflow.output.result,
     };
 
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !options.events {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
 }
 
@@ -1171,6 +1161,82 @@ async fn wait_for_cancel_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+struct CliWorkflowEventSink;
+
+#[async_trait::async_trait]
+impl WorkflowEventSink for CliWorkflowEventSink {
+    async fn emit(&self, event: WorkflowEvent) -> anyhow::Result<()> {
+        let mut stderr = io::stderr().lock();
+        match event.event_type.as_str() {
+            "workflow.phase" => {
+                let name = event
+                    .data
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>");
+                if let Some(options) = event.data.get("options") {
+                    writeln!(stderr, "[phase] {} {}", name, format_log_value(options))?;
+                } else {
+                    writeln!(stderr, "[phase] {name}")?;
+                }
+            }
+            "workflow.log" => {
+                let message = event
+                    .data
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                writeln!(stderr, "[log] {message}")?;
+            }
+            _ => {}
+        }
+        stderr.flush()?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct JsonlWorkflowEventSink {
+    broken_pipe: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl WorkflowEventSink for JsonlWorkflowEventSink {
+    async fn emit(&self, event: WorkflowEvent) -> anyhow::Result<()> {
+        if self.broken_pipe.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let line = serde_json::to_string(&event)?;
+        let mut stdout = io::stdout().lock();
+        if let Err(error) = writeln!(stdout, "{line}").and_then(|_| stdout.flush()) {
+            if error.kind() == io::ErrorKind::BrokenPipe {
+                self.broken_pipe.store(true, Ordering::Relaxed);
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+
+struct FileAgentSessionLogSink {
+    root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl AgentSessionLogSink for FileAgentSessionLogSink {
+    async fn write_agent_result(
+        &self,
+        provider: &str,
+        result: &AgentProviderResult,
+    ) -> anyhow::Result<()> {
+        let root = self.root.clone();
+        let provider = provider.to_string();
+        let result = result.clone();
+        tokio::task::spawn_blocking(move || save_raw_session(&root, &provider, &result)).await?
+    }
+}
+
 #[derive(Debug)]
 struct RunCliOptions {
     agent_provider: String,
@@ -1182,6 +1248,7 @@ struct RunCliOptions {
     resume_run_id: Option<String>,
     log_level: LevelFilter,
     save_raw_sessions: Option<PathBuf>,
+    events: bool,
 }
 
 fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
@@ -1194,6 +1261,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut db_path_is_default = true;
     let mut max_parallel_agent_requests = None;
     let mut save_raw_sessions = None;
+    let mut events = false;
     let mut index = 0;
 
     while index < argv.len() {
@@ -1286,6 +1354,12 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
             continue;
         }
 
+        if token == "--events" {
+            events = true;
+            index += 1;
+            continue;
+        }
+
         if is_workflow_arg_token(token) {
             workflow_arg_tokens.push(token.clone());
             if !token.contains('=') {
@@ -1318,6 +1392,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         resume_run_id,
         log_level,
         save_raw_sessions,
+        events,
     })
 }
 
@@ -1613,7 +1688,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
                 ),
         )
         .subcommand(

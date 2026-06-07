@@ -3,6 +3,7 @@ use smol_workflow_engine::agent_providers::{
     AgentProvider, AgentProviderResult, AgentProviderRunInput, AgentProviderSchemaMode,
     AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
 };
+use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
 use std::fs;
 use std::future::Future;
@@ -37,6 +38,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 struct FixedUsageProvider;
+struct RawEventsProvider;
 struct OptionsEchoProvider;
 struct ConcurrentProbeProvider {
     current: AtomicUsize,
@@ -55,6 +57,25 @@ struct CwdProbeProvider {
 struct SchemaRetryProvider {
     prompts: Mutex<Vec<String>>,
     always_invalid: bool,
+}
+
+#[derive(Default)]
+struct CollectingEventSink {
+    events: Mutex<Vec<WorkflowEvent>>,
+}
+
+impl CollectingEventSink {
+    fn events(&self) -> Vec<WorkflowEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowEventSink for CollectingEventSink {
+    async fn emit(&self, event: WorkflowEvent) -> anyhow::Result<()> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -84,6 +105,43 @@ impl AgentProvider for FixedUsageProvider {
             }),
             isolation: None,
             raw: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentProvider for RawEventsProvider {
+    fn name(&self) -> &str {
+        "raw-events"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        Ok(AgentProviderResult {
+            output: json!({ "answer": input.prompt }),
+            session_id: Some("raw-session-1".to_string()),
+            model: Some("raw-model".to_string()),
+            usage: Some(AgentUsage {
+                input_tokens: Some(3),
+                output_tokens: Some(5),
+                total_tokens: Some(8),
+                ..AgentUsage::default()
+            }),
+            isolation: None,
+            raw: Some(json!({
+                "events": [
+                    { "type": "provider.start", "prompt": input.prompt },
+                    { "type": "provider.done", "session": "raw-session-1" }
+                ],
+                "stderr": "ignored for event payload extraction"
+            })),
         })
     }
 }
@@ -329,12 +387,347 @@ fn run_debug(
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run")
+}
+
+#[test]
+fn event_sink_emits_documented_success_stream_with_agent_events() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("events-success.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "events-success", description: "Events success" };
+phase("Inspect");
+log("checking", { target: "cluster" });
+export default { agent: await agent("inspect cluster") };
+"#,
+    )
+    .expect("workflow should be written");
+
+    let event_sink = Arc::new(CollectingEventSink::default());
+    let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: Arc::new(RawEventsProvider),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: Some(event_sink_dyn),
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should run");
+
+    assert_eq!(
+        result.output.result,
+        json!({ "agent": { "answer": "inspect cluster" } })
+    );
+    let events = event_sink.events();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect();
+    assert_eq!(
+        event_types,
+        vec![
+            "workflow.started",
+            "workflow.phase",
+            "workflow.log",
+            "workflow.agent_event",
+            "workflow.agent_event",
+            "workflow.result",
+        ]
+    );
+    assert!(events[0].elapsed_nanos.is_none());
+    for event in events.iter().skip(1) {
+        assert!(
+            event.elapsed_nanos.is_some(),
+            "event {} should include elapsedNanos",
+            event.event_type
+        );
+    }
+    let start_time = events[0].data["startTime"].as_str().unwrap();
+    assert!(start_time.contains('T'));
+    assert!(start_time.ends_with('Z'));
+    assert_eq!(events[1].data, json!({ "name": "Inspect" }));
+    assert_eq!(
+        events[2].data,
+        json!({ "message": "checking {\"target\":\"cluster\"}" })
+    );
+    assert_eq!(
+        events[3].data,
+        json!({ "type": "provider.start", "prompt": "inspect cluster" })
+    );
+    assert_eq!(
+        events[4].data,
+        json!({ "type": "provider.done", "session": "raw-session-1" })
+    );
+    for event in &events[3..=4] {
+        let metadata = event
+            .metadata
+            .as_ref()
+            .expect("agent metadata should exist");
+        assert!(!metadata.step_id.as_deref().unwrap().is_empty());
+        assert_eq!(metadata.provider.as_deref(), Some("raw-events"));
+        assert_eq!(metadata.session_id.as_deref(), Some("raw-session-1"));
+        assert_eq!(metadata.run_id, None);
+    }
+    assert_eq!(
+        events[5].data,
+        json!({
+            "tokenUsage": {
+                "inputTokens": 3,
+                "outputTokens": 5,
+                "totalTokens": 8,
+            },
+            "results": { "agent": { "answer": "inspect cluster" } },
+        })
+    );
+}
+
+#[test]
+fn event_sink_emits_child_workflow_lifecycle_with_scope_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let parent_path = temp.path().join("parent.workflow.mjs");
+    let child_path = temp.path().join("child.workflow.mjs");
+    fs::write(
+        &parent_path,
+        r#"
+export const meta = { name: "parent-events", description: "Parent events" };
+log("parent before");
+const child = await workflow({ scriptPath: "./child.workflow.mjs" }, { item: "one" });
+log("parent after");
+export default { child };
+"#,
+    )
+    .expect("parent workflow should be written");
+    fs::write(
+        &child_path,
+        r#"
+export const meta = { name: "child-events", description: "Child events" };
+phase("Child phase");
+log("child item", args.item);
+export default { item: args.item };
+"#,
+    )
+    .expect("child workflow should be written");
+
+    let event_sink = Arc::new(CollectingEventSink::default());
+    let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path: parent_path,
+        args: json!({}),
+        agent_provider: Arc::new(DebugAgentProvider::new()),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: Some(event_sink_dyn),
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should run");
+
+    assert_eq!(result.output.result, json!({ "child": { "item": "one" } }));
+    let events = event_sink.events();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect();
+    assert_eq!(
+        event_types,
+        vec![
+            "workflow.started",
+            "workflow.log",
+            "workflow.started",
+            "workflow.phase",
+            "workflow.log",
+            "workflow.result",
+            "workflow.log",
+            "workflow.result",
+        ]
+    );
+
+    let root_started = events[0].metadata.as_ref().unwrap();
+    assert_eq!(root_started.workflow_depth, Some(0));
+    assert_eq!(root_started.parent_step_id, None);
+    let child_started = events[2].metadata.as_ref().unwrap();
+    assert_eq!(child_started.workflow_depth, Some(1));
+    let parent_step_id = child_started
+        .parent_step_id
+        .as_ref()
+        .expect("child lifecycle should include parentStepId")
+        .clone();
+    assert!(!parent_step_id.is_empty());
+    for event in &events[2..=5] {
+        let metadata = event.metadata.as_ref().unwrap();
+        assert_eq!(metadata.workflow_depth, Some(1));
+        assert_eq!(
+            metadata.parent_step_id.as_deref(),
+            Some(parent_step_id.as_str())
+        );
+        assert!(
+            event.elapsed_nanos.is_some(),
+            "child event {} should use stream elapsedNanos",
+            event.event_type
+        );
+    }
+    let root_result = events.last().unwrap().metadata.as_ref().unwrap();
+    assert_eq!(root_result.workflow_depth, Some(0));
+    assert_eq!(root_result.parent_step_id, None);
+}
+
+#[test]
+fn event_sink_emits_child_error_before_root_error_with_scope_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let parent_path = temp.path().join("parent-error.workflow.mjs");
+    let child_path = temp.path().join("child-error.workflow.mjs");
+    fs::write(
+        &parent_path,
+        r#"
+export const meta = { name: "parent-child-error", description: "Parent child error" };
+await workflow({ scriptPath: "./child-error.workflow.mjs" }, {});
+export default { unreachable: true };
+"#,
+    )
+    .expect("parent workflow should be written");
+    fs::write(
+        &child_path,
+        r#"
+export const meta = { name: "child-error", description: "Child error" };
+log("child before error");
+throw new Error("child exploded");
+"#,
+    )
+    .expect("child workflow should be written");
+
+    let event_sink = Arc::new(CollectingEventSink::default());
+    let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
+    let error = block_on(run_workflow(RunWorkflowOptions {
+        script_path: parent_path,
+        args: json!({}),
+        agent_provider: Arc::new(DebugAgentProvider::new()),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: Some(event_sink_dyn),
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect_err("workflow should fail");
+
+    assert!(format!("{error:#}").contains("child exploded"));
+    let events = event_sink.events();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect();
+    assert_eq!(
+        event_types,
+        vec![
+            "workflow.started",
+            "workflow.started",
+            "workflow.log",
+            "workflow.error",
+            "workflow.error",
+        ]
+    );
+
+    let child_started_metadata = events[1].metadata.as_ref().unwrap();
+    assert_eq!(child_started_metadata.workflow_depth, Some(1));
+    let parent_step_id = child_started_metadata
+        .parent_step_id
+        .as_ref()
+        .expect("child started should include parentStepId")
+        .clone();
+    for event in &events[1..=3] {
+        let metadata = event.metadata.as_ref().unwrap();
+        assert_eq!(metadata.workflow_depth, Some(1));
+        assert_eq!(
+            metadata.parent_step_id.as_deref(),
+            Some(parent_step_id.as_str())
+        );
+    }
+    assert!(events[3].data["message"]
+        .as_str()
+        .unwrap()
+        .contains("child exploded"));
+    let root_error_metadata = events[4].metadata.as_ref().unwrap();
+    assert_eq!(root_error_metadata.workflow_depth, Some(0));
+    assert_eq!(root_error_metadata.parent_step_id, None);
+    assert!(events[4].data["message"]
+        .as_str()
+        .unwrap()
+        .contains("child exploded"));
+}
+
+#[test]
+fn event_sink_emits_error_stream_on_workflow_failure() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("events-error.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "events-error", description: "Events error" };
+log("before failure");
+throw new Error("integration boom");
+"#,
+    )
+    .expect("workflow should be written");
+
+    let event_sink = Arc::new(CollectingEventSink::default());
+    let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
+    let error = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: Arc::new(DebugAgentProvider::new()),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: Some(event_sink_dyn),
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect_err("workflow should fail");
+
+    assert!(format!("{error:#}").contains("integration boom"));
+    let events = event_sink.events();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect();
+    assert_eq!(
+        event_types,
+        vec!["workflow.started", "workflow.log", "workflow.error"]
+    );
+    assert_eq!(events[1].data, json!({ "message": "before failure" }));
+    assert!(events[2].data["message"]
+        .as_str()
+        .unwrap()
+        .contains("integration boom"));
+    assert!(events[2].elapsed_nanos.is_some());
 }
 
 #[test]
@@ -375,10 +768,10 @@ fn run_with_provider(
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
 }
 
@@ -536,10 +929,10 @@ fn rejects_missing_metadata_and_missing_default_export() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .unwrap_err();
     assert!(no_meta
@@ -556,10 +949,10 @@ fn rejects_missing_metadata_and_missing_default_export() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .unwrap_err();
     assert!(missing_default
@@ -629,10 +1022,10 @@ fn rejects_nested_child_workflow_fixture() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .unwrap_err();
 
@@ -659,10 +1052,10 @@ fn applies_phase_metadata_defaults() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -697,10 +1090,10 @@ fn agent_provider_option_overrides_default_provider() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -725,10 +1118,10 @@ fn runs_parallel_agent_requests_concurrently() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -756,10 +1149,10 @@ fn starts_follow_up_agent_requests_when_capacity_frees() {
         max_parallel_agent_requests: Some(2),
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -787,10 +1180,10 @@ fn honors_parallel_agent_request_limit() {
         max_parallel_agent_requests: Some(2),
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -818,10 +1211,10 @@ fn honors_serial_parallel_agent_request_limit() {
         max_parallel_agent_requests: Some(1),
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -850,10 +1243,10 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
@@ -918,10 +1311,10 @@ fn validates_schema_backed_agent_output_and_retries_once() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should retry and run");
 
@@ -948,10 +1341,10 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .unwrap_err();
 
@@ -975,10 +1368,10 @@ fn updates_live_budget_from_agent_output_token_usage() {
         max_parallel_agent_requests: None,
         agent_runner: None,
         cancel_rx: None,
-        on_log: None,
-        on_phase: None,
-        on_agent_result: None,
-        on_agent_finished: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
     }))
     .expect("workflow should run");
 
