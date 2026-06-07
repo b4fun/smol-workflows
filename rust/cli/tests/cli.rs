@@ -536,11 +536,19 @@ fn run_events_emits_codex_agent_events_from_provider_raw_events() {
     assert_eq!(agent_events[0]["metadata"]["provider"], "codex");
     assert_eq!(agent_events[0]["metadata"]["sessionId"], "codex-session-1");
     assert!(agent_events[0]["metadata"]["stepId"].as_str().is_some());
-    assert_eq!(agent_events[0]["data"]["type"], "session_meta");
-    assert_eq!(agent_events[0]["data"]["payload"]["id"], "codex-session-1");
+    assert_eq!(agent_events[0]["data"]["provider"], "codex");
+    assert_eq!(agent_events[0]["data"]["sessionId"], "codex-session-1");
+    assert_eq!(
+        agent_events[0]["data"]["providerEvent"]["type"],
+        "session_meta"
+    );
+    assert_eq!(
+        agent_events[0]["data"]["providerEvent"]["payload"]["id"],
+        "codex-session-1"
+    );
     assert!(agent_events
         .iter()
-        .any(|event| event["data"]["type"] == "turn_complete"));
+        .any(|event| event["data"]["providerEvent"]["type"] == "turn_complete"));
     assert_eq!(events.last().unwrap()["type"], "workflow.result");
 }
 
@@ -603,8 +611,10 @@ fn run_events_emits_agent_events_from_provider_raw_result() {
     assert_eq!(agent_event["metadata"]["provider"], "claude-code");
     assert_eq!(agent_event["metadata"]["sessionId"], "claude-session-1");
     assert!(agent_event["metadata"]["stepId"].as_str().is_some());
+    assert_eq!(agent_event["data"]["provider"], "claude-code");
+    assert_eq!(agent_event["data"]["sessionId"], "claude-session-1");
     assert_eq!(
-        agent_event["data"]["response"]["session_id"],
+        agent_event["data"]["providerEvent"]["session_id"],
         "claude-session-1"
     );
     assert_eq!(events.last().unwrap()["type"], "workflow.result");
@@ -723,10 +733,10 @@ fn run_saves_raw_provider_sessions() {
         .expect("raw session line should be JSON");
     assert!(
         lines.next().is_none(),
-        "raw object should be written as one JSONL line"
+        "fake Claude emits one raw provider event"
     );
-    assert_eq!(first["response"]["session_id"], "claude-session-1");
-    assert_eq!(first["response"]["result"], "fake claude: hello raw");
+    assert_eq!(first["session_id"], "claude-session-1");
+    assert_eq!(first["result"], "fake claude: hello raw");
     let _ = fs::remove_dir_all(&root);
 }
 

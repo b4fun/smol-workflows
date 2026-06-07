@@ -470,11 +470,13 @@ export default { agent: await agent("inspect cluster") };
     assert_eq!(events[3].event_type.as_str(), "workflow.agent_started");
     assert_eq!(events[3].data["phase"], json!("Inspect"));
     assert_eq!(
-        events[4].data,
+        events[4].data["providerEvent"],
         json!({ "type": "provider.start", "prompt": "inspect cluster" })
     );
+    assert_eq!(events[4].data["provider"], json!("raw-events"));
+    assert_eq!(events[4].data["sessionId"], json!("raw-session-1"));
     assert_eq!(
-        events[5].data,
+        events[5].data["providerEvent"],
         json!({ "type": "provider.done", "session": "raw-session-1" })
     );
     for event in &events[4..=5] {

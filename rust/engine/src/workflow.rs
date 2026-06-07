@@ -527,6 +527,24 @@ fn raw_agent_event_payloads(raw: &Value) -> Vec<Value> {
     }
 }
 
+fn agent_session_event_payload(provider_event: Value, metadata: &WorkflowEventMetadata) -> Value {
+    let mut payload = serde_json::Map::new();
+    if let Some(provider) = metadata.provider.as_ref() {
+        payload.insert("provider".to_string(), Value::String(provider.clone()));
+    }
+    if let Some(session_id) = metadata.session_id.as_ref() {
+        payload.insert("sessionId".to_string(), Value::String(session_id.clone()));
+    }
+    if let Some(run_id) = metadata.run_id.as_ref() {
+        payload.insert("runId".to_string(), Value::String(run_id.clone()));
+    }
+    if let Some(step_id) = metadata.step_id.as_ref() {
+        payload.insert("stepId".to_string(), Value::String(step_id.clone()));
+    }
+    payload.insert("providerEvent".to_string(), provider_event);
+    Value::Object(payload)
+}
+
 fn truncate_for_event(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
@@ -1098,7 +1116,8 @@ impl RunState {
             return Ok(());
         };
         let metadata = self.agent_event_metadata(id, provider, result.session_id.clone());
-        for event_data in raw_agent_event_payloads(raw) {
+        for provider_event in raw_agent_event_payloads(raw) {
+            let event_data = agent_session_event_payload(provider_event, &metadata);
             self.emit_event(WorkflowEvent::agent_event(event_data, metadata.clone()))
                 .await?;
         }
