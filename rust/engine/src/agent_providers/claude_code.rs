@@ -228,8 +228,10 @@ fn extract_session_id(raw: &Value) -> Option<String> {
 }
 
 fn extract_usage(raw: &Value) -> Option<AgentUsage> {
-    let usage = find_first_usage_object(raw)?;
-    let mut normalized = normalize_usage(&usage);
+    let mut usage_objects = Vec::new();
+    find_usage_objects(raw, &mut usage_objects);
+    let usage = usage_objects.last()?;
+    let mut normalized = normalize_usage(usage);
     if normalized.cost.is_none() {
         if let Some(total) = find_total_cost_usd(raw) {
             normalized.cost = Some(AgentUsageCost {

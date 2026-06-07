@@ -36,6 +36,7 @@ const LIVE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(33);
 const LIVE_EVENTS_PER_TICK: usize = 256;
 const TIMELINE_BOTTOM_MARGIN: u16 = 2;
 const BREATHING_LIGHT_INTERVAL_NANOS: i128 = 140_000_000;
+const DONE_TICK_DELAY: StdDuration = StdDuration::from_millis(700);
 
 #[derive(Clone)]
 pub struct ReplayCommandOptions {
@@ -310,7 +311,9 @@ struct TuiReplayApp {
     speed: f64,
     max_delay: Option<StdDuration>,
     next_due: Option<Instant>,
+    replay_done_at: Option<Instant>,
     live_status: Option<LiveStatus>,
+    live_status_changed_at: Option<Instant>,
     live_error: Option<String>,
     confirm_quit: bool,
     should_quit: bool,
@@ -353,7 +356,9 @@ impl TuiReplayApp {
             speed: normalize_replay_speed(options.speed),
             max_delay: options.max_delay,
             next_due: options.timed.then_some(Instant::now()),
+            replay_done_at: None,
             live_status: None,
+            live_status_changed_at: None,
             live_error: None,
             confirm_quit: false,
             should_quit: false,
@@ -398,7 +403,9 @@ impl TuiReplayApp {
             speed: 1.0,
             max_delay: None,
             next_due: None,
+            replay_done_at: None,
             live_status: Some(LiveStatus::Running),
+            live_status_changed_at: Some(Instant::now()),
             live_error: None,
             confirm_quit: false,
             should_quit: false,
@@ -424,6 +431,21 @@ impl TuiReplayApp {
 
     fn replay_complete(&self) -> bool {
         self.events.len() >= self.source_events.len()
+    }
+
+    fn set_live_status(&mut self, status: LiveStatus) {
+        if self.live_status != Some(status) {
+            self.live_status = Some(status);
+            self.live_status_changed_at = Some(Instant::now());
+        }
+    }
+
+    fn mark_replay_done_if_complete(&mut self) {
+        if self.replay_complete() {
+            self.replay_done_at.get_or_insert_with(Instant::now);
+        } else {
+            self.replay_done_at = None;
+        }
     }
 
     fn request_view_update(&mut self) {
@@ -496,6 +518,7 @@ impl TuiReplayApp {
         if let Some(event) = self.source_events.get(self.events.len()).cloned() {
             self.events.push(event);
             self.pending_select_latest = true;
+            self.mark_replay_done_if_complete();
             self.request_view_update();
         }
     }
@@ -503,6 +526,7 @@ impl TuiReplayApp {
     fn hide_last_event(&mut self) {
         if self.events.pop().is_some() {
             self.pending_select_latest = true;
+            self.mark_replay_done_if_complete();
             self.request_view_update();
             self.reset_details_scroll();
         }
@@ -512,6 +536,7 @@ impl TuiReplayApp {
         if self.replay_complete() {
             self.next_due = None;
             self.playback = PlaybackState::Paused;
+            self.mark_replay_done_if_complete();
             return;
         }
         let next_index = self.events.len();
@@ -1195,9 +1220,9 @@ fn run_live_tui_loop(
         app.push_live_events(event_batch);
         app.apply_view_snapshots();
         match result_rx.try_recv() {
-            Ok(Ok(())) => app.live_status = Some(LiveStatus::Done),
+            Ok(Ok(())) => app.set_live_status(LiveStatus::Done),
             Ok(Err(error)) => {
-                app.live_status = Some(LiveStatus::Failed);
+                app.set_live_status(LiveStatus::Failed);
                 app.live_error = Some(error.to_string());
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -1205,7 +1230,7 @@ fn run_live_tui_loop(
                 if app.live_status == Some(LiveStatus::Running)
                     || app.live_status == Some(LiveStatus::Cancelling)
                 {
-                    app.live_status = Some(LiveStatus::Failed);
+                    app.set_live_status(LiveStatus::Failed);
                     app.live_error = Some("workflow task stopped without a result".to_string());
                 }
             }
@@ -1217,9 +1242,12 @@ fn run_live_tui_loop(
         }
         if event::poll(LIVE_POLL_INTERVAL)? {
             if let CrosstermEvent::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') {
+                if key.kind != KeyEventKind::Release
+                    && key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     let _ = cancel_tx.send(true);
-                    app.live_status = Some(LiveStatus::Cancelling);
+                    app.set_live_status(LiveStatus::Cancelling);
                 } else {
                     app.handle_key(key);
                 }
@@ -1539,11 +1567,35 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
         TimeDisplayMode::LocalTime => "local",
     };
     if let Some(live_status) = app.live_status {
-        let status = match live_status {
-            LiveStatus::Running => format!("{} LIVE RUNNING", breathing_light()),
-            LiveStatus::Cancelling => format!("{} LIVE CANCELLING", breathing_light()),
-            LiveStatus::Done => "✓ LIVE DONE".to_string(),
-            LiveStatus::Failed => "✗ LIVE FAILED".to_string(),
+        let terminal_indicator = |fallback: &str| {
+            if app
+                .live_status_changed_at
+                .is_some_and(|changed_at| changed_at.elapsed() >= DONE_TICK_DELAY)
+            {
+                fallback.to_string()
+            } else {
+                breathing_light().to_string()
+            }
+        };
+        let (status, status_style) = match live_status {
+            LiveStatus::Running => (
+                format!("{} LIVE RUNNING", breathing_light()),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            LiveStatus::Cancelling => (
+                format!("{} LIVE CANCELLING", breathing_light()),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            LiveStatus::Done => (
+                format!("{} LIVE DONE", terminal_indicator("✓")),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            LiveStatus::Failed => (
+                format!("{} LIVE FAILED", terminal_indicator("✗")),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
         };
         let error = app
             .live_error
@@ -1552,10 +1604,7 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
             .unwrap_or_default();
         return Line::from(vec![
             Span::raw(" "),
-            Span::styled(
-                status,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(status, status_style),
             Span::raw(format!(
                 "  {run_id}  events {}  tab {}/{}  time {time_mode}{error}",
                 app.events.len(),
@@ -1564,19 +1613,39 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
             )),
         ]);
     }
-    let playback = match app.playback {
-        PlaybackState::Playing => "REPLAY PLAYING",
-        PlaybackState::Paused if app.replay_complete() => "REPLAY DONE",
-        PlaybackState::Paused => "REPLAY PAUSED",
-    };
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(
-            playback.to_string(),
+    let (playback, playback_style) = match app.playback {
+        PlaybackState::Playing => (
+            "REPLAY PLAYING".to_string(),
             Style::default()
                 .fg(Color::Rgb(255, 165, 0))
                 .add_modifier(Modifier::BOLD),
         ),
+        PlaybackState::Paused if app.replay_complete() => {
+            let indicator = if app
+                .replay_done_at
+                .is_none_or(|done_at| done_at.elapsed() >= DONE_TICK_DELAY)
+            {
+                "✓"
+            } else {
+                breathing_light()
+            };
+            (
+                format!("{indicator} REPLAY DONE"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        PlaybackState::Paused => (
+            "REPLAY PAUSED".to_string(),
+            Style::default()
+                .fg(Color::Rgb(255, 165, 0))
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(playback, playback_style),
         Span::raw(format!(
             "  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x  time {time_mode}{}",
             app.events.len(),
