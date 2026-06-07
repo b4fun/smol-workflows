@@ -12,12 +12,12 @@ use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinSet, LocalSet};
 
 pub type WorkflowLogCallback<'a> = &'a dyn Fn(&[Value]);
@@ -64,6 +64,7 @@ pub struct RunWorkflowOptions<'a> {
     pub nesting_depth: usize,
     pub max_parallel_agent_requests: Option<usize>,
     pub agent_runner: Option<Arc<dyn WorkflowAgentRunner>>,
+    pub cancel_rx: Option<watch::Receiver<bool>>,
     pub on_log: Option<WorkflowLogCallback<'a>>,
     pub on_phase: Option<WorkflowPhaseCallback<'a>>,
     pub on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
@@ -178,11 +179,13 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
         token_usage: WorkflowTokenUsage::default(),
         token_usage_by_phase: Default::default(),
         agent_runs: Vec::new(),
+        active_request_ids: BTreeSet::new(),
         nesting_depth: options.nesting_depth,
         max_parallel_agent_requests: options.max_parallel_agent_requests,
         agent_runner: options
             .agent_runner
             .unwrap_or_else(|| Arc::new(DirectWorkflowAgentRunner)),
+        cancel_rx: options.cancel_rx,
         on_log: options.on_log,
         on_phase: options.on_phase,
         on_agent_result: options.on_agent_result,
@@ -202,19 +205,17 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
             )
             .await?;
 
-        if agent_tasks.is_empty() && sleep_tasks.is_empty() {
-            let event = js_events
-                .recv()
-                .await
-                .ok_or_else(|| anyhow!("JavaScript runtime actor stopped unexpectedly"))?;
-            if let Some(result) = state.handle_js_event(event, &mut pending_requests).await? {
-                let _ = send_js_command(&js_commands, JsCommand::Shutdown).await;
-                return Ok(result);
-            }
-            continue;
-        }
-
         tokio::select! {
+            biased;
+            () = wait_for_cancellation(&mut state.cancel_rx) => {
+                return state.cancel_workflow(
+                    &mut pending_requests,
+                    &mut agent_tasks,
+                    &mut sleep_tasks,
+                    &js_commands,
+                    &mut js_events,
+                ).await;
+            }
             event = js_events.recv() => {
                 let event = event.ok_or_else(|| anyhow!("JavaScript runtime actor stopped unexpectedly"))?;
                 if let Some(result) = state.handle_js_event(event, &mut pending_requests).await? {
@@ -227,6 +228,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                     .ok_or_else(|| anyhow!("agent task set ended unexpectedly"))?
                     .map_err(|error| anyhow!("agent provider task failed: {error}"))?;
                 let AgentTaskCompletion { id, input, provider, result } = completion;
+                state.active_request_ids.remove(&id);
                 let resolution = match result
                     .and_then(|result| state.apply_agent_result(&id, &input, provider, result))
                 {
@@ -245,6 +247,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions<'_>) -> anyhow::Result<R
                     .ok_or_else(|| anyhow!("sleep task set ended unexpectedly"))?
                     .map_err(|error| anyhow!("sleep task failed: {error}"))?;
                 let SleepTaskCompletion { id, result } = completion;
+                state.active_request_ids.remove(&id);
                 let resolution = match result {
                     Ok(()) => WorkflowRuntimeRequestResolution::OkUndefined,
                     Err(error) => WorkflowRuntimeRequestResolution::Err {
@@ -351,9 +354,11 @@ struct RunState<'a> {
     token_usage: WorkflowTokenUsage,
     token_usage_by_phase: std::collections::BTreeMap<String, WorkflowTokenUsage>,
     agent_runs: Vec<WorkflowAgentRunSummary>,
+    active_request_ids: BTreeSet<String>,
     nesting_depth: usize,
     max_parallel_agent_requests: Option<usize>,
     agent_runner: Arc<dyn WorkflowAgentRunner>,
+    cancel_rx: Option<watch::Receiver<bool>>,
     on_log: Option<WorkflowLogCallback<'a>>,
     on_phase: Option<WorkflowPhaseCallback<'a>>,
     on_agent_result: Option<WorkflowAgentResultCallback<'a>>,
@@ -435,6 +440,18 @@ fn sum_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
         (None, None) => None,
         (left, right) => Some(left.unwrap_or_default() + right.unwrap_or_default()),
+    }
+}
+
+async fn wait_for_cancellation(cancel_rx: &mut Option<watch::Receiver<bool>>) {
+    let Some(cancel_rx) = cancel_rx else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !*cancel_rx.borrow() {
+        if cancel_rx.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -531,6 +548,171 @@ impl<'a> RunState<'a> {
         }
     }
 
+    async fn cancel_workflow(
+        &mut self,
+        pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
+        agent_tasks: &mut JoinSet<AgentTaskCompletion>,
+        sleep_tasks: &mut JoinSet<SleepTaskCompletion>,
+        js_commands: &mpsc::Sender<JsCommand>,
+        js_events: &mut mpsc::Receiver<JsEvent>,
+    ) -> anyhow::Result<RunWorkflowResult> {
+        log::debug!(
+            "workflow cancellation requested script={}",
+            self.script_path.display()
+        );
+
+        if pending_requests.is_empty()
+            && self.active_request_ids.is_empty()
+            && agent_tasks.is_empty()
+            && sleep_tasks.is_empty()
+            && self
+                .reject_next_runtime_request_for_cancellation(js_commands, js_events)
+                .await
+        {
+            bail!("workflow cancelled");
+        }
+
+        self.reject_pending_requests_for_cancellation(pending_requests, js_commands)
+            .await;
+        sleep_tasks.abort_all();
+        self.reject_active_sleep_requests_for_cancellation(sleep_tasks, js_commands)
+            .await;
+
+        if self.on_agent_result.is_some() {
+            while let Some(completion) = agent_tasks.join_next().await {
+                match completion {
+                    Ok(AgentTaskCompletion {
+                        id,
+                        input,
+                        provider,
+                        result: Ok(result),
+                    }) => {
+                        self.active_request_ids.remove(&id);
+                        let provider_name = provider
+                            .as_deref()
+                            .unwrap_or_else(|| self.agent_provider.name());
+                        if let Some(on_agent_result) = self.on_agent_result {
+                            on_agent_result(&id, provider_name, &result)?;
+                        }
+                        self.record_agent_run(&id, &input, provider, &result);
+                        self.reject_request_for_cancellation(id, js_commands).await;
+                    }
+                    Ok(AgentTaskCompletion {
+                        id,
+                        result: Err(error),
+                        ..
+                    }) => {
+                        self.active_request_ids.remove(&id);
+                        log::debug!("agent task failed while draining cancellation: {error:#}");
+                        self.reject_request_for_cancellation(id, js_commands).await;
+                    }
+                    Err(error) => {
+                        log::debug!("agent task join failed while draining cancellation: {error}");
+                    }
+                }
+            }
+        } else {
+            let ids: Vec<String> = self.active_request_ids.iter().cloned().collect();
+            agent_tasks.abort_all();
+            for id in ids {
+                self.active_request_ids.remove(&id);
+                self.reject_request_for_cancellation(id, js_commands).await;
+            }
+        }
+
+        self.reject_remaining_active_requests_for_cancellation(js_commands)
+            .await;
+        self.drain_runtime_after_cancellation(js_events).await;
+        let _ = send_js_command(js_commands, JsCommand::Shutdown).await;
+        bail!("workflow cancelled")
+    }
+
+    async fn reject_next_runtime_request_for_cancellation(
+        &mut self,
+        js_commands: &mpsc::Sender<JsCommand>,
+        js_events: &mut mpsc::Receiver<JsEvent>,
+    ) -> bool {
+        loop {
+            match js_events.recv().await {
+                Some(JsEvent::Call(call)) => self.handle_call(call),
+                Some(JsEvent::Request(request)) => {
+                    self.reject_request_for_cancellation(request.id().to_string(), js_commands)
+                        .await;
+                    return false;
+                }
+                Some(JsEvent::Complete(_)) | Some(JsEvent::Error(_)) | None => return true,
+            }
+        }
+    }
+
+    async fn reject_pending_requests_for_cancellation(
+        &mut self,
+        pending_requests: &mut VecDeque<WorkflowRuntimeRequest>,
+        js_commands: &mpsc::Sender<JsCommand>,
+    ) {
+        while let Some(request) = pending_requests.pop_front() {
+            self.reject_request_for_cancellation(request.id().to_string(), js_commands)
+                .await;
+        }
+    }
+
+    async fn reject_active_sleep_requests_for_cancellation(
+        &mut self,
+        sleep_tasks: &mut JoinSet<SleepTaskCompletion>,
+        js_commands: &mpsc::Sender<JsCommand>,
+    ) {
+        while let Some(completion) = sleep_tasks.join_next().await {
+            if let Ok(SleepTaskCompletion { id, .. }) = completion {
+                self.active_request_ids.remove(&id);
+                self.reject_request_for_cancellation(id, js_commands).await;
+            }
+        }
+    }
+
+    async fn reject_remaining_active_requests_for_cancellation(
+        &mut self,
+        js_commands: &mpsc::Sender<JsCommand>,
+    ) {
+        let ids: Vec<String> = self.active_request_ids.iter().cloned().collect();
+        for id in ids {
+            self.active_request_ids.remove(&id);
+            self.reject_request_for_cancellation(id, js_commands).await;
+        }
+    }
+
+    async fn reject_request_for_cancellation(
+        &self,
+        id: String,
+        js_commands: &mpsc::Sender<JsCommand>,
+    ) {
+        let _ = send_js_command(
+            js_commands,
+            JsCommand::ResolveRequest {
+                id,
+                resolution: WorkflowRuntimeRequestResolution::Err {
+                    message: "workflow cancelled".to_string(),
+                },
+            },
+        )
+        .await;
+    }
+
+    async fn drain_runtime_after_cancellation(&mut self, js_events: &mut mpsc::Receiver<JsEvent>) {
+        while let Some(event) = js_events.recv().await {
+            match event {
+                JsEvent::Call(call) => self.handle_call(call),
+                JsEvent::Request(request) => {
+                    log::debug!(
+                        "ignoring request after cancellation id={} kind={}",
+                        request.id(),
+                        request.kind()
+                    );
+                }
+                JsEvent::Complete(_) | JsEvent::Error(_) => break,
+            }
+        }
+    }
+
     fn handle_call(&mut self, call: WorkflowRuntimeCall) {
         match call {
             WorkflowRuntimeCall::Log { values } => {
@@ -581,7 +763,7 @@ impl<'a> RunState<'a> {
     }
 
     fn spawn_agent_task(
-        &self,
+        &mut self,
         agent_tasks: &mut JoinSet<AgentTaskCompletion>,
         id: String,
         prepared: PreparedAgentRun,
@@ -604,6 +786,7 @@ impl<'a> RunState<'a> {
             agent_tasks.len() + 1,
             max_parallel
         );
+        self.active_request_ids.insert(id.clone());
         agent_tasks.spawn(async move {
             AgentTaskCompletion {
                 id,
@@ -617,7 +800,7 @@ impl<'a> RunState<'a> {
     }
 
     fn spawn_sleep_task(
-        &self,
+        &mut self,
         sleep_tasks: &mut JoinSet<SleepTaskCompletion>,
         id: String,
         duration_ms: u64,
@@ -628,6 +811,7 @@ impl<'a> RunState<'a> {
             id,
             duration_ms
         );
+        self.active_request_ids.insert(id.clone());
         sleep_tasks.spawn(async move {
             SleepTaskCompletion {
                 id,
@@ -754,6 +938,7 @@ impl<'a> RunState<'a> {
             nesting_depth: self.nesting_depth + 1,
             max_parallel_agent_requests: self.max_parallel_agent_requests,
             agent_runner: Some(Arc::clone(&self.agent_runner)),
+            cancel_rx: self.cancel_rx.clone(),
             on_log: self.on_log,
             on_phase: self.on_phase,
             on_agent_result: self.on_agent_result,

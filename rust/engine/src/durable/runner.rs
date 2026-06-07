@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 
 use super::sqlite::{new_id, now_ms, SqliteDurableStore};
 
@@ -35,6 +36,7 @@ pub struct LocalDurableRunOptions<'a> {
     pub max_parallel_agent_requests: Option<usize>,
     pub max_attempts: u32,
     pub resume_run_id: Option<String>,
+    pub cancel_rx: Option<watch::Receiver<bool>>,
     pub on_log: Option<crate::workflow::WorkflowLogCallback<'a>>,
     pub on_phase: Option<crate::workflow::WorkflowPhaseCallback<'a>>,
     pub on_agent_result: Option<crate::workflow::WorkflowAgentResultCallback<'a>>,
@@ -50,6 +52,7 @@ impl<'a> LocalDurableRunOptions<'a> {
             max_parallel_agent_requests: None,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             resume_run_id: None,
+            cancel_rx: None,
             on_log: None,
             on_phase: None,
             on_agent_result: None,
@@ -293,6 +296,7 @@ pub async fn run_local_durable_workflow(
             nesting_depth: 0,
             max_parallel_agent_requests: options.max_parallel_agent_requests,
             agent_runner,
+            cancel_rx: options.cancel_rx.clone(),
             on_log: options.on_log,
             on_phase: options.on_phase,
             on_agent_result: options.on_agent_result,
@@ -322,6 +326,16 @@ pub async fn run_local_durable_workflow(
                 let failure_reason = serde_json::to_value(FailureReasonJSON {
                     message: error.to_string(),
                 })?;
+                if cancellation_requested(&options.cancel_rx) {
+                    store.cancel_attempt_and_task(LocalAttemptCancel {
+                        task_id: &task_id,
+                        run_id: &run_id,
+                        attempt_id: &attempt_id,
+                        failure_reason: &failure_reason,
+                        now: now_ms(),
+                    })?;
+                    return Err(error);
+                }
                 let terminal = attempt >= last_attempt;
                 store.fail_attempt(LocalAttemptFail {
                     task_id: &task_id,
@@ -377,6 +391,20 @@ pub struct LocalAttemptFail<'a> {
     pub failure_reason: &'a Value,
     pub terminal: bool,
     pub now: i64,
+}
+
+pub struct LocalAttemptCancel<'a> {
+    pub task_id: &'a str,
+    pub run_id: &'a str,
+    pub attempt_id: &'a str,
+    pub failure_reason: &'a Value,
+    pub now: i64,
+}
+
+fn cancellation_requested(cancel_rx: &Option<watch::Receiver<bool>>) -> bool {
+    cancel_rx
+        .as_ref()
+        .is_some_and(|cancel_rx| *cancel_rx.borrow())
 }
 
 impl SqliteDurableStore {
@@ -677,6 +705,50 @@ impl SqliteDurableStore {
         .context("failed to update durable task failure state")?;
         tx.commit()
             .context("failed to commit durable failure transaction")
+    }
+
+    pub fn cancel_attempt_and_task(&mut self, input: LocalAttemptCancel<'_>) -> anyhow::Result<()> {
+        let failure = serde_json::to_string(input.failure_reason)?;
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("failed to begin durable cancellation transaction")?;
+        tx.execute(
+            r#"
+            UPDATE sw_workflow_attempts
+            SET state = 'cancelled',
+                completed_at = ?1,
+                failure_reason_json = ?2
+            WHERE attempt_id = ?3
+            "#,
+            rusqlite::params![input.now, failure, input.attempt_id],
+        )
+        .context("failed to mark durable attempt cancelled")?;
+        tx.execute(
+            r#"
+            UPDATE sw_workflow_runs
+            SET state = 'cancelled',
+                failure_reason_json = ?1,
+                updated_at = ?2
+            WHERE run_id = ?3
+            "#,
+            rusqlite::params![failure, input.now, input.run_id],
+        )
+        .context("failed to mark durable run cancelled")?;
+        tx.execute(
+            r#"
+            UPDATE sw_workflow_tasks
+            SET state = 'cancelled',
+                failure_reason_json = ?1,
+                lease_expires_at = NULL,
+                updated_at = ?2
+            WHERE task_id = ?3
+            "#,
+            rusqlite::params![failure, input.now, input.task_id],
+        )
+        .context("failed to mark durable task cancelled")?;
+        tx.commit()
+            .context("failed to commit durable cancellation transaction")
     }
 
     pub fn claim_or_replay_agent_step(
@@ -1218,6 +1290,12 @@ mod tests {
         events: Mutex<Vec<TimedProviderEvent>>,
     }
 
+    struct SessionProvider {
+        session_id: &'static str,
+        cancel_on_run: Option<watch::Sender<bool>>,
+        delay_ms: u64,
+    }
+
     #[derive(Debug, Clone)]
     struct TimedProviderEvent {
         prompt: String,
@@ -1245,6 +1323,42 @@ mod tests {
                 usage: None,
                 isolation: None,
                 raw: None,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentProvider for SessionProvider {
+        fn name(&self) -> &str {
+            "session"
+        }
+        fn schema_mode(&self) -> AgentProviderSchemaMode {
+            AgentProviderSchemaMode::Builtin
+        }
+        fn usage_mode(&self) -> AgentProviderUsageMode {
+            AgentProviderUsageMode::Builtin
+        }
+        async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+            if let Some(cancel_tx) = &self.cancel_on_run {
+                let _ = cancel_tx.send(true);
+            }
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            Ok(AgentProviderResult {
+                output: json!(format!("session: {}", input.prompt)),
+                session_id: Some(self.session_id.to_string()),
+                model: Some("session-model".to_string()),
+                usage: Some(crate::agent_providers::AgentUsage {
+                    output_tokens: Some(1),
+                    ..Default::default()
+                }),
+                isolation: None,
+                raw: Some(json!({
+                    "events": [
+                        { "sessionId": self.session_id, "prompt": input.prompt }
+                    ]
+                })),
             })
         }
     }
@@ -1291,6 +1405,32 @@ mod tests {
                 raw: None,
             })
         }
+    }
+
+    fn write_test_raw_session(
+        root: &std::path::Path,
+        provider: &str,
+        result: &AgentProviderResult,
+    ) -> anyhow::Result<()> {
+        let session_id = result
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("session id missing"))?;
+        let events = result
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.get("events"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("raw events missing"))?;
+        let dir = root.join(provider);
+        fs::create_dir_all(&dir)?;
+        let mut lines = String::new();
+        for event in events {
+            lines.push_str(&serde_json::to_string(event)?);
+            lines.push('\n');
+        }
+        fs::write(dir.join(format!("{session_id}.jsonl")), lines)?;
+        Ok(())
     }
 
     fn seed_durable_run(db_path: &std::path::Path) -> (String, String) {
@@ -1824,6 +1964,144 @@ export default { slept: true };
             .unwrap();
         assert_eq!(sleep_steps, 1);
         assert_eq!(budget_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn local_durable_run_marks_cancelled_when_cancel_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let script_path = dir.path().join("workflow.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export const meta = { name: "durable-cancel", description: "durable cancel" };
+export default { result: await agent("hello") };
+"#,
+        )
+        .unwrap();
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+        let mut options = LocalDurableRunOptions::new(
+            script_path,
+            json!({}),
+            Arc::new(CountingProvider {
+                calls: AtomicUsize::new(0),
+            }),
+        );
+        options.cancel_rx = Some(cancel_rx);
+
+        let error = run_local_durable_workflow(&mut store, options)
+            .await
+            .expect_err("cancelled durable workflow should return an error");
+        assert_eq!(error.to_string(), "workflow cancelled");
+
+        let (run_state, task_state, attempt_state): (String, String, String) = store
+            .connection()
+            .query_row(
+                r#"
+                SELECT r.state, t.state, a.state
+                FROM sw_workflow_runs r
+                JOIN sw_workflow_tasks t ON t.task_id = r.task_id
+                JOIN sw_workflow_attempts a ON a.run_id = r.run_id
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(run_state, "cancelled");
+        assert_eq!(task_state, "cancelled");
+        assert_eq!(attempt_state, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn local_durable_run_exports_raw_session_before_failed_terminal_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let raw_dir = dir.path().join("raw");
+        let script_path = dir.path().join("workflow.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export const meta = { name: "durable-fail-session", description: "durable fail session" };
+await agent("before failure");
+throw new Error("middle failure");
+"#,
+        )
+        .unwrap();
+        let provider = Arc::new(SessionProvider {
+            session_id: "failed-session-1",
+            cancel_on_run: None,
+            delay_ms: 0,
+        });
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
+        options.max_attempts = 1;
+        let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
+            write_test_raw_session(&raw_dir, provider, result)
+        };
+        options.on_agent_result = Some(&on_agent_result);
+
+        let error = run_local_durable_workflow(&mut store, options)
+            .await
+            .expect_err("workflow should fail after exporting agent session");
+        assert!(
+            error.to_string().contains("middle failure"),
+            "unexpected error: {error:#}"
+        );
+
+        let raw_file = raw_dir.join("session/failed-session-1.jsonl");
+        assert!(raw_file.exists(), "raw session file should be written");
+        let raw_line = fs::read_to_string(raw_file).unwrap();
+        assert!(raw_line.contains("before failure"));
+        let run_state: String = store
+            .connection()
+            .query_row("SELECT state FROM sw_workflow_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run_state, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_durable_run_exports_raw_session_before_cancelled_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("durable.db");
+        let raw_dir = dir.path().join("raw");
+        let script_path = dir.path().join("workflow.mjs");
+        fs::write(
+            &script_path,
+            r#"
+export const meta = { name: "durable-cancel-session", description: "durable cancel session" };
+export default { result: await agent("before cancel") };
+"#,
+        )
+        .unwrap();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let provider = Arc::new(SessionProvider {
+            session_id: "cancelled-session-1",
+            cancel_on_run: Some(cancel_tx),
+            delay_ms: 10,
+        });
+        let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
+        let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
+        options.cancel_rx = Some(cancel_rx);
+        let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
+            write_test_raw_session(&raw_dir, provider, result)
+        };
+        options.on_agent_result = Some(&on_agent_result);
+
+        let error = run_local_durable_workflow(&mut store, options)
+            .await
+            .expect_err("workflow should be cancelled after exporting agent session");
+        assert_eq!(error.to_string(), "workflow cancelled");
+
+        let raw_file = raw_dir.join("session/cancelled-session-1.jsonl");
+        assert!(raw_file.exists(), "raw session file should be written");
+        let raw_line = fs::read_to_string(raw_file).unwrap();
+        assert!(raw_line.contains("before cancel"));
+        let run_state: String = store
+            .connection()
+            .query_row("SELECT state FROM sw_workflow_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run_state, "cancelled");
     }
 
     #[tokio::test]

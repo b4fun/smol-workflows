@@ -16,6 +16,14 @@ fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(format!("tests/fixtures/{name}"))
 }
 
+fn asset_path(name: &str) -> PathBuf {
+    PathBuf::from(format!("tests/assets/workflow_integration/{name}"))
+}
+
+fn copy_asset(name: &str, destination: &Path) {
+    fs::copy(asset_path(name), destination).expect("workflow asset should be copied");
+}
+
 fn example_path(name: &str) -> PathBuf {
     PathBuf::from(format!("../../examples/{name}"))
 }
@@ -320,6 +328,7 @@ fn run_debug(
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -364,6 +373,7 @@ fn run_with_provider(
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -394,14 +404,10 @@ fn runs_worktree_isolated_agent_in_fresh_git_worktree() {
         &["config", "user.email", "test@example.invalid"],
     );
     git(repo.path(), &["config", "user.name", "Test User"]);
-    fs::write(
-        repo.path().join("workflow.mjs"),
-        r#"
-export const meta = { name: 'isolated-agent', description: 'isolation test' }
-export default await agent('touch isolated workspace', { isolation: 'worktree' })
-"#,
-    )
-    .expect("workflow should be written");
+    copy_asset(
+        "worktree-isolated-agent.workflow.js",
+        &repo.path().join("workflow.mjs"),
+    );
     fs::write(repo.path().join("tracked.txt"), "tracked").expect("tracked file");
     git(repo.path(), &["add", "."]);
     git(repo.path(), &["commit", "-m", "initial"]);
@@ -456,14 +462,10 @@ export default await agent('touch isolated workspace', { isolation: 'worktree' }
 #[test]
 fn worktree_isolation_requires_git_repository() {
     let workspace = tempfile::tempdir().expect("temp workspace");
-    fs::write(
-        workspace.path().join("workflow.mjs"),
-        r#"
-export const meta = { name: 'isolated-agent', description: 'isolation test' }
-export default await agent('touch isolated workspace', { isolation: 'worktree' })
-"#,
-    )
-    .expect("workflow should be written");
+    copy_asset(
+        "worktree-isolated-agent.workflow.js",
+        &workspace.path().join("workflow.mjs"),
+    );
 
     let error = run_with_provider(
         workspace.path().join("workflow.mjs"),
@@ -531,6 +533,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -549,6 +552,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -620,6 +624,7 @@ fn rejects_nested_child_workflow_fixture() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -636,25 +641,7 @@ fn rejects_nested_child_workflow_fixture() {
 fn applies_phase_metadata_defaults() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("phase-defaults.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = {
-  "name": "phase-defaults",
-  "description": "phase defaults",
-  "phases": [
-    { "title": "Research", "model": "opus" },
-    { "title": "Verify", "model": "sonnet" }
-  ]
-};
-phase("Research");
-const inherited = await agent("inherited phase defaults");
-const explicit = await agent("explicit agent options", { model: "haiku" });
-const phaseOverride = await agent("phase override defaults", { phase: "Verify" });
-export default { inherited, explicit, phaseOverride };
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("phase-defaults.workflow.js", &script_path);
 
     let provider = Arc::new(OptionsEchoProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -666,6 +653,7 @@ export default { inherited, explicit, phaseOverride };
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -690,14 +678,7 @@ export default { inherited, explicit, phaseOverride };
 fn agent_provider_option_overrides_default_provider() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("provider-override.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = { name: "provider-override", description: "provider override" };
-export default await agent("override me", { provider: "debug" });
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("provider-override.workflow.js", &script_path);
 
     let provider = Arc::new(FixedUsageProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -709,6 +690,7 @@ export default await agent("override me", { provider: "debug" });
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -723,18 +705,7 @@ export default await agent("override me", { provider: "debug" });
 fn runs_parallel_agent_requests_concurrently() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("parallel-agents.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = { name: "parallel-agents", description: "parallel agents" };
-export default await parallel([
-  () => agent("first"),
-  () => agent("second"),
-  () => agent("third"),
-]);
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("parallel-agents.workflow.js", &script_path);
 
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -746,6 +717,7 @@ export default await parallel([
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -763,20 +735,7 @@ export default await parallel([
 fn starts_follow_up_agent_requests_when_capacity_frees() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("dynamic-parallel-agents.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = { name: "dynamic-parallel-agents", description: "dynamic parallel agents" };
-export default await parallel([
-  async () => {
-    await agent("fast-parent");
-    return await agent("follow-up");
-  },
-  () => agent("slow"),
-]);
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("dynamic-parallel-agents.workflow.js", &script_path);
 
     let provider = Arc::new(DynamicSchedulingProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -788,6 +747,7 @@ export default await parallel([
         nesting_depth: 0,
         max_parallel_agent_requests: Some(2),
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -805,19 +765,7 @@ export default await parallel([
 fn honors_parallel_agent_request_limit() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("limited-parallel-agents.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = { name: "limited-parallel-agents", description: "limited parallel agents" };
-export default await parallel([
-  () => agent("first"),
-  () => agent("second"),
-  () => agent("third"),
-  () => agent("fourth"),
-]);
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("limited-parallel-agents.workflow.js", &script_path);
 
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -829,6 +777,7 @@ export default await parallel([
         nesting_depth: 0,
         max_parallel_agent_requests: Some(2),
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -846,18 +795,7 @@ export default await parallel([
 fn honors_serial_parallel_agent_request_limit() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("serial-parallel-agents.workflow.js");
-    std::fs::write(
-        &script_path,
-        r#"
-export const meta = { name: "serial-parallel-agents", description: "serial parallel agents" };
-export default await parallel([
-  () => agent("first"),
-  () => agent("second"),
-  () => agent("third"),
-]);
-"#,
-    )
-    .expect("workflow fixture should be written");
+    copy_asset("serial-parallel-agents.workflow.js", &script_path);
 
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -869,6 +807,7 @@ export default await parallel([
         nesting_depth: 0,
         max_parallel_agent_requests: Some(1),
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -899,6 +838,7 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -965,6 +905,7 @@ fn validates_schema_backed_agent_output_and_retries_once() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -993,6 +934,7 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
@@ -1018,6 +960,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
         nesting_depth: 0,
         max_parallel_agent_requests: None,
         agent_runner: None,
+        cancel_rx: None,
         on_log: None,
         on_phase: None,
         on_agent_result: None,
