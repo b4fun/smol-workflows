@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinSet, LocalSet};
 
@@ -42,6 +42,23 @@ pub trait WorkflowAgentRunner: Send + Sync {
         provider_override: Option<String>,
         input: AgentProviderRunInput,
     ) -> anyhow::Result<AgentProviderResult>;
+
+    /// Whether the workflow scheduler should wrap this runner's `run_agent` call
+    /// in the per-agent retry loop.
+    ///
+    /// Most runners should use the default `true`: their `run_agent` method is a
+    /// single agent/provider boundary, so retrying it is safe and keeps retry
+    /// behavior centralized in the runtime scheduler.
+    ///
+    /// Runners that perform their own checkpointing or replay should return
+    /// `false` and apply retry internally around the nondeterministic provider
+    /// call. For example, the SQLite durable runner must not have the scheduler
+    /// retry its whole `run_agent` method, because each call advances durable
+    /// occurrence counters and may create a distinct checkpoint such as
+    /// `step:sig_x#2` instead of retrying the original durable step.
+    fn retry_in_runtime(&self) -> bool {
+        true
+    }
 
     async fn sleep(&self, duration_ms: u64) -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
@@ -925,6 +942,8 @@ impl RunState {
         let default_provider_name = self.agent_provider.name().to_string();
         let default_provider = Arc::clone(&self.agent_provider);
         let agent_runner = Arc::clone(&self.agent_runner);
+        let retry_in_runtime = agent_runner.retry_in_runtime();
+        let cancel_rx = self.cancel_rx.clone();
         let completion_input = prepared.input.clone();
         let completion_provider = prepared
             .provider_override
@@ -943,10 +962,21 @@ impl RunState {
         );
         self.active_request_ids.insert(id.clone());
         agent_tasks.spawn(async move {
-            let result = match agent_runner
-                .run_agent(default_provider, prepared.provider_override, prepared.input)
+            let result = if retry_in_runtime {
+                run_agent_runner_with_retry(
+                    Arc::clone(&agent_runner),
+                    default_provider,
+                    prepared.provider_override,
+                    prepared.input,
+                    cancel_rx,
+                )
                 .await
-            {
+            } else {
+                agent_runner
+                    .run_agent(default_provider, prepared.provider_override, prepared.input)
+                    .await
+            };
+            let result = match result {
                 Ok(result) => {
                     if let Some(session_log_sink) = session_log_sink.as_ref() {
                         let provider_name = completion_provider
@@ -1018,6 +1048,7 @@ impl RunState {
             .as_deref()
             .unwrap_or_else(|| self.agent_provider.name());
         let options = resolve_model_options(options, provider_name, &self.model_map)?;
+        agent_retry_policy(&options)?;
         log::debug!(
             "agent call provider={} phase={:?} model={:?} prompt_len={}",
             provider_name,
@@ -1165,6 +1196,108 @@ impl RunState {
     }
 }
 
+async fn run_agent_runner_with_retry(
+    agent_runner: Arc<dyn WorkflowAgentRunner>,
+    default_provider: Arc<dyn AgentProvider>,
+    provider_override: Option<String>,
+    input: AgentProviderRunInput,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> anyhow::Result<AgentProviderResult> {
+    let retry = agent_retry_policy(&input.options)?;
+    let mut final_result = None;
+    for attempt in 1..=retry.max_attempts {
+        let attempt_result = agent_runner
+            .run_agent(
+                Arc::clone(&default_provider),
+                provider_override.clone(),
+                input.clone(),
+            )
+            .await;
+        match attempt_result {
+            Ok(result) => {
+                final_result = Some(Ok(result));
+                break;
+            }
+            Err(error) if attempt < retry.max_attempts => {
+                log::debug!(
+                    "agent call failed on attempt {attempt}/{}; retrying after {}ms: {error:#}",
+                    retry.max_attempts,
+                    retry.backoff_ms
+                );
+                sleep_retry_backoff(retry.backoff_ms, &mut cancel_rx).await?;
+            }
+            Err(error) => {
+                final_result = Some(Err(error));
+                break;
+            }
+        }
+    }
+    final_result.unwrap_or_else(|| Err(anyhow!("agent retry loop finished without a result")))
+}
+
+async fn sleep_retry_backoff(
+    backoff_ms: u64,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+) -> anyhow::Result<()> {
+    if backoff_ms == 0 {
+        return Ok(());
+    }
+    let Some(cancel_rx) = cancel_rx.as_mut() else {
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        return Ok(());
+    };
+    if *cancel_rx.borrow() {
+        bail!("workflow cancelled");
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => Ok(()),
+        changed = cancel_rx.changed() => {
+            match changed {
+                Ok(()) if *cancel_rx.borrow() => bail!("workflow cancelled"),
+                Ok(()) => Ok(()),
+                Err(_) => Ok(()),
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_agent_provider_with_retry(
+    default_provider: Arc<dyn AgentProvider>,
+    provider_override: Option<String>,
+    input: AgentProviderRunInput,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> anyhow::Result<AgentProviderResult> {
+    let retry = agent_retry_policy(&input.options)?;
+    let mut final_result = None;
+    for attempt in 1..=retry.max_attempts {
+        let attempt_result = run_agent_provider(
+            Arc::clone(&default_provider),
+            provider_override.clone(),
+            input.clone(),
+        )
+        .await;
+        match attempt_result {
+            Ok(result) => {
+                final_result = Some(Ok(result));
+                break;
+            }
+            Err(error) if attempt < retry.max_attempts => {
+                log::debug!(
+                    "agent provider failed on attempt {attempt}/{}; retrying after {}ms: {error:#}",
+                    retry.max_attempts,
+                    retry.backoff_ms
+                );
+                sleep_retry_backoff(retry.backoff_ms, &mut cancel_rx).await?;
+            }
+            Err(error) => {
+                final_result = Some(Err(error));
+                break;
+            }
+        }
+    }
+    final_result.unwrap_or_else(|| Err(anyhow!("agent retry loop finished without a result")))
+}
+
 pub(crate) async fn run_agent_provider(
     default_provider: Arc<dyn AgentProvider>,
     provider_override: Option<String>,
@@ -1176,6 +1309,50 @@ pub(crate) async fn run_agent_provider(
         default_provider
     };
     run_agent_with_optional_isolation(provider, input).await
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentRetryPolicy {
+    pub max_attempts: u32,
+    pub backoff_ms: u64,
+}
+
+pub(crate) fn agent_retry_policy(options: &Option<Value>) -> anyhow::Result<AgentRetryPolicy> {
+    let default = AgentRetryPolicy {
+        max_attempts: 1,
+        backoff_ms: 0,
+    };
+    let Some(retry) = options.as_ref().and_then(|options| options.get("retry")) else {
+        return Ok(default);
+    };
+    if retry.is_null() {
+        return Ok(default);
+    }
+    let object = retry
+        .as_object()
+        .ok_or_else(|| anyhow!("agent retry option must be an object"))?;
+    let max_attempts = match object.get("maxAttempts") {
+        Some(value) => {
+            let value = value
+                .as_u64()
+                .ok_or_else(|| anyhow!("agent retry.maxAttempts must be a positive integer"))?;
+            if value == 0 || value > u32::MAX as u64 {
+                bail!("agent retry.maxAttempts must be between 1 and {}", u32::MAX);
+            }
+            value as u32
+        }
+        None => default.max_attempts,
+    };
+    let backoff_ms = match object.get("backoffMs") {
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| anyhow!("agent retry.backoffMs must be a non-negative integer"))?,
+        None => default.backoff_ms,
+    };
+    Ok(AgentRetryPolicy {
+        max_attempts,
+        backoff_ms,
+    })
 }
 
 async fn run_agent_with_optional_isolation(

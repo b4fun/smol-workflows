@@ -4,7 +4,7 @@ use smol_workflow_engine::agent_providers::{
     AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
 };
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
-use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
+use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions, WorkflowAgentRunner};
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
@@ -59,6 +59,14 @@ struct CwdProbeProvider {
 struct SchemaRetryProvider {
     prompts: Mutex<Vec<String>>,
     always_invalid: bool,
+}
+
+struct FlakyProvider {
+    calls: AtomicUsize,
+}
+
+struct RuntimeRetryRunner {
+    calls: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -260,6 +268,62 @@ impl AgentProvider for SchemaRetryProvider {
         };
         Ok(AgentProviderResult {
             output,
+            session_id: None,
+            model: None,
+            usage: Some(AgentUsage {
+                output_tokens: Some(1),
+                ..Default::default()
+            }),
+            isolation: None,
+            raw: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowAgentRunner for RuntimeRetryRunner {
+    async fn run_agent(
+        &self,
+        _default_provider: Arc<dyn AgentProvider>,
+        _provider_override: Option<String>,
+        input: AgentProviderRunInput,
+    ) -> anyhow::Result<AgentProviderResult> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            anyhow::bail!("runtime runner failure");
+        }
+        Ok(AgentProviderResult {
+            output: json!(format!("runner recovered: {}", input.prompt)),
+            session_id: None,
+            model: None,
+            usage: None,
+            isolation: None,
+            raw: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentProvider for FlakyProvider {
+    fn name(&self) -> &str {
+        "flaky"
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            anyhow::bail!("transient provider failure");
+        }
+        Ok(AgentProviderResult {
+            output: json!(format!("recovered: {}", input.prompt)),
             session_id: None,
             model: None,
             usage: Some(AgentUsage {
@@ -1434,6 +1498,80 @@ fn protects_workflow_globals_from_user_mutation() {
 }
 
 #[test]
+fn retries_agent_provider_failures_with_per_call_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_path = dir.path().join("retry.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "retry", description: "retry" };
+export default await agent("work", { retry: { maxAttempts: 2, backoffMs: 1 } });
+"#,
+    )
+    .unwrap();
+    let provider = Arc::new(FlakyProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider.clone(),
+        model_map: Default::default(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should retry agent call and recover");
+
+    assert_eq!(result.output.result, json!("recovered: work"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn retries_agent_runner_failures_in_runtime_scheduler() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_path = dir.path().join("runtime-retry.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "runtime-retry", description: "runtime retry" };
+export default await agent("runner work", { retry: { maxAttempts: 2, backoffMs: 1 } });
+"#,
+    )
+    .unwrap();
+    let runner = Arc::new(RuntimeRetryRunner {
+        calls: AtomicUsize::new(0),
+    });
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: Arc::new(DebugAgentProvider::new()),
+        model_map: Default::default(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: Some(runner.clone()),
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should retry through runtime scheduler and recover");
+
+    assert_eq!(result.output.result, json!("runner recovered: runner work"));
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn validates_schema_backed_agent_output_and_retries_once() {
     let provider = Arc::new(SchemaRetryProvider::new(false));
     let result = block_on(run_workflow(RunWorkflowOptions {
@@ -1490,6 +1628,52 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         "unexpected error: {error:#}"
     );
     assert_eq!(provider.prompts().len(), 2);
+}
+
+#[test]
+fn runtime_retry_wraps_structured_output_validation_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_path = dir.path().join("schema-runtime-retry.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: "schema-runtime-retry", description: "schema runtime retry" };
+export default await agent("produce schema result", {
+  retry: { maxAttempts: 2, backoffMs: 0 },
+  schema: {
+    type: "object",
+    properties: { summary: { type: "string" } },
+    required: ["summary"],
+    additionalProperties: false,
+  },
+});
+"#,
+    )
+    .unwrap();
+    let provider = Arc::new(SchemaRetryProvider::new(true));
+    let error = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider.clone(),
+        model_map: Default::default(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("Structured output did not match JSON Schema"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(provider.prompts().len(), 4);
 }
 
 #[test]

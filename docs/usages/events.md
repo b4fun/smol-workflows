@@ -329,4 +329,4 @@ Fatal CLI errors that occur before event streaming starts may still be written t
 - Consumers should use `metadata.provider` before interpreting `workflow.agent_event` payloads.
 - Consumers that only want the final root workflow result should filter `workflow.result` events to `metadata.workflowDepth === 0`.
 - `stepId` and `parentStepId` are opaque correlation identifiers. Consumers must not sort by them or infer execution order from their values.
-- Durable retry attempt IDs are not currently included in event metadata. If a durable workflow retries, operational events from earlier failed attempts may appear before the terminal root result/error; use JSONL order as the authoritative timeline.
+- Durable workflow attempt IDs are not currently included in event metadata. If a failed run is explicitly resumed, operational events from earlier attempts may appear in persisted history before the terminal root result/error; use JSONL order as the authoritative timeline.

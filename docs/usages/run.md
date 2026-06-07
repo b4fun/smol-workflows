@@ -184,7 +184,7 @@ The `run-id` must exist in the selected database. If it does not, the command re
 workflow run <run-id> was not found in <db-path>; check --db
 ```
 
-Completed durable agent steps are replayed instead of re-running. Failed or incomplete steps may be retried by the durable runner.
+Completed durable agent steps are replayed instead of re-running. Failed or incomplete steps may be reclaimed when the resumed workflow reaches them again. A `run` invocation does not automatically retry the whole workflow; configure per-agent `retry` options for transient provider failures.
 
 ### `--budget-allowance <output-token-count>`
 
