@@ -10,13 +10,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 use smol_workflow_engine::agent_providers::create_agent_provider;
 use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
-use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventType};
+use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventType};
 use smol_workflow_engine::workflow::AgentSessionLogSink;
 use std::fs;
 use std::io::{self, Stdout};
@@ -34,7 +34,9 @@ const MAX_REPLAY_SPEED: f64 = 64.0;
 const SEARCH_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
 const LIVE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(33);
 const LIVE_EVENTS_PER_TICK: usize = 256;
-const TIMELINE_BOTTOM_MARGIN: u16 = 2;
+const TIMED_REPLAY_EVENTS_PER_TICK: usize = 512;
+const DEFAULT_REPLAY_MAX_DELAY: StdDuration = StdDuration::from_millis(50);
+const TIMELINE_BOTTOM_MARGIN: u16 = 8;
 const BREATHING_LIGHT_INTERVAL_NANOS: i128 = 140_000_000;
 const DONE_TICK_DELAY: StdDuration = StdDuration::from_millis(700);
 
@@ -42,7 +44,6 @@ const DONE_TICK_DELAY: StdDuration = StdDuration::from_millis(700);
 pub struct ReplayCommandOptions {
     pub path: PathBuf,
     pub check: bool,
-    pub timed: bool,
     pub speed: f64,
     pub max_delay: Option<StdDuration>,
 }
@@ -184,9 +185,17 @@ enum PlaybackState {
 }
 
 #[derive(Debug, Clone)]
+struct TimelineViewEvent {
+    event_type: WorkflowEventType,
+    metadata: Option<WorkflowEventMetadata>,
+    timeline_visible: bool,
+    search_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct TimelineViewRequest {
     generation: u64,
-    events: Vec<EventRecord>,
+    events: Vec<TimelineViewEvent>,
     active_tab_key: Option<(u32, Option<String>)>,
     search_query: String,
 }
@@ -194,6 +203,9 @@ struct TimelineViewRequest {
 #[derive(Debug, Clone)]
 struct TimelineViewSnapshot {
     generation: u64,
+    events_len: usize,
+    active_tab_key: Option<(u32, Option<String>)>,
+    search_query: String,
     tabs: Vec<WorkflowScopeTab>,
     active_tab: usize,
     rows: Vec<TimelineRow>,
@@ -243,7 +255,7 @@ fn spawn_timeline_view_worker() -> (
                 request = next;
             }
 
-            let mut tabs = build_scope_tabs(&request.events);
+            let mut tabs = build_scope_tabs_for_view(&request.events);
             if tabs.is_empty() {
                 tabs.push(WorkflowScopeTab {
                     label: "root".to_string(),
@@ -262,13 +274,16 @@ fn spawn_timeline_view_worker() -> (
                 .unwrap_or(0);
             let visible = tabs
                 .get(active_tab)
-                .map(|tab| visible_indices_for(&request.events, tab, &request.search_query))
+                .map(|tab| visible_indices_for_view(&request.events, tab, &request.search_query))
                 .unwrap_or_default();
-            let rows = build_timeline_rows(&visible, &request.events);
+            let rows = build_timeline_rows_for_view(&visible, &request.events);
 
             if snapshot_tx
                 .send(TimelineViewSnapshot {
                     generation: request.generation,
+                    events_len: request.events.len(),
+                    active_tab_key: request.active_tab_key,
+                    search_query: request.search_query,
                     tabs,
                     active_tab,
                     rows,
@@ -292,9 +307,11 @@ struct TuiReplayApp {
     view_generation: u64,
     applied_view_generation: u64,
     pending_select_latest: bool,
+    follow_latest: bool,
     active_tab: usize,
     selected: usize,
     selected_by_tab: Vec<usize>,
+    selected_event_anchor: Option<usize>,
     details_scroll: usize,
     focus_pane: FocusPane,
     raw_details: bool,
@@ -307,7 +324,6 @@ struct TuiReplayApp {
     search_changed_at: Option<Instant>,
     warnings: Vec<String>,
     playback: PlaybackState,
-    timed: bool,
     speed: f64,
     max_delay: Option<StdDuration>,
     next_due: Option<Instant>,
@@ -337,10 +353,12 @@ impl TuiReplayApp {
             view_generation: 0,
             applied_view_generation: 0,
             pending_select_latest: false,
+            follow_latest: true,
             events,
             active_tab: 0,
             selected: 0,
             selected_by_tab,
+            selected_event_anchor: None,
             details_scroll: 0,
             focus_pane: FocusPane::Timeline,
             raw_details: false,
@@ -352,10 +370,9 @@ impl TuiReplayApp {
             search_query: String::new(),
             search_changed_at: None,
             playback: PlaybackState::Paused,
-            timed: options.timed,
             speed: normalize_replay_speed(options.speed),
-            max_delay: options.max_delay,
-            next_due: options.timed.then_some(Instant::now()),
+            max_delay: Some(options.max_delay.unwrap_or(DEFAULT_REPLAY_MAX_DELAY)),
+            next_due: Some(Instant::now()),
             replay_done_at: None,
             live_status: None,
             live_status_changed_at: None,
@@ -384,10 +401,12 @@ impl TuiReplayApp {
             view_generation: 0,
             applied_view_generation: 0,
             pending_select_latest: false,
+            follow_latest: true,
             events: Vec::new(),
             active_tab: 0,
             selected: 0,
             selected_by_tab: vec![0],
+            selected_event_anchor: None,
             details_scroll: 0,
             focus_pane: FocusPane::Timeline,
             raw_details: false,
@@ -399,7 +418,6 @@ impl TuiReplayApp {
             search_query: String::new(),
             search_changed_at: None,
             playback: PlaybackState::Paused,
-            timed: false,
             speed: 1.0,
             max_delay: None,
             next_due: None,
@@ -422,6 +440,7 @@ impl TuiReplayApp {
         self.visible_rows()
             .get(self.selected)
             .map(TimelineRow::event_index)
+            .filter(|index| *index < self.events.len())
     }
 
     fn selected_event(&self) -> Option<&EventRecord> {
@@ -448,17 +467,32 @@ impl TuiReplayApp {
         }
     }
 
+    fn active_tab_key(&self) -> Option<(u32, Option<String>)> {
+        self.tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.workflow_depth, tab.parent_step_id.clone()))
+    }
+
     fn request_view_update(&mut self) {
         self.view_generation = self.view_generation.saturating_add(1);
-        let active_tab_key = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| (tab.workflow_depth, tab.parent_step_id.clone()));
+        let active_tab_key = self.active_tab_key();
+        let search_query = self.search_query.clone();
+        let include_search_text = !search_query.is_empty();
+        let events = self
+            .events
+            .iter()
+            .map(|record| TimelineViewEvent {
+                event_type: record.event.event_type.clone(),
+                metadata: record.event.metadata.clone(),
+                timeline_visible: provider::should_show_in_timeline(record),
+                search_text: include_search_text.then(|| searchable_event_text(record)),
+            })
+            .collect();
         let request = TimelineViewRequest {
             generation: self.view_generation,
-            events: self.events.clone(),
+            events,
             active_tab_key,
-            search_query: self.search_query.clone(),
+            search_query,
         };
         let _ = self.view_request_tx.send(request);
     }
@@ -471,7 +505,12 @@ impl TuiReplayApp {
         let Some(snapshot) = latest else {
             return;
         };
-        if snapshot.generation < self.applied_view_generation {
+        if snapshot.generation <= self.applied_view_generation
+            || snapshot.generation > self.view_generation
+            || snapshot.events_len > self.events.len()
+            || snapshot.search_query != self.search_query
+            || snapshot.active_tab_key != self.active_tab_key()
+        {
             return;
         }
         self.applied_view_generation = snapshot.generation;
@@ -482,15 +521,33 @@ impl TuiReplayApp {
         if self.pending_select_latest {
             self.pending_select_latest = false;
             self.select_latest_visible();
+        } else if let Some(anchor) = self.selected_event_anchor {
+            if let Some(row_index) = self
+                .timeline_rows
+                .iter()
+                .position(|row| row.event_index() == anchor && anchor < self.events.len())
+            {
+                self.selected = row_index;
+                self.remember_selection();
+            } else {
+                self.clamp_selection();
+                self.anchor_current_selection();
+            }
         } else {
             self.clamp_selection();
         }
+    }
+
+    fn anchor_current_selection(&mut self) {
+        self.selected_event_anchor = self.selected_event_index();
     }
 
     fn select_latest_visible(&mut self) {
         let len = self.visible_rows().len();
         if len > 0 {
             self.selected = len - 1;
+            self.follow_latest = true;
+            self.selected_event_anchor = None;
             self.remember_selection();
         }
     }
@@ -509,27 +566,28 @@ impl TuiReplayApp {
             changed = true;
         }
         if changed {
-            self.pending_select_latest |= self.focus_pane == FocusPane::Timeline;
+            self.pending_select_latest |=
+                self.follow_latest && self.focus_pane == FocusPane::Timeline;
             self.request_view_update();
         }
     }
 
     fn reveal_next_event(&mut self) {
-        if let Some(event) = self.source_events.get(self.events.len()).cloned() {
-            self.events.push(event);
-            self.pending_select_latest = true;
-            self.mark_replay_done_if_complete();
-            self.request_view_update();
-        }
+        let next_len = self.events.len().saturating_add(1);
+        self.reveal_events_until(next_len);
     }
 
-    fn hide_last_event(&mut self) {
-        if self.events.pop().is_some() {
-            self.pending_select_latest = true;
-            self.mark_replay_done_if_complete();
-            self.request_view_update();
-            self.reset_details_scroll();
+    fn reveal_events_until(&mut self, target_len: usize) {
+        let current_len = self.events.len();
+        let target_len = target_len.min(self.source_events.len());
+        if target_len <= current_len {
+            return;
         }
+        self.events
+            .extend(self.source_events[current_len..target_len].iter().cloned());
+        self.pending_select_latest |= self.follow_latest;
+        self.mark_replay_done_if_complete();
+        self.request_view_update();
     }
 
     fn schedule_next_due(&mut self, now: Instant) {
@@ -540,16 +598,12 @@ impl TuiReplayApp {
             return;
         }
         let next_index = self.events.len();
-        let delay = if self.timed {
-            replay_delay(
-                self.source_events.get(next_index.saturating_sub(1)),
-                self.source_events.get(next_index),
-                self.speed,
-                self.max_delay,
-            )
-        } else {
-            StdDuration::ZERO
-        };
+        let delay = replay_delay(
+            self.source_events.get(next_index.saturating_sub(1)),
+            self.source_events.get(next_index),
+            self.speed,
+            self.max_delay,
+        );
         self.next_due = Some(now + delay);
     }
 
@@ -558,9 +612,33 @@ impl TuiReplayApp {
             return;
         }
         let now = Instant::now();
-        if self.next_due.is_some_and(|due| now >= due) {
-            self.reveal_next_event();
+        let Some(mut due) = self.next_due else {
             self.schedule_next_due(now);
+            return;
+        };
+        let mut target_len = self.events.len();
+        for _ in 0..TIMED_REPLAY_EVENTS_PER_TICK {
+            if now < due || target_len >= self.source_events.len() {
+                break;
+            }
+            target_len = target_len.saturating_add(1);
+            if target_len >= self.source_events.len() {
+                break;
+            }
+            due += replay_delay(
+                self.source_events.get(target_len.saturating_sub(1)),
+                self.source_events.get(target_len),
+                self.speed,
+                self.max_delay,
+            );
+        }
+        if target_len > self.events.len() {
+            self.reveal_events_until(target_len);
+            if self.replay_complete() {
+                self.schedule_next_due(now);
+            } else {
+                self.next_due = Some(due);
+            }
         }
     }
 
@@ -624,6 +702,8 @@ impl TuiReplayApp {
             let previous = self.selected;
             self.selected = (self.selected + 1).min(len - 1);
             if self.selected != previous {
+                self.follow_latest = false;
+                self.anchor_current_selection();
                 self.reset_details_scroll();
             }
         }
@@ -633,6 +713,8 @@ impl TuiReplayApp {
         let previous = self.selected;
         self.selected = self.selected.saturating_sub(1);
         if self.selected != previous {
+            self.follow_latest = false;
+            self.anchor_current_selection();
             self.reset_details_scroll();
         }
     }
@@ -643,6 +725,8 @@ impl TuiReplayApp {
             let previous = self.selected;
             self.selected = (self.selected + 10).min(len - 1);
             if self.selected != previous {
+                self.follow_latest = false;
+                self.anchor_current_selection();
                 self.reset_details_scroll();
             }
         }
@@ -652,6 +736,8 @@ impl TuiReplayApp {
         let previous = self.selected;
         self.selected = self.selected.saturating_sub(10);
         if self.selected != previous {
+            self.follow_latest = false;
+            self.anchor_current_selection();
             self.reset_details_scroll();
         }
     }
@@ -660,6 +746,8 @@ impl TuiReplayApp {
         let previous = self.selected;
         self.selected = 0;
         if self.selected != previous {
+            self.follow_latest = false;
+            self.anchor_current_selection();
             self.reset_details_scroll();
         }
     }
@@ -669,6 +757,7 @@ impl TuiReplayApp {
         if len > 0 {
             let previous = self.selected;
             self.selected = len - 1;
+            self.follow_latest = true;
             if self.selected != previous {
                 self.reset_details_scroll();
             }
@@ -777,10 +866,6 @@ impl TuiReplayApp {
                 self.playback = PlaybackState::Paused;
                 self.reveal_next_event();
             }
-            KeyCode::Char('p') => {
-                self.playback = PlaybackState::Paused;
-                self.hide_last_event();
-            }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.speed = (self.speed * 2.0).min(MAX_REPLAY_SPEED);
                 self.schedule_next_due(Instant::now());
@@ -816,11 +901,19 @@ impl TuiReplayApp {
             KeyCode::End => self.last(),
             KeyCode::Tab => self.next_tab(),
             KeyCode::BackTab => self.previous_tab(),
-            KeyCode::Right => self.focus_pane = FocusPane::Details,
-            KeyCode::Left => self.focus_pane = FocusPane::Timeline,
+            KeyCode::Char('2') => self.focus_pane = FocusPane::Details,
+            KeyCode::Char('1') => self.focus_pane = FocusPane::Timeline,
+            KeyCode::Char('p') => {
+                if self.raw_details {
+                    self.raw_details = false;
+                    self.reset_details_scroll();
+                }
+            }
             KeyCode::Char('r') => {
-                self.raw_details = !self.raw_details;
-                self.reset_details_scroll();
+                if !self.raw_details {
+                    self.raw_details = true;
+                    self.reset_details_scroll();
+                }
             }
             KeyCode::Char('t') => {
                 self.time_display = match self.time_display {
@@ -1056,6 +1149,73 @@ fn build_scope_tabs(events: &[EventRecord]) -> Vec<WorkflowScopeTab> {
     tabs
 }
 
+fn build_scope_tabs_for_view(events: &[TimelineViewEvent]) -> Vec<WorkflowScopeTab> {
+    let mut tabs = vec![WorkflowScopeTab {
+        label: "root".to_string(),
+        workflow_depth: 0,
+        parent_step_id: None,
+    }];
+
+    for record in events {
+        if record.event_type != WorkflowEventType::Started {
+            continue;
+        }
+        let Some(metadata) = record.metadata.as_ref() else {
+            continue;
+        };
+        let depth = metadata.workflow_depth.unwrap_or(0);
+        if depth == 0 {
+            continue;
+        }
+        let Some(parent_step_id) = metadata.parent_step_id.clone() else {
+            continue;
+        };
+        if tabs.iter().any(|tab| {
+            tab.workflow_depth == depth && tab.parent_step_id.as_ref() == Some(&parent_step_id)
+        }) {
+            continue;
+        }
+        tabs.push(WorkflowScopeTab {
+            label: format!("child {}", short_id(&parent_step_id)),
+            workflow_depth: depth,
+            parent_step_id: Some(parent_step_id),
+        });
+    }
+
+    tabs
+}
+
+fn build_timeline_rows_for_view(
+    visible_indices: &[usize],
+    events: &[TimelineViewEvent],
+) -> Vec<TimelineRow> {
+    let mut grouped_rows = Vec::<TimelineRow>::new();
+    let mut group_row_by_key = std::collections::HashMap::<String, usize>::new();
+
+    for event_index in visible_indices.iter().copied() {
+        let record = &events[event_index];
+        let Some(group_key) = agent_group_key_for_view(record) else {
+            grouped_rows.push(TimelineRow::Event { event_index });
+            continue;
+        };
+
+        if let Some(row_index) = group_row_by_key.get(&group_key).copied() {
+            if let TimelineRow::AgentGroup { event_indices } = &mut grouped_rows[row_index] {
+                event_indices.push(event_index);
+            }
+            continue;
+        }
+
+        group_row_by_key.insert(group_key, grouped_rows.len());
+        grouped_rows.push(TimelineRow::AgentGroup {
+            event_indices: vec![event_index],
+        });
+    }
+
+    expand_grouped_rows(grouped_rows, visible_indices.len())
+}
+
+#[cfg(test)]
 fn build_timeline_rows(visible_indices: &[usize], events: &[EventRecord]) -> Vec<TimelineRow> {
     let mut grouped_rows = Vec::<TimelineRow>::new();
     let mut group_row_by_key = std::collections::HashMap::<String, usize>::new();
@@ -1080,7 +1240,11 @@ fn build_timeline_rows(visible_indices: &[usize], events: &[EventRecord]) -> Vec
         });
     }
 
-    let mut rows = Vec::with_capacity(visible_indices.len());
+    expand_grouped_rows(grouped_rows, visible_indices.len())
+}
+
+fn expand_grouped_rows(grouped_rows: Vec<TimelineRow>, capacity: usize) -> Vec<TimelineRow> {
+    let mut rows = Vec::with_capacity(capacity);
     for row in grouped_rows {
         match row {
             TimelineRow::AgentGroup { event_indices } => {
@@ -1102,12 +1266,11 @@ fn build_timeline_rows(visible_indices: &[usize], events: &[EventRecord]) -> Vec
             }
         }
     }
-
     rows
 }
 
-fn visible_indices_for(
-    events: &[EventRecord],
+fn visible_indices_for_view(
+    events: &[TimelineViewEvent],
     tab: &WorkflowScopeTab,
     search_query: &str,
 ) -> Vec<usize> {
@@ -1115,24 +1278,21 @@ fn visible_indices_for(
     events
         .iter()
         .enumerate()
-        .filter(|(_, record)| event_in_scope(record, tab))
-        .filter(|(_, record)| provider::should_show_in_timeline(record))
+        .filter(|(_, record)| event_in_scope_for_view(record, tab))
+        .filter(|(_, record)| record.timeline_visible)
         .filter(|(_, record)| {
             query.is_empty()
-                || searchable_event_text(record)
-                    .to_ascii_lowercase()
-                    .contains(&query)
-                || serde_json::to_string(&record.raw)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .contains(&query)
+                || record
+                    .search_text
+                    .as_deref()
+                    .is_some_and(|text| text.to_ascii_lowercase().contains(&query))
         })
         .map(|(index, _)| index)
         .collect()
 }
 
-fn event_in_scope(record: &EventRecord, tab: &WorkflowScopeTab) -> bool {
-    let metadata = record.event.metadata.as_ref();
+fn event_in_scope_for_view(record: &TimelineViewEvent, tab: &WorkflowScopeTab) -> bool {
+    let metadata = record.metadata.as_ref();
     let depth = metadata
         .and_then(|metadata| metadata.workflow_depth)
         .unwrap_or(0);
@@ -1260,29 +1420,18 @@ fn run_live_tui_loop(
 fn render(frame: &mut Frame<'_>, app: &TuiReplayApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Min(5)])
         .split(frame.area());
 
-    let status = status_line(app);
-    frame.render_widget(Paragraph::new(status), root[0]);
-
-    render_tab_bar(frame, app, root[1]);
+    render_header_pane(frame, app, root[0]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(root[2]);
+        .split(root[1]);
 
     render_timeline(frame, app, body[0]);
     render_details(frame, app, body[1]);
-
-    let footer = "q quit  Tab tabs  ←/→ pane  ↑/↓ scroll/select  / search  r raw/pretty  t time";
-    frame.render_widget(Paragraph::new(footer), root[3]);
 
     if app.search_open {
         render_search_overlay(frame, app);
@@ -1292,14 +1441,32 @@ fn render(frame: &mut Frame<'_>, app: &TuiReplayApp) {
     }
 }
 
+fn render_header_pane(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(status_line(app)), rows[0]);
+    render_tab_bar(frame, app, rows[1]);
+}
+
 fn render_tab_bar(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
-    let mut spans = vec![Span::styled(
-        " Workflows ",
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            " Workflows ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
     spans.push(Span::raw(" "));
     for (index, tab) in app.tabs.iter().enumerate() {
         let selected = index == app.active_tab;
@@ -1319,23 +1486,20 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layo
         Style::default().fg(Color::Gray),
     ));
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
     let rows = app.visible_rows();
-    let title = if app.search_query.is_empty() {
+    let title_suffix = if app.search_query.is_empty() {
         format!(
-            " Timeline ({}/{}) ",
+            "timeline ({}/{}) ",
             app.selected.saturating_add(1),
             rows.len()
         )
     } else {
         format!(
-            " Timeline ({}/{}) search: {} ",
+            "timeline ({}/{}) search: {} ",
             app.selected.saturating_add(1),
             rows.len(),
             app.search_query
@@ -1343,11 +1507,14 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
     };
     let focused = app.focus_pane == FocusPane::Timeline;
     let title_color = if focused { Color::Cyan } else { Color::Blue };
-    let (_title_area, content_area) = render_pane_shell(frame, area, title, title_color, focused);
-    let content_area = pad_content_area(content_area, 2, 0);
+    let title = pane_title("¹", title_suffix, title_color, focused);
+    let (_title_area, content_area) =
+        render_pane_shell(frame, area, title, title_color, focused, None);
+    let content_area = pad_content_area(content_area, 1, 0);
+    let (list_area, scroll_indicator_area) = timeline_list_areas(content_area);
 
     let query = app.search_query.to_ascii_lowercase();
-    let height = usize::from(content_area.height).max(1);
+    let height = usize::from(list_area.height).max(1);
     let bottom_margin = usize::from(TIMELINE_BOTTOM_MARGIN);
     let virtual_len = rows.len().saturating_add(bottom_margin);
     let virtual_selected = if rows.is_empty() {
@@ -1362,18 +1529,107 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
             let Some(row) = rows.get(row_index) else {
                 return ListItem::new(Line::from(""));
             };
+            if !timeline_row_valid(row, app.events.len()) {
+                return ListItem::new(Line::from(""));
+            }
             let event_index = row.event_index();
             let summary = timeline_row_summary(app, row);
             let selected = row_index == app.selected;
+            let distance = row_index.abs_diff(app.selected);
+            let dim_enabled = true;
             let search_match = !query.is_empty() && summary.to_ascii_lowercase().contains(&query);
             let line = Line::from(vec![Span::styled(
                 summary,
-                timeline_event_style(&app.events[event_index], selected, search_match),
+                timeline_event_style(
+                    &app.events[event_index],
+                    selected,
+                    search_match,
+                    distance,
+                    dim_enabled,
+                ),
             )]);
             ListItem::new(line)
         })
         .collect::<Vec<_>>();
-    frame.render_widget(List::new(items), content_area);
+    frame.render_widget(List::new(items), list_area);
+    render_timeline_scroll_indicator(
+        frame,
+        scroll_indicator_area,
+        start > 0,
+        end < virtual_len,
+        focused,
+    );
+}
+
+fn timeline_list_areas(
+    area: ratatui::layout::Rect,
+) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
+    if area.width == 0 {
+        return (area, area);
+    }
+    let indicator_width = 1;
+    let list_area = ratatui::layout::Rect {
+        width: area.width.saturating_sub(indicator_width),
+        ..area
+    };
+    let indicator_area = ratatui::layout::Rect {
+        x: area.x.saturating_add(list_area.width),
+        width: indicator_width,
+        ..area
+    };
+    (list_area, indicator_area)
+}
+
+fn render_timeline_scroll_indicator(
+    frame: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    can_scroll_up: bool,
+    can_scroll_down: bool,
+    focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let active_style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let inactive_style = Style::default().fg(Color::DarkGray);
+    frame.render_widget(
+        Paragraph::new("↑").style(if can_scroll_up {
+            active_style
+        } else {
+            inactive_style
+        }),
+        area,
+    );
+    let bottom = ratatui::layout::Rect {
+        y: area.y.saturating_add(area.height.saturating_sub(1)),
+        height: 1,
+        ..area
+    };
+    frame.render_widget(
+        Paragraph::new("↓").style(if can_scroll_down {
+            active_style
+        } else {
+            inactive_style
+        }),
+        bottom,
+    );
+}
+
+fn timeline_row_valid(row: &TimelineRow, events_len: usize) -> bool {
+    match row {
+        TimelineRow::Event { event_index } | TimelineRow::AgentChild { event_index, .. } => {
+            *event_index < events_len
+        }
+        TimelineRow::AgentGroup { event_indices } => {
+            !event_indices.is_empty() && event_indices.iter().all(|index| *index < events_len)
+        }
+    }
 }
 
 fn scroll_start(selected: usize, len: usize, height: usize) -> usize {
@@ -1386,7 +1642,13 @@ fn scroll_start(selected: usize, len: usize, height: usize) -> usize {
     }
 }
 
-fn timeline_event_style(record: &EventRecord, selected: bool, search_match: bool) -> Style {
+fn timeline_event_style(
+    record: &EventRecord,
+    selected: bool,
+    search_match: bool,
+    distance_from_selected: usize,
+    dim_enabled: bool,
+) -> Style {
     if selected {
         return Style::default().fg(Color::Black).bg(Color::Cyan);
     }
@@ -1395,7 +1657,15 @@ fn timeline_event_style(record: &EventRecord, selected: bool, search_match: bool
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
     }
-    event_type_style(&record.event.event_type)
+
+    let style = event_type_style(&record.event.event_type);
+    if !dim_enabled {
+        return style;
+    }
+    match distance_from_selected {
+        0..=8 => style,
+        _ => style.add_modifier(Modifier::DIM),
+    }
 }
 
 fn event_type_style(event_type: &WorkflowEventType) -> Style {
@@ -1425,11 +1695,10 @@ fn pad_content_area(area: ratatui::layout::Rect, left: u16, top: u16) -> ratatui
 }
 
 fn render_details(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
-    let title = if app.raw_details {
-        " Details: raw JSON "
-    } else {
-        " Details: pretty "
-    };
+    let focused = app.focus_pane == FocusPane::Details;
+    let title_color = if focused { Color::Cyan } else { Color::Blue };
+    let title = pane_title("²", "details ".to_string(), title_color, focused);
+    let mode_label = details_mode_label(app.raw_details, focused);
     let lines = app
         .selected_event()
         .map(|record| {
@@ -1441,48 +1710,94 @@ fn render_details(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layo
             }
         })
         .unwrap_or_else(|| vec![Line::raw("No event selected")]);
-    let focused = app.focus_pane == FocusPane::Details;
-    let title_color = if focused { Color::Cyan } else { Color::Blue };
     let (_title_area, content_area) =
-        render_pane_shell(frame, area, title.to_string(), title_color, focused);
+        render_pane_shell(frame, area, title, title_color, focused, Some(mode_label));
     let paragraph = Paragraph::new(pad_details_lines(lines))
         .scroll((u16::try_from(app.details_scroll).unwrap_or(u16::MAX), 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, content_area);
 }
 
-fn render_pane_shell(
-    frame: &mut Frame<'_>,
-    area: ratatui::layout::Rect,
-    title: String,
+fn details_mode_label(raw_details: bool, focused: bool) -> Line<'static> {
+    let active_style = Style::default()
+        .fg(if focused {
+            Color::LightCyan
+        } else {
+            Color::Gray
+        })
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(Color::DarkGray);
+    let shortcut_style = Style::default()
+        .fg(Color::LightBlue)
+        .add_modifier(Modifier::BOLD);
+    let pretty_style = if raw_details {
+        inactive_style
+    } else {
+        active_style
+    };
+    let raw_style = if raw_details {
+        active_style
+    } else {
+        inactive_style
+    };
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("p", shortcut_style),
+        Span::styled("retty", pretty_style),
+        Span::styled("/", Style::default().fg(Color::DarkGray)),
+        Span::styled("r", shortcut_style),
+        Span::styled("aw", raw_style),
+        Span::raw(" "),
+    ])
+}
+
+fn pane_title(
+    shortcut: &'static str,
+    label: String,
     title_bg: Color,
     focused: bool,
-) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
-    let block = if focused {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(title_bg))
-    } else {
-        Block::default().borders(Borders::ALL)
-    };
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
+) -> Line<'static> {
     let title_style = if focused {
-        Style::default()
-            .fg(Color::Black)
-            .bg(title_bg)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(title_bg).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     };
-    frame.render_widget(Paragraph::new(title).style(title_style), chunks[0]);
-    (chunks[0], chunks[1])
+    let shortcut_style = Style::default()
+        .fg(Color::LightBlue)
+        .add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(shortcut, shortcut_style),
+        Span::styled(label, title_style),
+    ])
+}
+
+fn render_pane_shell(
+    frame: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    title: Line<'static>,
+    title_bg: Color,
+    focused: bool,
+    border_label: Option<Line<'static>>,
+) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
+    let border_style = if focused {
+        Style::default().fg(title_bg)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(title);
+    if let Some(border_label) = border_label {
+        block = block.title(border_label);
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    (area, inner)
 }
 
 fn pad_details_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
@@ -1562,10 +1877,6 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
     } else {
         format!("  warnings {}", app.warnings.len())
     };
-    let time_mode = match app.time_display {
-        TimeDisplayMode::Elapsed => "elapsed",
-        TimeDisplayMode::LocalTime => "local",
-    };
     if let Some(live_status) = app.live_status {
         let terminal_indicator = |fallback: &str| {
             if app
@@ -1606,7 +1917,7 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
             Span::raw(" "),
             Span::styled(status, status_style),
             Span::raw(format!(
-                "  {run_id}  events {}  tab {}/{}  time {time_mode}{error}",
+                "  {run_id}  events {}  tab {}/{}{error}",
                 app.events.len(),
                 app.active_tab + 1,
                 app.tabs.len(),
@@ -1615,7 +1926,7 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
     }
     let (playback, playback_style) = match app.playback {
         PlaybackState::Playing => (
-            "REPLAY PLAYING".to_string(),
+            format!("{} REPLAY PLAYING", breathing_light()),
             Style::default()
                 .fg(Color::Rgb(255, 165, 0))
                 .add_modifier(Modifier::BOLD),
@@ -1637,7 +1948,7 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
             )
         }
         PlaybackState::Paused => (
-            "REPLAY PAUSED".to_string(),
+            "• REPLAY PAUSED".to_string(),
             Style::default()
                 .fg(Color::Rgb(255, 165, 0))
                 .add_modifier(Modifier::BOLD),
@@ -1647,7 +1958,7 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
         Span::raw(" "),
         Span::styled(playback, playback_style),
         Span::raw(format!(
-            "  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x  time {time_mode}{}",
+            "  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x{}",
             app.events.len(),
             app.source_events.len(),
             app.active_tab + 1,
@@ -1761,9 +2072,12 @@ fn timeline_indent(depth: u32) -> String {
     "  ".repeat(usize::try_from(depth).unwrap_or(usize::MAX / 2))
 }
 
-fn agent_group_key(record: &EventRecord) -> Option<String> {
+fn agent_group_key_for_parts(
+    event_type: &WorkflowEventType,
+    metadata: Option<&WorkflowEventMetadata>,
+) -> Option<String> {
     if !matches!(
-        record.event.event_type,
+        event_type,
         WorkflowEventType::AgentStarted
             | WorkflowEventType::AgentEvent
             | WorkflowEventType::AgentCompleted
@@ -1771,12 +2085,21 @@ fn agent_group_key(record: &EventRecord) -> Option<String> {
     ) {
         return None;
     }
-    let metadata = record.event.metadata.as_ref()?;
+    let metadata = metadata?;
     metadata
         .step_id
         .as_ref()
         .or(metadata.session_id.as_ref())
         .cloned()
+}
+
+fn agent_group_key_for_view(record: &TimelineViewEvent) -> Option<String> {
+    agent_group_key_for_parts(&record.event_type, record.metadata.as_ref())
+}
+
+#[cfg(test)]
+fn agent_group_key(record: &EventRecord) -> Option<String> {
+    agent_group_key_for_parts(&record.event.event_type, record.event.metadata.as_ref())
 }
 
 fn searchable_event_text(record: &EventRecord) -> String {
@@ -1953,7 +2276,15 @@ fn pretty_details_lines(
             style.add_modifier(Modifier::BOLD),
         ),
     ]));
-    lines.push(Line::from(format!("time: {}", display_time(app, event))));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "t",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("ime: {}", display_time(app, event))),
+    ]));
     if let Some(metadata) = metadata {
         lines.push(Line::from(format!(
             "workflowDepth: {}",

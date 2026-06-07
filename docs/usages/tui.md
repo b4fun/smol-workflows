@@ -13,7 +13,7 @@ The `tui` command group covers two related workflows:
 
 The TUI consumes the same workflow event JSONL format described in [`events.md`](events.md). It does not require a different tracing format.
 
-> Status: `smol-wf tui replay` is implemented for interactive inspection, timed playback, and `--check` validation. `smol-wf tui run` is implemented for live workflow event streaming.
+> Status: `smol-wf tui replay` is implemented for interactive inspection, elapsed-time playback, and `--check` validation. `smol-wf tui run` is implemented for live workflow event streaming.
 
 ## Commands
 
@@ -108,18 +108,13 @@ smol-wf tui replay -
 
 ### Replay options
 
-#### `--timed`
-
-Replay events using their `elapsedNanos` timing once playback is started. Without `--timed`, playback advances as quickly as the terminal loop can render, while `n` still steps one event at a time.
-
-```sh
-smol-wf tui replay events.jsonl --timed
-```
+Replay uses `elapsedNanos` timing once playback is started.
 
 Rules:
 
 - JSONL order remains authoritative;
 - `elapsedNanos` controls delay between events when present;
+- long pauses are capped by `--max-delay` (`50ms` by default);
 - events with equal `elapsedNanos` preserve file order;
 - events missing `elapsedNanos` are applied immediately.
 
@@ -128,7 +123,7 @@ Rules:
 Set replay speed.
 
 ```sh
-smol-wf tui replay events.jsonl --timed --speed 2.0
+smol-wf tui replay events.jsonl --speed 2.0
 ```
 
 Examples:
@@ -144,10 +139,10 @@ Replay speed is clamped to a practical range of `0.1` to `64.0`. Very small valu
 Cap long replay pauses.
 
 ```sh
-smol-wf tui replay events.jsonl --timed --max-delay 5s
+smol-wf tui replay events.jsonl --max-delay 5s
 ```
 
-This is useful when a real workflow had long waits but the user wants a quick replay.
+This is useful when a real workflow had long waits but the user wants a quick replay. The default cap is `50ms`.
 
 #### `--check`
 
@@ -305,17 +300,16 @@ Implemented replay keybindings:
 q / Esc      quit
 Tab          switch to next workflow scope tab
 Shift+Tab    switch to previous workflow scope tab
-←/→          switch focus between timeline and details panes
+1 / 2        focus timeline / details pane
 ↑/↓          move timeline selection or scroll details, depending on focused pane
 PgUp/PgDn    page timeline selection or details scroll, depending on focused pane
 Home/End     jump to first/latest timeline event; Home scrolls details to top when details is focused
 /            open search overlay
 Enter / Esc  close search overlay
-r            toggle pretty/raw details view
+p / r        show pretty/raw details view
 t            toggle elapsed/local time display
 Space        play/pause replay playback
 n            reveal next event and pause
-p            hide previous event and pause
 +            faster
 -            slower
 0            reset speed
@@ -324,7 +318,7 @@ p            hide previous event and pause
 Live-only keybindings:
 
 ```txt
-c            request cancellation
+Ctrl-C       request cancellation
 ```
 
 Planned significant-event jump keybindings:

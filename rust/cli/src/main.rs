@@ -105,7 +105,6 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 tui::replay_command(tui::ReplayCommandOptions {
                     path: PathBuf::from(path),
                     check: matches.get_flag("check"),
-                    timed: matches.get_flag("timed"),
                     speed: speed.unwrap_or(1.0),
                     max_delay,
                 })
@@ -1829,27 +1828,21 @@ fn cli_command() -> ClapCommand {
                                 .action(ArgAction::SetTrue),
                         )
                         .arg(
-                            Arg::new("timed")
-                                .long("timed")
-                                .help("Replay events using elapsedNanos timing")
-                                .action(ArgAction::SetTrue),
-                        )
-                        .arg(
                             Arg::new("speed")
                                 .long("speed")
                                 .value_name("factor")
-                                .help("Timed replay speed multiplier, e.g. 2.0")
+                                .help("Replay speed multiplier, e.g. 2.0")
                                 .num_args(1),
                         )
                         .arg(
                             Arg::new("max-delay")
                                 .long("max-delay")
                                 .value_name("duration")
-                                .help("Cap timed replay pauses, e.g. 5s or 250ms")
+                                .help("Cap replay pauses, e.g. 5s or 250ms; defaults to 50ms")
                                 .num_args(1),
                         )
                         .after_help(
-                            "Examples:\n  smol-wf run ./workflow.mjs --events > events.jsonl\n  smol-wf tui replay events.jsonl\n  smol-wf tui replay events.jsonl --timed --speed 2.0 --max-delay 5s\n  smol-wf tui replay events.jsonl --check",
+                            "Examples:\n  smol-wf run ./workflow.mjs --events > events.jsonl\n  smol-wf tui replay events.jsonl\n  smol-wf tui replay events.jsonl --speed 2.0 --max-delay 5s\n  smol-wf tui replay events.jsonl --check",
                         ),
                 ),
         )
