@@ -952,6 +952,7 @@ fn humanize_duration(duration_ms: i64) -> String {
     format!("{}y", months / 12)
 }
 
+const TOP_LEVEL_AFTER_HELP: &str = include_str!("../assets/help.txt");
 const LLM_USAGE_TEXT: &str = include_str!("../assets/llm.txt");
 
 async fn llm_txt_command(argv: Vec<String>) -> anyhow::Result<()> {
@@ -1820,9 +1821,7 @@ fn cli_command() -> ClapCommand {
         .override_usage("smol-wf <command> [flags]")
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .after_help(
-            "Running workflows:\n  smol-wf run <workflow-script> [run-options] [--args-<name> value ...]\n    Run a JavaScript workflow. Progress logs go to stderr; final JSON goes to stdout.\n\n  Examples:\n    smol-wf run ./workflow.mjs --agent-provider pi --args-target \"coredns pods under kube-system\"\n    smol-wf run ./.agents/workflows/pod-diagnostics.mjs --agent-provider opencode --args-from-file args.json\n\nRun history:\n  smol-wf history [flags]\n    Show previous workflow runs from the local SQLite history database.\n\nLLM usage guide:\n  smol-wf llm txt\n    Dump llms.txt-style usage guidance for LLM and coding agents.\n\nWorkflow discovery:\n  smol-wf llm list-workflows\n    List workflow scripts under .agents/workflows and .claude/workflows.\n\nRun \"smol-wf <command> --help\" for command-specific flags.\n",
-        )
+        .after_help(TOP_LEVEL_AFTER_HELP)
         .subcommand(
             ClapCommand::new("run")
                 .about("Run a workflow script")

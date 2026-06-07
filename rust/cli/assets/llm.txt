@@ -4,7 +4,7 @@ Use smol-wf to discover, author, and run repository workflows.
 
 Commands:
   smol-wf --help
-    Show top-level CLI help, version, Running workflows examples, run history, workflow discovery, and the LLM usage guide pointer.
+    Show top-level CLI help, version, Running workflows examples, run history, workflow discovery, and the LLM usage guide pointer. Help topic text is embedded from rust/cli/assets/help.txt.
 
   smol-wf --version
     Show the smol-wf CLI version.
