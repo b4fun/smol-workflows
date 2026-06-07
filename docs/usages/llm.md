@@ -6,6 +6,38 @@ LLM-facing helper commands.
 smol-wf llm <command>
 ```
 
+## `txt`
+
+Print concise LLM-oriented usage text for discovering and running workflows.
+
+```sh
+smol-wf llm txt
+```
+
+The output is plain text and includes:
+
+- workflow script shape:
+  ```ts
+  export const meta = { name: "my-workflow", description: "What it does" }
+  export default result
+  export default async function workflow(input, ctx) { return result }
+  ```
+- workflow primitive syntax, including:
+  ```ts
+  args: Record<string, unknown>
+  agent(prompt: string, options?: AgentRunOptions): Promise<string | null>
+  parallel(tasks: Array<() => Promise<T> | T>): Promise<Array<T | null>>
+  pipeline(items, stage1, stage2, ...): Promise<Array<Final | null>>
+  workflow(nameOrRef: string | { scriptPath: string }, args?: unknown): Promise<unknown>
+  budget.total: number | null
+  budget.spent(): number
+  budget.remaining(): number
+  phase(name: string, options?: unknown): void
+  log(...values: unknown[]): void
+  ```
+
+The embedded source text for this command lives in `rust/cli/assets/llm.txt`.
+
 ## `list-workflows`
 
 List workflow scripts discoverable from the current Git repository.

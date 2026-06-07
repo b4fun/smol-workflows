@@ -42,6 +42,38 @@ fn run_help_does_not_treat_h_as_script_path() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to resolve workflow script"));
 }
 
+#[test]
+fn top_level_help_shows_running_workflows_and_llm_usage_guide() {
+    let output = smol_wf()
+        .arg("--help")
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(concat!("Version: ", env!("CARGO_PKG_VERSION"))));
+    assert!(stdout.contains("Usage: smol-wf <command> [flags]"));
+    assert!(stdout.contains("Running workflows:"));
+    assert!(stdout.contains("smol-wf run <workflow-script>"));
+    assert!(stdout.contains("smol-wf run ./workflow.mjs"));
+    assert!(stdout.contains("LLM usage guide:"));
+    assert!(stdout.contains("smol-wf llm txt"));
+    assert!(stdout.contains("Workflow discovery:"));
+    assert!(stdout.contains("Run history:"));
+}
+
+#[test]
+fn top_level_version_flag_prints_version() {
+    let output = smol_wf()
+        .arg("--version")
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+}
+
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "smol-wf-cli-test-{}-{}-{name}",
@@ -104,6 +136,27 @@ fn git(repo: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn llm_txt_prints_llm_usage() {
+    let output = smol_wf()
+        .args(["llm", "txt"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("smol-wf LLM usage"));
+    assert!(stdout.contains("smol-wf llm list-workflows"));
+    assert!(stdout.contains("smol-wf run <workflow-script>"));
+    assert!(stdout.contains("Workflow primitives syntax"));
+    assert!(stdout.contains("pipeline(items, stage1, stage2, ...)"));
+    assert!(stdout.contains("tokenUsage"));
 }
 
 #[test]

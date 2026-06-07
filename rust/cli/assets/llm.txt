@@ -1,0 +1,80 @@
+smol-wf LLM usage
+
+Use smol-wf to discover, author, and run repository workflows.
+
+Commands:
+  smol-wf --help
+    Show top-level CLI help, version, Running workflows examples, run history, workflow discovery, and the LLM usage guide pointer.
+
+  smol-wf --version
+    Show the smol-wf CLI version.
+
+  smol-wf llm txt
+    Print this LLM-oriented usage text.
+
+  smol-wf llm list-workflows
+    List discoverable workflow scripts from the current Git repository.
+    Searches .agents/workflows and .claude/workflows for .js/.mjs files
+    that export workflow metadata. Output columns are NAME, PATH, DESCRIPTION.
+
+  smol-wf run <workflow-script> [run-options] [--args-<name> value ...]
+    Run a workflow script. Progress is written to stderr. The final JSON report
+    is written to stdout unless --events is used.
+
+Common run options:
+  --agent-provider debug|claude-code|codex|opencode|pi
+  --model-map alias:selector        Repeatable model alias mapping.
+  --budget-allowance outputTokens   Optional output-token budget.
+  --max-parallel-agents count       Optional agent concurrency cap.
+  --args-<name> value               Pass a workflow argument.
+  --args-from-file <json-file>      Load workflow arguments from a JSON object.
+
+Default run stdout JSON shape:
+  {"tokenUsage":{"inputTokens":0,"outputTokens":0,"totalTokens":0},"runID":"run_...","results":{}}
+
+Workflow script shape:
+  export const meta = { name: "my-workflow", description: "What it does" }
+  export default result
+
+  // or, for explicit input/context parameters:
+  export default async function workflow(input, ctx) { return result }
+
+Workflow primitives syntax:
+  args: Record<string, unknown>
+    Workflow input values from --args-* / --args-from-file or parent workflow args.
+
+  agent(prompt, options?)
+    agent(prompt: string, options?: AgentRunOptions): Promise<string | null>
+    agent(prompt: string, { schema, ...options }): Promise<object | null>
+    Useful options: phase, schema, model, provider, isolation, agentType, retry.
+
+  parallel(tasks)
+    parallel(tasks: Array<() => Promise<T> | T>): Promise<Array<T | null>>
+    Run independent async tasks concurrently. Results preserve input order.
+    A task failure becomes null for that task; siblings continue.
+
+  pipeline(items, ...stages)
+    pipeline(items, stage1, stage2, ...): Promise<Array<Final | null>>
+    Each stage has signature: (previous, item, index) => Promise<next> | next.
+    For the first stage, previous is the original item. Later stages receive the
+    previous stage result. Items move to the next stage as soon as ready; there
+    is no global barrier between stages. A stage failure makes that item null
+    and skips later stages for that item.
+
+  workflow(nameOrRef, args?)
+    workflow(nameOrRef: string | { scriptPath: string }, args?: unknown): Promise<unknown>
+    Invoke a child workflow. Relative scriptPath resolves from the current workflow file.
+
+  budget
+    budget.total: number | null
+    budget.spent(): number
+    budget.remaining(): number
+    Inspect the shared output-token budget from --budget-allowance.
+
+  phase(name, options?)
+    phase(name: string, options?: unknown): void
+    Mark current progress phase for logs, tracing, and phase defaults.
+
+  log(...values)
+    log(...values: unknown[]): void
+    Write progress/debug messages to stderr without changing workflow results.

@@ -10,6 +10,8 @@ Examples:
 - Include them from Rust with `include_str!("rquickjs_js/<file>.js")`.
 - Keep inline Rust JS strings only for very small snippets where a separate asset would make the code less clear.
 
+When making user-visible CLI changes, also review and update `rust/cli/assets/llm.txt` so `smol-wf llm txt` stays accurate for coding agents.
+
 After making Rust workspace changes, run the relevant format, lint, and test commands before handing off. At minimum, prefer:
 
 ```sh

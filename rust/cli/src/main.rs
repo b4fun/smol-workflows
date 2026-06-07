@@ -74,6 +74,7 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
             run_command(script_path, run_args).await
         }
         Some(("llm", matches)) => match matches.subcommand() {
+            Some(("txt", _)) => llm_txt_command(Vec::new()).await,
             Some(("list-workflows", _)) => list_workflows_command(Vec::new()).await,
             _ => Ok(()),
         },
@@ -941,6 +942,16 @@ fn humanize_duration(duration_ms: i64) -> String {
     format!("{}y", months / 12)
 }
 
+const LLM_USAGE_TEXT: &str = include_str!("../assets/llm.txt");
+
+async fn llm_txt_command(argv: Vec<String>) -> anyhow::Result<()> {
+    if !argv.is_empty() {
+        anyhow::bail!("llm txt does not accept options yet");
+    }
+    print!("{LLM_USAGE_TEXT}");
+    Ok(())
+}
+
 async fn list_workflows_command(argv: Vec<String>) -> anyhow::Result<()> {
     if !argv.is_empty() {
         anyhow::bail!("llm list-workflows does not accept options yet");
@@ -1699,9 +1710,17 @@ fn format_log_value(value: &Value) -> String {
 
 fn cli_command() -> ClapCommand {
     ClapCommand::new("smol-wf")
-        .about("CLI for the smol-workflows Rust engine")
+        .about(concat!(
+            "Agentic Workflows Runner\n\nVersion: ",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .version(env!("CARGO_PKG_VERSION"))
+        .override_usage("smol-wf <command> [flags]")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .after_help(
+            "Running workflows:\n  smol-wf run <workflow-script> [run-options] [--args-<name> value ...]\n    Run a JavaScript workflow. Progress logs go to stderr; final JSON goes to stdout.\n\n  Examples:\n    smol-wf run ./workflow.mjs --agent-provider pi --args-target \"coredns pods under kube-system\"\n    smol-wf run ./.agents/workflows/pod-diagnostics.mjs --agent-provider opencode --args-from-file args.json\n\nRun history:\n  smol-wf history [flags]\n    Show previous workflow runs from the local SQLite history database.\n\nLLM usage guide:\n  smol-wf llm txt\n    Dump llms.txt-style usage guidance for LLM and coding agents.\n\nWorkflow discovery:\n  smol-wf llm list-workflows\n    List workflow scripts under .agents/workflows and .claude/workflows.\n\nRun \"smol-wf <command> --help\" for command-specific flags.\n",
+        )
         .subcommand(
             ClapCommand::new("run")
                 .about("Run a workflow script")
@@ -1751,6 +1770,7 @@ fn cli_command() -> ClapCommand {
                 .about("LLM-facing helper commands")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(ClapCommand::new("txt").about("Print LLM-oriented usage text"))
                 .subcommand(ClapCommand::new("list-workflows").about("List discoverable workflows")),
         )
 }
