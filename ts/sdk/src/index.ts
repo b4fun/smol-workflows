@@ -1,3 +1,5 @@
+/// <reference path="./workflow-extra-virtual.d.ts" />
+
 import type { FromSchema } from "json-schema-to-ts";
 import type { JSONSchema } from "./json-schema.js";
 import type { PipelineFn } from "./pipeline.js";
@@ -93,6 +95,8 @@ export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
 
 /** Agent options mirrored from the Dynamic Workflow reference. */
 export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
+  /** Optional stable checkpoint key for durable replay; defaults to occurrence-based keys when omitted. */
+  key?: string;
   /** Optional display label for progress UIs and traces. */
   label?: string;
   /** Optional phase name used for tracing/grouping this agent run. */

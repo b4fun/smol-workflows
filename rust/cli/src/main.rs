@@ -1122,16 +1122,25 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
     durable_options.budget_total = options.budget_allowance;
     durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
     durable_options.resume_run_id = options.resume_run_id;
-    let on_agent_result = |_: &str, provider: &str, result: &AgentProviderResult| {
-        if let Some(dir) = options.save_raw_sessions.as_deref() {
-            save_raw_session(dir, provider, result)?;
-        }
-        Ok(())
-    };
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel_task = tokio::spawn(async move {
+        wait_for_cancel_signal().await;
+        eprintln!("cancellation requested; finishing in-flight session export if needed...");
+        let _ = cancel_tx.send(true);
+    });
+    durable_options.cancel_rx = Some(cancel_rx);
     durable_options.on_log = Some(&on_log);
     durable_options.on_phase = Some(&on_phase);
-    durable_options.on_agent_result = Some(&on_agent_result);
-    let result = run_local_durable_workflow(&mut store, durable_options).await?;
+    if let Some(raw_session_dir) = options.save_raw_sessions.clone() {
+        durable_options.on_agent_finished = Some(Arc::new(
+            move |_: &str, provider: &str, result: &AgentProviderResult| {
+                save_raw_session(&raw_session_dir, provider, result)
+            },
+        ));
+    }
+    let result = run_local_durable_workflow(&mut store, durable_options).await;
+    cancel_task.abort();
+    let result = result?;
     let workflow = result.workflow;
     let report = CliRunReport {
         token_usage: CliTokenUsageReport {
@@ -1145,6 +1154,21 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_cancel_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler should be installed");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_cancel_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[derive(Debug)]

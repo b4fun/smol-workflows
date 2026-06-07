@@ -4,7 +4,12 @@ Track user-visible changes to `@smol-workflows/sdk`, especially public TypeScrip
 
 ## Unpublished
 
-- Added `@smol-workflows/sdk/workflow-extra` as the published type/runtime stub for the host-provided `workflow:extra` virtual module.
+- Added `key` to `AgentRunOptions` for durable agent checkpoint keys.
+- Kept `workflow:extra` available to editors when loading root SDK types via `types: ["@smol-workflows/sdk"]`.
+
+## 0.1.0-alpha.4
+
+- Added `@smol-workflows/sdk/workflow-extra` as the published type/runtime stub for the host-provided `workflow:extra` helper.
 
 ## 0.1.0-alpha.2
 

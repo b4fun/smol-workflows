@@ -1,6 +1,6 @@
 {
   "name": "@smol-workflows/sdk",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.5",
   "description": "TypeScript SDK and workflow runtime types for smol-workflow.",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && rm -f dist/workflow-extra-virtual.js dist/workflow-extra-virtual.js.map dist/workflow-extra-virtual.d.ts.map && cp src/workflow-extra-virtual.d.ts dist/workflow-extra-virtual.d.ts && tmp=$(mktemp) && printf '/// <reference path=\"./workflow-extra-virtual.d.ts\" />\\n' > $tmp && cat dist/index.d.ts >> $tmp && mv $tmp dist/index.d.ts",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
