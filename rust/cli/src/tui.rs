@@ -33,7 +33,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 use smol_workflow_engine::agent_providers::create_agent_provider;
@@ -42,8 +42,9 @@ use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventType};
 use smol_workflow_engine::workflow::AgentSessionLogSink;
 use std::fs;
-use std::io::{self, BufRead, Stdout};
+use std::io::{self, BufRead, Stdout, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration as StdDuration, Instant};
 use time::format_description::well_known::Rfc3339;
@@ -52,8 +53,6 @@ use tokio::sync::watch;
 
 mod provider;
 
-const MIN_REPLAY_SPEED: f64 = 0.1;
-const MAX_REPLAY_SPEED: f64 = 64.0;
 const SEARCH_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
 const LIVE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(33);
 const LIVE_EVENTS_PER_TICK: usize = 256;
@@ -67,7 +66,6 @@ const DONE_TICK_DELAY: StdDuration = StdDuration::from_millis(700);
 pub struct ReplayCommandOptions {
     pub path: PathBuf,
     pub check: bool,
-    pub speed: f64,
     pub max_delay: Option<StdDuration>,
 }
 
@@ -345,7 +343,9 @@ struct TuiReplayApp {
     details_scroll: usize,
     focus_pane: FocusPane,
     raw_details: bool,
+    metadata_open: bool,
     time_display: TimeDisplayMode,
+    last_details_visible_text: String,
     root_start_time: Option<OffsetDateTime>,
     local_offset: Option<UtcOffset>,
     search_open: bool,
@@ -354,7 +354,6 @@ struct TuiReplayApp {
     search_changed_at: Option<Instant>,
     warnings: Vec<String>,
     playback: PlaybackState,
-    speed: f64,
     max_delay: Option<StdDuration>,
     next_due: Option<Instant>,
     replay_done_at: Option<Instant>,
@@ -362,7 +361,28 @@ struct TuiReplayApp {
     live_status_changed_at: Option<Instant>,
     live_error: Option<String>,
     confirm_quit: bool,
+    toast: Option<ToastMessage>,
     should_quit: bool,
+}
+
+struct ToastMessage {
+    message: String,
+    created_at: Instant,
+    ttl: StdDuration,
+}
+
+impl ToastMessage {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            created_at: Instant::now(),
+            ttl: StdDuration::from_millis(1500),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.created_at.elapsed() >= self.ttl
+    }
 }
 
 impl TuiReplayApp {
@@ -392,7 +412,9 @@ impl TuiReplayApp {
             details_scroll: 0,
             focus_pane: FocusPane::Timeline,
             raw_details: false,
+            metadata_open: true,
             time_display: TimeDisplayMode::Elapsed,
+            last_details_visible_text: String::new(),
             root_start_time,
             local_offset,
             search_open: false,
@@ -400,7 +422,6 @@ impl TuiReplayApp {
             search_query: String::new(),
             search_changed_at: None,
             playback: PlaybackState::Paused,
-            speed: normalize_replay_speed(options.speed),
             max_delay: Some(options.max_delay.unwrap_or(DEFAULT_REPLAY_MAX_DELAY)),
             next_due: Some(Instant::now()),
             replay_done_at: None,
@@ -408,6 +429,7 @@ impl TuiReplayApp {
             live_status_changed_at: None,
             live_error: None,
             confirm_quit: false,
+            toast: None,
             should_quit: false,
         };
         app.request_view_update();
@@ -440,7 +462,9 @@ impl TuiReplayApp {
             details_scroll: 0,
             focus_pane: FocusPane::Timeline,
             raw_details: false,
+            metadata_open: true,
             time_display: TimeDisplayMode::Elapsed,
+            last_details_visible_text: String::new(),
             root_start_time: None,
             local_offset: UtcOffset::current_local_offset().ok(),
             search_open: false,
@@ -448,7 +472,6 @@ impl TuiReplayApp {
             search_query: String::new(),
             search_changed_at: None,
             playback: PlaybackState::Paused,
-            speed: 1.0,
             max_delay: None,
             next_due: None,
             replay_done_at: None,
@@ -456,6 +479,7 @@ impl TuiReplayApp {
             live_status_changed_at: Some(Instant::now()),
             live_error: None,
             confirm_quit: false,
+            toast: None,
             should_quit: false,
         };
         app.request_view_update();
@@ -605,11 +629,6 @@ impl TuiReplayApp {
         }
     }
 
-    fn reveal_next_event(&mut self) {
-        let next_len = self.events.len().saturating_add(1);
-        self.reveal_events_until(next_len);
-    }
-
     fn reveal_events_until(&mut self, target_len: usize) {
         let current_len = self.events.len();
         let target_len = target_len.min(self.source_events.len());
@@ -634,7 +653,6 @@ impl TuiReplayApp {
         let delay = replay_delay(
             self.source_events.get(next_index.saturating_sub(1)),
             self.source_events.get(next_index),
-            self.speed,
             self.max_delay,
         );
         self.next_due = Some(now + delay);
@@ -661,7 +679,6 @@ impl TuiReplayApp {
             due += replay_delay(
                 self.source_events.get(target_len.saturating_sub(1)),
                 self.source_events.get(target_len),
-                self.speed,
                 self.max_delay,
             );
         }
@@ -752,69 +769,12 @@ impl TuiReplayApp {
         }
     }
 
-    fn page_down(&mut self) {
-        let len = self.visible_rows().len();
-        if len > 0 {
-            let previous = self.selected;
-            self.selected = (self.selected + 10).min(len - 1);
-            if self.selected != previous {
-                self.follow_latest = false;
-                self.anchor_current_selection();
-                self.reset_details_scroll();
-            }
-        }
-    }
-
-    fn page_up(&mut self) {
-        let previous = self.selected;
-        self.selected = self.selected.saturating_sub(10);
-        if self.selected != previous {
-            self.follow_latest = false;
-            self.anchor_current_selection();
-            self.reset_details_scroll();
-        }
-    }
-
-    fn first(&mut self) {
-        let previous = self.selected;
-        self.selected = 0;
-        if self.selected != previous {
-            self.follow_latest = false;
-            self.anchor_current_selection();
-            self.reset_details_scroll();
-        }
-    }
-
-    fn last(&mut self) {
-        let len = self.visible_rows().len();
-        if len > 0 {
-            let previous = self.selected;
-            self.selected = len - 1;
-            self.follow_latest = true;
-            if self.selected != previous {
-                self.reset_details_scroll();
-            }
-        }
-    }
-
     fn scroll_details_down(&mut self) {
         self.details_scroll = self.details_scroll.saturating_add(1);
     }
 
     fn scroll_details_up(&mut self) {
         self.details_scroll = self.details_scroll.saturating_sub(1);
-    }
-
-    fn page_details_down(&mut self) {
-        self.details_scroll = self.details_scroll.saturating_add(10);
-    }
-
-    fn page_details_up(&mut self) {
-        self.details_scroll = self.details_scroll.saturating_sub(10);
-    }
-
-    fn details_top(&mut self) {
-        self.details_scroll = 0;
     }
 
     fn mark_search_changed(&mut self) {
@@ -837,6 +797,12 @@ impl TuiReplayApp {
             .is_some_and(|changed_at| changed_at.elapsed() >= SEARCH_DEBOUNCE)
         {
             self.apply_search_if_changed();
+        }
+    }
+
+    fn tick_toast(&mut self) {
+        if self.toast.as_ref().is_some_and(ToastMessage::expired) {
+            self.toast = None;
         }
     }
 
@@ -895,22 +861,6 @@ impl TuiReplayApp {
                 self.should_quit = true
             }
             KeyCode::Char(' ') => self.toggle_playback(),
-            KeyCode::Char('n') => {
-                self.playback = PlaybackState::Paused;
-                self.reveal_next_event();
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.speed = (self.speed * 2.0).min(MAX_REPLAY_SPEED);
-                self.schedule_next_due(Instant::now());
-            }
-            KeyCode::Char('-') => {
-                self.speed = (self.speed / 2.0).max(MIN_REPLAY_SPEED);
-                self.schedule_next_due(Instant::now());
-            }
-            KeyCode::Char('0') => {
-                self.speed = 1.0;
-                self.schedule_next_due(Instant::now());
-            }
             KeyCode::Down | KeyCode::Char('j') => match self.focus_pane {
                 FocusPane::Timeline => self.select_next(),
                 FocusPane::Details => self.scroll_details_down(),
@@ -919,19 +869,6 @@ impl TuiReplayApp {
                 FocusPane::Timeline => self.select_previous(),
                 FocusPane::Details => self.scroll_details_up(),
             },
-            KeyCode::PageDown => match self.focus_pane {
-                FocusPane::Timeline => self.page_down(),
-                FocusPane::Details => self.page_details_down(),
-            },
-            KeyCode::PageUp => match self.focus_pane {
-                FocusPane::Timeline => self.page_up(),
-                FocusPane::Details => self.page_details_up(),
-            },
-            KeyCode::Home => match self.focus_pane {
-                FocusPane::Timeline => self.first(),
-                FocusPane::Details => self.details_top(),
-            },
-            KeyCode::End => self.last(),
             KeyCode::Tab => self.next_tab(),
             KeyCode::BackTab => self.previous_tab(),
             KeyCode::Char('2') => self.focus_pane = FocusPane::Details,
@@ -952,6 +889,17 @@ impl TuiReplayApp {
                 self.time_display = match self.time_display {
                     TimeDisplayMode::Elapsed => TimeDisplayMode::LocalTime,
                     TimeDisplayMode::LocalTime => TimeDisplayMode::Elapsed,
+                }
+            }
+            KeyCode::Char('m') => self.metadata_open = !self.metadata_open,
+            KeyCode::Char('y') => {
+                if !self.last_details_visible_text.trim().is_empty() {
+                    match copy_to_clipboard(&self.last_details_visible_text) {
+                        Ok(()) => self.toast = Some(ToastMessage::new("content copied")),
+                        Err(error) => {
+                            self.toast = Some(ToastMessage::new(format!("copy failed: {error}")))
+                        }
+                    }
                 }
             }
             KeyCode::Char('/') => {
@@ -1034,6 +982,38 @@ fn compact_hidden_agent_event_data(event: &mut WorkflowEvent) {
     event.data = Value::Object(compact);
 }
 
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+
+    for (command, args) in commands {
+        let mut child = match StdCommand::new(command)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        if child.wait()?.success() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("no supported clipboard command found")
+}
+
 fn read_event_records(path: &Path) -> anyhow::Result<Vec<EventRecord>> {
     let file = fs::File::open(path)
         .with_context(|| format!("failed to read event stream {}", path.display()))?;
@@ -1060,18 +1040,9 @@ fn read_event_records(path: &Path) -> anyhow::Result<Vec<EventRecord>> {
     Ok(events)
 }
 
-fn normalize_replay_speed(speed: f64) -> f64 {
-    if !speed.is_finite() || speed <= 0.0 {
-        1.0
-    } else {
-        speed.clamp(MIN_REPLAY_SPEED, MAX_REPLAY_SPEED)
-    }
-}
-
 fn replay_delay(
     previous: Option<&EventRecord>,
     next: Option<&EventRecord>,
-    speed: f64,
     max_delay: Option<StdDuration>,
 ) -> StdDuration {
     let previous_elapsed = previous
@@ -1081,7 +1052,7 @@ fn replay_delay(
         .and_then(|record| record.event.elapsed_nanos)
         .unwrap_or(previous_elapsed);
     let nanos = next_elapsed.saturating_sub(previous_elapsed);
-    let seconds = (nanos as f64 / 1_000_000_000.0) / normalize_replay_speed(speed);
+    let seconds = nanos as f64 / 1_000_000_000.0;
     let mut delay = if seconds.is_finite() && seconds > 0.0 {
         StdDuration::from_secs_f64(seconds)
     } else {
@@ -1427,6 +1398,7 @@ fn run_tui_loop(
 ) -> anyhow::Result<()> {
     loop {
         app.tick_search();
+        app.tick_toast();
         app.tick_playback();
         app.apply_view_snapshots();
         terminal.draw(|frame| render(frame, app))?;
@@ -1451,6 +1423,7 @@ fn run_live_tui_loop(
 ) -> anyhow::Result<()> {
     loop {
         app.tick_search();
+        app.tick_toast();
         let mut event_batch = Vec::new();
         for _ in 0..LIVE_EVENTS_PER_TICK {
             match event_rx.try_recv() {
@@ -1499,7 +1472,7 @@ fn run_live_tui_loop(
     Ok(())
 }
 
-fn render(frame: &mut Frame<'_>, app: &TuiReplayApp) {
+fn render(frame: &mut Frame<'_>, app: &mut TuiReplayApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(5)])
@@ -1521,6 +1494,42 @@ fn render(frame: &mut Frame<'_>, app: &TuiReplayApp) {
     if app.confirm_quit {
         render_quit_confirmation(frame);
     }
+    if let Some(toast) = app.toast.as_ref() {
+        render_toast(frame, toast);
+    }
+}
+
+fn render_toast(frame: &mut Frame<'_>, toast: &ToastMessage) {
+    let width = u16::try_from(toast.message.chars().count().saturating_add(4))
+        .unwrap_or(u16::MAX)
+        .min(frame.area().width)
+        .max(12);
+    let area = ratatui::layout::Rect {
+        x: frame
+            .area()
+            .x
+            .saturating_add(frame.area().width.saturating_sub(width)),
+        y: frame.area().y,
+        width,
+        height: 3.min(frame.area().height),
+    };
+    let paragraph = Paragraph::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            toast.message.clone(),
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Green)),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_header_pane(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
@@ -1776,28 +1785,292 @@ fn pad_content_area(area: ratatui::layout::Rect, left: u16, top: u16) -> ratatui
     }
 }
 
-fn render_details(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
+fn render_details(frame: &mut Frame<'_>, app: &mut TuiReplayApp, area: ratatui::layout::Rect) {
     let focused = app.focus_pane == FocusPane::Details;
     let title_color = if focused { Color::Cyan } else { Color::Blue };
     let title = pane_title("²", "details ".to_string(), title_color, focused);
     let mode_label = details_mode_label(app.raw_details, focused);
-    let lines = app
-        .selected_event()
+    let selected = app.selected_event();
+    let lines = selected
         .map(|record| {
             let style = event_type_style(&record.event.event_type);
             if app.raw_details {
                 raw_details_lines(record, style)
             } else {
-                pretty_details_lines(app, record, style)
+                pretty_details_lines(app, record)
             }
         })
         .unwrap_or_else(|| vec![Line::raw("No event selected")]);
+    let metadata_lines = selected
+        .map(|record| {
+            metadata_details_lines(app, record, event_type_style(&record.event.event_type))
+        })
+        .unwrap_or_default();
     let (_title_area, content_area) =
         render_pane_shell(frame, area, title, title_color, focused, Some(mode_label));
-    let paragraph = Paragraph::new(pad_details_lines(lines))
-        .scroll((u16::try_from(app.details_scroll).unwrap_or(u16::MAX), 0))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, content_area);
+    let content_area = pad_content_area(content_area, 1, 0);
+    let (body_area, scroll_indicator_area) = timeline_list_areas(content_area);
+    app.last_details_visible_text = lines
+        .iter()
+        .map(line_plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let padded_lines = pad_details_lines(lines);
+    let max_scroll = estimated_scroll_overflow(&padded_lines, body_area);
+    let effective_scroll = app.details_scroll.min(max_scroll);
+    render_details_body_around_metadata(
+        frame,
+        body_area,
+        &padded_lines,
+        metadata_lines.len(),
+        app.metadata_open,
+        effective_scroll,
+    );
+    render_metadata_overlay(frame, body_area, metadata_lines, focused, app.metadata_open);
+    render_timeline_scroll_indicator(
+        frame,
+        scroll_indicator_area,
+        effective_scroll > 0,
+        effective_scroll < max_scroll,
+        focused,
+    );
+}
+
+fn render_details_body_around_metadata(
+    frame: &mut Frame<'_>,
+    body_area: ratatui::layout::Rect,
+    lines: &[Line<'static>],
+    metadata_line_count: usize,
+    metadata_open: bool,
+    scroll: usize,
+) -> Vec<Line<'static>> {
+    if body_area.width == 0 || body_area.height == 0 {
+        return Vec::new();
+    }
+    let metadata_area = metadata_overlay_area(body_area, metadata_line_count, metadata_open);
+    let top_height = metadata_area.height.min(body_area.height);
+    let top_width = metadata_area
+        .x
+        .saturating_sub(body_area.x)
+        .saturating_sub(1)
+        .max(1);
+    let full_width = usize::from(body_area.width).max(1);
+    let top_width_usize = usize::from(top_width).max(1);
+    let viewport_height = usize::from(body_area.height);
+    let shaped = shaped_visible_detail_lines(
+        lines,
+        scroll,
+        top_width_usize,
+        usize::from(top_height),
+        full_width,
+        viewport_height,
+    );
+    let split_at = shaped.len().min(usize::from(top_height));
+    let top_lines = shaped[..split_at].to_vec();
+    let bottom_lines = shaped[split_at..].to_vec();
+
+    if top_height > 0 {
+        let top_area = ratatui::layout::Rect {
+            width: top_width,
+            height: top_height,
+            ..body_area
+        };
+        frame.render_widget(Paragraph::new(top_lines), top_area);
+    }
+    if top_height < body_area.height {
+        let bottom_area = ratatui::layout::Rect {
+            y: body_area.y.saturating_add(top_height),
+            height: body_area.height.saturating_sub(top_height),
+            ..body_area
+        };
+        frame.render_widget(Paragraph::new(bottom_lines), bottom_area);
+    }
+    shaped
+}
+
+fn shaped_visible_detail_lines(
+    lines: &[Line<'static>],
+    scroll: usize,
+    top_width: usize,
+    top_height: usize,
+    full_width: usize,
+    viewport_height: usize,
+) -> Vec<Line<'static>> {
+    let mut full_width_lines = Vec::new();
+    for line in lines {
+        full_width_lines.extend(wrap_plain_text(&line_plain_text(line), full_width));
+    }
+
+    let mut visible = Vec::with_capacity(viewport_height);
+    for text in full_width_lines.into_iter().skip(scroll) {
+        let width = if visible.len() < top_height {
+            top_width
+        } else {
+            full_width
+        };
+        for segment in wrap_plain_text(&text, width) {
+            if visible.len() >= viewport_height {
+                return visible;
+            }
+            visible.push(Line::raw(segment));
+        }
+    }
+    visible
+}
+
+fn line_plain_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let leading = text
+        .chars()
+        .take_while(|ch| ch.is_whitespace() && *ch != '\n')
+        .collect::<String>();
+    let indent = leading.chars().count().min(width.saturating_sub(1));
+    let indent_text = " ".repeat(indent);
+    let mut output = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > width {
+            if !current.trim().is_empty() {
+                output.push(std::mem::take(&mut current));
+                current.push_str(&indent_text);
+            }
+            for chunk in chunk_word(word, width) {
+                output.push(chunk);
+            }
+            continue;
+        }
+
+        let separator = if current.trim().is_empty() { 0 } else { 1 };
+        let next_len = current.chars().count() + separator + word_len;
+        if next_len > width && !current.trim().is_empty() {
+            output.push(std::mem::take(&mut current));
+            current.push_str(&indent_text);
+        }
+        if !current.trim().is_empty() {
+            current.push(' ');
+        } else if current.is_empty() && !output.is_empty() {
+            current.push_str(&indent_text);
+        } else if current.is_empty() {
+            current.push_str(&leading);
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        output.push(current);
+    }
+    if output.is_empty() {
+        output.push(String::new());
+    }
+    output
+}
+
+fn chunk_word(word: &str, width: usize) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut current = String::new();
+    for ch in word.chars() {
+        current.push(ch);
+        if current.chars().count() >= width {
+            output.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        output.push(current);
+    }
+    output
+}
+
+fn estimated_scroll_overflow(lines: &[Line<'static>], area: ratatui::layout::Rect) -> usize {
+    let width = usize::from(area.width).max(1);
+    let visual_lines = lines
+        .iter()
+        .map(|line| line.width().saturating_add(width - 1) / width)
+        .map(|height| height.max(1))
+        .sum::<usize>();
+    visual_lines.saturating_sub(usize::from(area.height))
+}
+
+fn render_metadata_overlay(
+    frame: &mut Frame<'_>,
+    content_area: ratatui::layout::Rect,
+    lines: Vec<Line<'static>>,
+    focused: bool,
+    open: bool,
+) {
+    if lines.is_empty() || content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+    let area = metadata_overlay_area(content_area, lines.len(), open);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "m",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "etadata ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    if open {
+        frame.render_widget(Paragraph::new(pad_lines(lines, " ")), inner);
+    }
+}
+
+fn metadata_overlay_area(
+    content_area: ratatui::layout::Rect,
+    line_count: usize,
+    open: bool,
+) -> ratatui::layout::Rect {
+    let width = content_area.width.min(44).max(content_area.width.min(18));
+    let desired_height = if open {
+        u16::try_from(line_count.saturating_add(2)).unwrap_or(u16::MAX)
+    } else {
+        2
+    };
+    let height = desired_height.min(content_area.height);
+    ratatui::layout::Rect {
+        x: content_area
+            .x
+            .saturating_add(content_area.width.saturating_sub(width)),
+        y: content_area.y,
+        width,
+        height,
+    }
 }
 
 fn details_mode_label(raw_details: bool, focused: bool) -> Line<'static> {
@@ -1829,7 +2102,9 @@ fn details_mode_label(raw_details: bool, focused: bool) -> Line<'static> {
         Span::styled("/", Style::default().fg(Color::DarkGray)),
         Span::styled("r", shortcut_style),
         Span::styled("aw", raw_style),
-        Span::raw(" "),
+        Span::raw("  cop"),
+        Span::styled("y", shortcut_style),
+        Span::raw(" content "),
     ])
 }
 
@@ -1883,11 +2158,15 @@ fn render_pane_shell(
 }
 
 fn pad_details_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    pad_lines(lines, "  ")
+}
+
+fn pad_lines(lines: Vec<Line<'static>>, padding: &'static str) -> Vec<Line<'static>> {
     lines
         .into_iter()
         .map(|line| {
             let mut spans = Vec::with_capacity(line.spans.len() + 1);
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(padding));
             spans.extend(line.spans);
             Line { spans, ..line }
         })
@@ -2040,12 +2319,11 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
         Span::raw(" "),
         Span::styled(playback, playback_style),
         Span::raw(format!(
-            "  {run_id}  events {}/{}  tab {}/{}  speed {:.2}x{}",
+            "  {run_id}  events {}/{}  tab {}/{}{}",
             app.events.len(),
             app.source_events.len(),
             app.active_tab + 1,
             app.tabs.len(),
-            app.speed,
             warnings
         )),
     ])
@@ -2335,39 +2613,31 @@ fn event_summary(app: &TuiReplayApp, record: &EventRecord) -> String {
     }
 }
 
-fn raw_details_lines(record: &EventRecord, style: Style) -> Vec<Line<'static>> {
-    serde_json::to_string_pretty(record.event.as_ref())
-        .unwrap_or_else(|_| "<invalid>".into())
-        .lines()
-        .map(|line| Line::from(Span::styled(line.to_string(), style)))
-        .collect()
-}
-
-fn pretty_details_lines(
+fn metadata_details_lines(
     app: &TuiReplayApp,
     record: &EventRecord,
     style: Style,
 ) -> Vec<Line<'static>> {
     let event = &record.event;
-    let metadata = event.metadata.as_ref();
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::raw("type: "),
-        Span::styled(
-            event.event_type.to_string(),
-            style.add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "t",
-            Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("ime: {}", display_time(app, event))),
-    ]));
-    if let Some(metadata) = metadata {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("type: "),
+            Span::styled(
+                event.event_type.to_string(),
+                style.add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "t",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("ime: {}", display_time(app, event))),
+        ]),
+    ];
+    if let Some(metadata) = event.metadata.as_ref() {
         lines.push(Line::from(format!(
             "workflowDepth: {}",
             metadata.workflow_depth.unwrap_or(0)
@@ -2385,7 +2655,20 @@ fn pretty_details_lines(
             lines.push(Line::from(format!("sessionId: {session}")));
         }
     }
-    lines.push(Line::raw(""));
+    lines
+}
+
+fn raw_details_lines(record: &EventRecord, style: Style) -> Vec<Line<'static>> {
+    serde_json::to_string_pretty(record.event.as_ref())
+        .unwrap_or_else(|_| "<invalid>".into())
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), style)))
+        .collect()
+}
+
+fn pretty_details_lines(app: &TuiReplayApp, record: &EventRecord) -> Vec<Line<'static>> {
+    let event = &record.event;
+    let mut lines = Vec::new();
     let body = match event.event_type {
         WorkflowEventType::Started => format!(
             "started: {}",
@@ -2400,7 +2683,8 @@ fn pretty_details_lines(
             event.data.get("name").and_then(Value::as_str).unwrap_or("")
         ),
         WorkflowEventType::Log => format!(
-            "log: {}",
+            "log {}\n\n{}",
+            display_time(app, event),
             event
                 .data
                 .get("message")
@@ -2411,10 +2695,7 @@ fn pretty_details_lines(
             "agent started:\n{}",
             serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "<invalid>".into())
         ),
-        WorkflowEventType::AgentEvent => {
-            lines.extend(provider::details_lines(record));
-            return lines;
-        }
+        WorkflowEventType::AgentEvent => return provider::details_lines(record),
         WorkflowEventType::AgentCompleted => format!(
             "agent completed:\n{}",
             serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "<invalid>".into())

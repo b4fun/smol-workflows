@@ -118,22 +118,6 @@ Rules:
 - events with equal `elapsedNanos` preserve file order;
 - events missing `elapsedNanos` are applied immediately.
 
-#### `--speed <factor>`
-
-Set replay speed.
-
-```sh
-smol-wf tui replay events.jsonl --speed 2.0
-```
-
-Examples:
-
-- `2.0`: twice as fast;
-- `1.0`: original timing;
-- `0.5`: half speed.
-
-Replay speed is clamped to a practical range of `0.1` to `64.0`. Very small values such as `0.01` would make normal event gaps appear frozen in an interactive terminal.
-
 #### `--max-delay <duration>`
 
 Cap long replay pauses.
@@ -188,109 +172,74 @@ A stream may also include child workflow errors. A child `workflow.error` does n
 
 ## Layout
 
-The initial TUI layout prioritizes observability over editing/configuration.
+The TUI uses a compact btop-inspired layout with rounded Unicode borders.
 
 ```txt
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ smol-workflows  run_...  RUNNING  elapsed 00:01:23  provider pi             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Workflows   root   child step_a1b2   child step_c3d4        Tab/Shift+Tab    │
-├───────────────────────────────────┬─────────────────────────────────────────┤
-│ Timeline / Events                 │ Details                                 │
-│                                   │                                         │
-│ 00.000 workflow.started           │ {                                       │
-│ 00.120 workflow.phase Prepare     │   "type": "workflow.agent_event",       │
-│ 01.842 workflow.started depth=1   │   "metadata": { ... },                  │
-│ 02.100 workflow.phase Child       │   "data": { ... }                       │
-│ 04.860 workflow.agent_event pi    │ }                                       │
-│ 09.240 workflow.result depth=1    │                                         │
-│ 10.420 workflow.result depth=0    │                                         │
-└───────────────────────────────────┴─────────────────────────────────────────┘
+╭─────────────────────────────────────────────────────────────────────────────╮
+│ ● REPLAY PLAYING  run_...  events 42/120  tab 1/3                          │
+│  Workflows   root   child a1b2c3d4   child e5f6a7b8                         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+╭─ ¹timeline (18/41) ───────────────────────╮╭─ ²details ─ pretty/raw ───────╮
+│ +00:00:00.000 workflow.started           ↑││ log +00:01:51.310    ╭metadata╮│
+│ +00:00:00.003 workflow.phase Prepare      ││                       │type... ││
+│ +00:00:03.660 agent pi running events=9   ││ log body text flows   ╰────────╯│
+│ +00:00:03.669   ├─ message_end            ││ underneath the metadata overlay │
+│ +00:00:03.671 workflow.started child=...  ││ when it reaches that region.    │
+│ ...                                      ↓││                                ↓│
+╰───────────────────────────────────────────╯╰────────────────────────────────╯
 ```
 
-Recommended panes:
+### Header pane
 
-1. status bar;
-2. workflow scope tabs;
-3. chronological timeline/events list on the left;
-4. selected event details on the right;
-5. footer/help.
+The top pane contains:
 
-### Status bar
-
-Should show:
-
-- mode: `LIVE`, `REPLAY_PLAYING`, `REPLAY_PAUSED`, `DONE`, `FAILED`, `CANCELLED`;
+- live/replay status with an animated indicator while running;
 - run ID when available;
-- elapsed time;
-- current phase when available;
-- token usage when available;
-- selected provider/session when focused on an agent event.
+- event counts;
+- active workflow tab index;
+- workflow scope tabs.
+
+Live status is red while running/cancelling and green when done. Replay status is orange while playing/paused and green when done. The final done tick is delayed briefly so completion is visible.
 
 ### Workflow scope tabs
 
-Workflow scopes should be represented as an htop-like tab bar instead of a tree. The first tab is always the root workflow. Child workflows follow in the order their `workflow.started` events appear in the JSONL stream. The active tab should be visually highlighted with an inverse/bright style, while inactive tabs remain visible as separate tab segments.
+Workflow scopes are represented as a tab bar. The first tab is always the root workflow. Child workflows follow in the order their `workflow.started` events appear in the JSONL stream.
 
-Example tab row:
-
-```txt
-Workflows   root   child step_a1b2   child step_c3d4        Tab/Shift+Tab
-```
-
-Tab labels should be concise and stable for the current stream:
+Tab labels are concise and stable for the current stream:
 
 - root workflow: `root`;
-- child workflow: `child <short-parentStepId>`;
-- if a workflow name is available later, the UI may prefer `name` plus a short ID.
+- child workflow: `child <short-parentStepId>`.
 
-Selecting a tab scopes the timeline/events list:
+Selecting a tab scopes the timeline:
 
-- root tab shows the full stream, with child workflow events indented under their workflow scope;
-- child tab shows events with that child scope's `parentStepId`.
+- root tab shows the full stream, with child workflow events indented;
+- child tabs show events with that child scope's `parentStepId`.
 
-Nested workflows should be ordered by JSONL order, not by `parentStepId` value. `parentStepId` is only a correlation key.
+### Timeline pane
 
-### Timeline / events pane
+The left pane title includes the `1` shortcut indicator: `¹timeline`. It shows a chronological, scoped event list with elapsed or absolute time, event type, nesting, provider/session summaries, and grouped agent events.
 
-The timeline/events pane is on the left. A chronological event list shows:
+Agent lifecycle and provider events are grouped by `metadata.stepId`. The first agent lifecycle event is the group header; subsequent provider/lifecycle events are shown as children under that group, even when the original stream is interleaved with other agents/workflows.
 
-- elapsed time;
-- event type;
-- workflow depth;
-- provider/session for agent events;
-- concise payload summary.
+The timeline has:
 
-The selected timeline entry drives the details pane.
-
-Child workflow events should be visually nested in the root timeline using their `workflowDepth` and `parentStepId`. Switching to a child tab shows only that child workflow scope.
-
-Agent events should be visually grouped by agent session. The first `workflow.agent_event` for a session is rendered as a synthetic-looking group header using its `metadata.sessionId`, and later events for the same session are indented beneath it. The group header is still backed by the first real agent event; no extra event is added to the stream.
-
-Example:
-
-```txt
-00:09.000   workflow.started child=79840680
-00:09.010   workflow.phase Child
-00:09.210   agent codex session=019ea09d events=4
-00:09.211     ├─ thread.started
-00:09.212     ├─ turn.started
-00:09.230     ├─ item.completed
-00:09.240     └─ turn.completed
-00:09.300   workflow.result
-```
-
-Timeline search should use an overlay. Pressing `/` opens a search input overlay without leaving the timeline. Matching entries are highlighted in-place, and navigation keys can jump between matches. Closing the overlay returns focus to the timeline while preserving the current match selection.
+- distance-based dimming around the selected row;
+- a right-side scroll indicator column;
+- a bottom margin so the latest row is not pinned to the bottom border;
+- debounced search via `/`.
 
 ### Details pane
 
-The details pane is on the right and follows the currently selected timeline entry. Moving the timeline selection updates the details pane immediately.
+The right pane title includes the `2` shortcut indicator: `²details`. The border also shows the current details display mode as `pretty/raw`; `p` selects pretty mode and `r` selects raw mode.
 
-The details pane supports two views:
+The details pane contains:
 
-- **pretty view**: a decoded, human-friendly rendering of the selected event;
-- **raw view**: the raw JSON event envelope, pretty-printed without interpretation.
+- a scrollable body with pretty provider-specific rendering or raw JSON;
+- a fixed top-right metadata sub-pane shown in both pretty/raw modes;
+- a right-side scroll indicator column;
+- `y` copy support for the current details content.
 
-For `workflow.agent_event`, pretty view may show provider-specific summaries, but raw view must always expose the provider-owned payload exactly as it appeared in the event stream.
+The metadata sub-pane contains event metadata such as type, time, workflow depth, step ID, provider, and session ID. Press `m` to collapse it to a small bordered rectangle with only the metadata title. Body text wraps around the metadata box at the top and then uses the full width below it.
 
 ## Keybindings
 
@@ -302,17 +251,13 @@ Tab          switch to next workflow scope tab
 Shift+Tab    switch to previous workflow scope tab
 1 / 2        focus timeline / details pane
 ↑/↓          move timeline selection or scroll details, depending on focused pane
-PgUp/PgDn    page timeline selection or details scroll, depending on focused pane
-Home/End     jump to first/latest timeline event; Home scrolls details to top when details is focused
 /            open search overlay
 Enter / Esc  close search overlay
 p / r        show pretty/raw details view
+m            toggle details metadata pane
+y            copy visible details content
 t            toggle elapsed/local time display
 Space        play/pause replay playback
-n            reveal next event and pause
-+            faster
--            slower
-0            reset speed
 ```
 
 Live-only keybindings:
@@ -320,21 +265,6 @@ Live-only keybindings:
 ```txt
 Ctrl-C       request cancellation
 ```
-
-Planned significant-event jump keybindings:
-
-```txt
-[            previous significant event
-]            next significant event
-```
-
-Significant events include:
-
-- `workflow.started`
-- `workflow.phase`
-- `workflow.agent_event`
-- `workflow.result`
-- `workflow.error`
 
 ## Filtering and search
 

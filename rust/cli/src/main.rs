@@ -94,10 +94,6 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 let path = matches
                     .get_one::<String>("events-jsonl")
                     .expect("required by clap");
-                let speed = matches
-                    .get_one::<String>("speed")
-                    .map(|value| value.parse::<f64>())
-                    .transpose()?;
                 let max_delay = matches
                     .get_one::<String>("max-delay")
                     .map(|value| tui::parse_duration(value))
@@ -105,7 +101,6 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 tui::replay_command(tui::ReplayCommandOptions {
                     path: PathBuf::from(path),
                     check: matches.get_flag("check"),
-                    speed: speed.unwrap_or(1.0),
                     max_delay,
                 })
             }
@@ -1828,13 +1823,6 @@ fn cli_command() -> ClapCommand {
                                 .action(ArgAction::SetTrue),
                         )
                         .arg(
-                            Arg::new("speed")
-                                .long("speed")
-                                .value_name("factor")
-                                .help("Replay speed multiplier, e.g. 2.0")
-                                .num_args(1),
-                        )
-                        .arg(
                             Arg::new("max-delay")
                                 .long("max-delay")
                                 .value_name("duration")
@@ -1842,7 +1830,7 @@ fn cli_command() -> ClapCommand {
                                 .num_args(1),
                         )
                         .after_help(
-                            "Examples:\n  smol-wf run ./workflow.mjs --events > events.jsonl\n  smol-wf tui replay events.jsonl\n  smol-wf tui replay events.jsonl --speed 2.0 --max-delay 5s\n  smol-wf tui replay events.jsonl --check",
+                            "Examples:\n  smol-wf run ./workflow.mjs --events > events.jsonl\n  smol-wf tui replay events.jsonl\n  smol-wf tui replay events.jsonl --max-delay 5s\n  smol-wf tui replay events.jsonl --check",
                         ),
                 ),
         )
