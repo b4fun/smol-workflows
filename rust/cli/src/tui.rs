@@ -20,6 +20,43 @@
 //!
 //! Keep this shape in mind when adding new UI state: prefer indices, metadata,
 //! or `Arc` references over cloning `WorkflowEvent.data` / raw provider payloads.
+//!
+//! # Layout and interaction model
+//!
+//! Keep this section in sync with user-visible TUI changes. When changing layout,
+//! keybindings, modal behavior, header stats, save behavior, or pane rendering,
+//! update this summary in the same change.
+//!
+//! The UI uses a compact btop-inspired layout with rounded Unicode borders:
+//!
+//! - the top header pane is `6` rows tall. Its left column contains the
+//!   live/replay status indicator and a small bordered workflow-tabs sub-pane.
+//!   In live mode the status includes a wall-clock `+HH:MM:SS` delta that is
+//!   independent of the timeline time-display toggle; the right side contains
+//!   workflow stats without a surrounding sub-border;
+//! - workflow tabs show at most three labels. Root is `root`; child scopes use
+//!   `c: <4-char-id>`. `Tab` / `Shift+Tab` cycle scopes and an overflow `+N`
+//!   marker appears when additional scopes exist;
+//! - header stats are fixed-width, left-aligned columns: workflow run ID,
+//!   a one-line btop-style Braille event-rate graph plus observed count, token
+//!   usage (`+in`, `+out`), and a full-width `file:` line below them;
+//! - replay mode shows the source events file. Live mode shows `<unsaved>` until
+//!   stopped, then offers `save?`; pressing `s` writes `$PWD/<run-id>.jsonl`.
+//!   Exiting after a save restores the terminal and prints the saved path to
+//!   stderr;
+//! - the body is split into `¹timeline` and `²details` panes. Pane focus uses
+//!   `1` / `2`; timeline/details scrolling uses `↑` / `↓` or `j` / `k`;
+//! - timeline rows are derived from the event stream. Agent lifecycle/provider
+//!   events are grouped by `metadata.stepId`, root scope shows nested workflows,
+//!   child scopes filter by `parentStepId`, and the visible list has right-side
+//!   scroll indicators plus an 8-row virtual bottom margin;
+//! - details has `pretty/raw` in the border (`p` / `r` select modes), a fixed
+//!   top-right metadata overlay (`m` toggles), word-wrapped body text that flows
+//!   around the overlay, right-side scroll indicators, and `y` copies the
+//!   logical details text without terminal-wrap line breaks;
+//! - live quit uses a button-style confirmation modal. Arrow keys / `h` / `l` /
+//!   `Tab` select buttons; `Enter` activates. If a stopped live run is unsaved,
+//!   `save & quit` is first and selected by default.
 
 use anyhow::Context;
 use crossterm::event::{
@@ -59,6 +96,7 @@ const LIVE_EVENTS_PER_TICK: usize = 256;
 const TIMED_REPLAY_EVENTS_PER_TICK: usize = 512;
 const DEFAULT_REPLAY_MAX_DELAY: StdDuration = StdDuration::from_millis(50);
 const TIMELINE_BOTTOM_MARGIN: u16 = 8;
+const EVENT_RATE_BIN_NANOS: u64 = 10_000_000_000;
 const BREATHING_LIGHT_INTERVAL_NANOS: i128 = 140_000_000;
 const DONE_TICK_DELAY: StdDuration = StdDuration::from_millis(700);
 
@@ -207,6 +245,13 @@ enum PlaybackState {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmQuitAction {
+    Quit,
+    SaveAndQuit,
+    Stay,
+}
+
 /// Lightweight projection used by the background timeline worker.
 ///
 /// This intentionally excludes `WorkflowEvent.data`: timeline grouping, tabs,
@@ -353,14 +398,26 @@ struct TuiReplayApp {
     search_query: String,
     search_changed_at: Option<Instant>,
     warnings: Vec<String>,
+    events_file: Option<PathBuf>,
+    saved_events_file: Option<PathBuf>,
+    save_and_quit_requested: bool,
+    root_result_token_usage: Option<(u64, u64)>,
+    workflow_token_usage_by_key: std::collections::HashMap<String, (u64, u64)>,
+    agent_token_usage_by_key: std::collections::HashMap<String, (u64, u64)>,
+    observed_token_usage: Option<(u64, u64)>,
+    event_rate_bins: std::collections::HashMap<u64, usize>,
+    latest_event_rate_bin: u64,
     playback: PlaybackState,
     max_delay: Option<StdDuration>,
     next_due: Option<Instant>,
     replay_done_at: Option<Instant>,
     live_status: Option<LiveStatus>,
+    live_started_at: Option<Instant>,
+    live_finished_delta: Option<StdDuration>,
     live_status_changed_at: Option<Instant>,
     live_error: Option<String>,
     confirm_quit: bool,
+    confirm_quit_action: ConfirmQuitAction,
     toast: Option<ToastMessage>,
     should_quit: bool,
 }
@@ -421,14 +478,26 @@ impl TuiReplayApp {
             search_input: String::new(),
             search_query: String::new(),
             search_changed_at: None,
+            events_file: Some(options.path.clone()),
+            saved_events_file: None,
+            save_and_quit_requested: false,
+            root_result_token_usage: None,
+            workflow_token_usage_by_key: std::collections::HashMap::new(),
+            agent_token_usage_by_key: std::collections::HashMap::new(),
+            observed_token_usage: None,
+            event_rate_bins: std::collections::HashMap::new(),
+            latest_event_rate_bin: 0,
             playback: PlaybackState::Paused,
             max_delay: Some(options.max_delay.unwrap_or(DEFAULT_REPLAY_MAX_DELAY)),
             next_due: Some(Instant::now()),
             replay_done_at: None,
             live_status: None,
+            live_started_at: None,
+            live_finished_delta: None,
             live_status_changed_at: None,
             live_error: None,
             confirm_quit: false,
+            confirm_quit_action: ConfirmQuitAction::Stay,
             toast: None,
             should_quit: false,
         };
@@ -471,14 +540,26 @@ impl TuiReplayApp {
             search_input: String::new(),
             search_query: String::new(),
             search_changed_at: None,
+            events_file: None,
+            saved_events_file: None,
+            save_and_quit_requested: false,
+            root_result_token_usage: None,
+            workflow_token_usage_by_key: std::collections::HashMap::new(),
+            agent_token_usage_by_key: std::collections::HashMap::new(),
+            observed_token_usage: None,
+            event_rate_bins: std::collections::HashMap::new(),
+            latest_event_rate_bin: 0,
             playback: PlaybackState::Paused,
             max_delay: None,
             next_due: None,
             replay_done_at: None,
             live_status: Some(LiveStatus::Running),
+            live_started_at: Some(Instant::now()),
+            live_finished_delta: None,
             live_status_changed_at: Some(Instant::now()),
             live_error: None,
             confirm_quit: false,
+            confirm_quit_action: ConfirmQuitAction::Stay,
             toast: None,
             should_quit: false,
         };
@@ -508,6 +589,12 @@ impl TuiReplayApp {
 
     fn set_live_status(&mut self, status: LiveStatus) {
         if self.live_status != Some(status) {
+            if matches!(status, LiveStatus::Done | LiveStatus::Failed) {
+                if let Some(started_at) = self.live_started_at {
+                    self.live_finished_delta
+                        .get_or_insert_with(|| started_at.elapsed());
+                }
+            }
             self.live_status = Some(status);
             self.live_status_changed_at = Some(Instant::now());
         }
@@ -618,6 +705,8 @@ impl TuiReplayApp {
                 let single = vec![record.clone()];
                 self.root_start_time = root_start_time(&single);
             }
+            let event_index = self.events.len();
+            self.update_header_stats_for_record(&record, event_index);
             self.source_events.push(record.clone());
             self.events.push(record);
             changed = true;
@@ -629,14 +718,66 @@ impl TuiReplayApp {
         }
     }
 
+    fn update_header_stats_for_record(&mut self, record: &EventRecord, event_index: usize) {
+        let elapsed_bin = record.event.elapsed_nanos.unwrap_or(0) / EVENT_RATE_BIN_NANOS;
+        self.latest_event_rate_bin = self.latest_event_rate_bin.max(elapsed_bin);
+        *self.event_rate_bins.entry(elapsed_bin).or_insert(0) += 1;
+
+        match record.event.event_type {
+            WorkflowEventType::Result => {
+                if let Some(usage) = workflow_token_usage(&record.event.data) {
+                    if record
+                        .event
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.workflow_depth)
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        self.root_result_token_usage = Some(usage);
+                    }
+                    self.workflow_token_usage_by_key
+                        .insert(workflow_usage_key(record, event_index), usage);
+                    self.refresh_observed_token_usage();
+                }
+            }
+            WorkflowEventType::AgentEvent => {
+                if let Some(usage) = provider_token_usage(&record.event.data) {
+                    self.agent_token_usage_by_key
+                        .insert(agent_usage_key(record, event_index), usage);
+                    self.refresh_observed_token_usage();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn refresh_observed_token_usage(&mut self) {
+        self.observed_token_usage = if let Some(usage) = self.root_result_token_usage {
+            Some(usage)
+        } else {
+            let agent_total = sum_token_usage(self.agent_token_usage_by_key.values().copied());
+            if agent_total != (0, 0) {
+                Some(agent_total)
+            } else {
+                let workflow_total =
+                    sum_token_usage(self.workflow_token_usage_by_key.values().copied());
+                (workflow_total != (0, 0)).then_some(workflow_total)
+            }
+        };
+    }
+
     fn reveal_events_until(&mut self, target_len: usize) {
         let current_len = self.events.len();
         let target_len = target_len.min(self.source_events.len());
         if target_len <= current_len {
             return;
         }
-        self.events
-            .extend(self.source_events[current_len..target_len].iter().cloned());
+        let revealed = self.source_events[current_len..target_len].to_vec();
+        for (offset, record) in revealed.iter().enumerate() {
+            self.update_header_stats_for_record(record, current_len + offset);
+        }
+        self.events.extend(revealed);
         self.pending_select_latest |= self.follow_latest;
         self.mark_replay_done_if_complete();
         self.request_view_update();
@@ -835,6 +976,76 @@ impl TuiReplayApp {
         )
     }
 
+    fn live_events_unsaved(&self) -> bool {
+        self.live_status.is_some() && self.events_file.is_none()
+    }
+
+    fn can_save_live_events(&self) -> bool {
+        self.live_events_unsaved() && !self.live_is_active()
+    }
+
+    fn should_confirm_quit(&self) -> bool {
+        self.live_is_active() || self.live_events_unsaved()
+    }
+
+    fn open_quit_confirmation(&mut self) {
+        self.confirm_quit = true;
+        self.confirm_quit_action = if self.can_save_live_events() {
+            ConfirmQuitAction::SaveAndQuit
+        } else {
+            ConfirmQuitAction::Stay
+        };
+    }
+
+    fn confirm_quit_actions(&self) -> Vec<ConfirmQuitAction> {
+        let mut actions = Vec::new();
+        if self.can_save_live_events() {
+            actions.push(ConfirmQuitAction::SaveAndQuit);
+        }
+        actions.push(ConfirmQuitAction::Quit);
+        actions.push(ConfirmQuitAction::Stay);
+        actions
+    }
+
+    fn move_confirm_quit_selection(&mut self, offset: isize) {
+        let actions = self.confirm_quit_actions();
+        let current = actions
+            .iter()
+            .position(|action| *action == self.confirm_quit_action)
+            .unwrap_or_else(|| actions.len().saturating_sub(1));
+        let next = if offset.is_negative() {
+            current.saturating_sub(offset.unsigned_abs())
+        } else {
+            current
+                .saturating_add(offset as usize)
+                .min(actions.len().saturating_sub(1))
+        };
+        self.confirm_quit_action = actions[next];
+    }
+
+    fn activate_confirm_quit_selection(&mut self) {
+        match self.confirm_quit_action {
+            ConfirmQuitAction::Quit => self.should_quit = true,
+            ConfirmQuitAction::SaveAndQuit if self.can_save_live_events() => {
+                self.confirm_quit = false;
+                self.save_and_quit_requested = true;
+            }
+            ConfirmQuitAction::Stay | ConfirmQuitAction::SaveAndQuit => self.confirm_quit = false,
+        }
+    }
+
+    fn save_live_events(&mut self) -> anyhow::Result<PathBuf> {
+        let path = live_events_save_path(self);
+        let mut file = fs::File::create(&path)?;
+        for record in &self.events {
+            serde_json::to_writer(&mut file, record.event.as_ref())?;
+            file.write_all(b"\n")?;
+        }
+        self.events_file = Some(path.clone());
+        self.saved_events_file = Some(path.clone());
+        Ok(path)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
@@ -842,7 +1053,21 @@ impl TuiReplayApp {
 
         if self.confirm_quit {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                    self.move_confirm_quit_selection(-1)
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    self.move_confirm_quit_selection(1)
+                }
+                KeyCode::Enter => self.activate_confirm_quit_selection(),
+                KeyCode::Char('y')
+                | KeyCode::Char('Y')
+                | KeyCode::Char('q')
+                | KeyCode::Char('Q') => self.should_quit = true,
+                KeyCode::Char('s') | KeyCode::Char('S') if self.can_save_live_events() => {
+                    self.confirm_quit_action = ConfirmQuitAction::SaveAndQuit;
+                    self.activate_confirm_quit_selection();
+                }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.confirm_quit = false,
                 _ => {}
             }
@@ -855,7 +1080,9 @@ impl TuiReplayApp {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc if self.live_is_active() => self.confirm_quit = true,
+            KeyCode::Char('q') | KeyCode::Esc if self.should_confirm_quit() => {
+                self.open_quit_confirmation()
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
@@ -902,6 +1129,12 @@ impl TuiReplayApp {
                     }
                 }
             }
+            KeyCode::Char('s') if self.can_save_live_events() => match self.save_live_events() {
+                Ok(path) => {
+                    self.toast = Some(ToastMessage::new(format!("saved {}", path.display())))
+                }
+                Err(error) => self.toast = Some(ToastMessage::new(format!("save failed: {error}"))),
+            },
             KeyCode::Char('/') => {
                 self.search_input = self.search_query.clone();
                 self.search_changed_at = None;
@@ -1193,7 +1426,7 @@ fn build_scope_tabs(events: &[EventRecord]) -> Vec<WorkflowScopeTab> {
             continue;
         }
         tabs.push(WorkflowScopeTab {
-            label: format!("child {}", short_id(&parent_step_id)),
+            label: format!("c: {}", short_id4(&parent_step_id)),
             workflow_depth: depth,
             parent_step_id: Some(parent_step_id),
         });
@@ -1229,7 +1462,7 @@ fn build_scope_tabs_for_view(events: &[TimelineViewEvent]) -> Vec<WorkflowScopeT
             continue;
         }
         tabs.push(WorkflowScopeTab {
-            label: format!("child {}", short_id(&parent_step_id)),
+            label: format!("c: {}", short_id4(&parent_step_id)),
             workflow_depth: depth,
             parent_step_id: Some(parent_step_id),
         });
@@ -1374,6 +1607,9 @@ fn run_live_tui(
     let mut app = TuiReplayApp::new_live();
     let result = run_live_tui_loop(&mut terminal, &mut app, event_rx, result_rx, cancel_tx);
     restore_terminal(&mut terminal)?;
+    if let Some(path) = app.saved_events_file.as_ref() {
+        eprintln!("Events log saved to {}", path.display());
+    }
     result
 }
 
@@ -1424,15 +1660,7 @@ fn run_live_tui_loop(
     loop {
         app.tick_search();
         app.tick_toast();
-        let mut event_batch = Vec::new();
-        for _ in 0..LIVE_EVENTS_PER_TICK {
-            match event_rx.try_recv() {
-                Ok(event) => event_batch.push(event),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-        app.push_live_events(event_batch);
+        app.push_live_events(drain_live_events(&event_rx, Some(LIVE_EVENTS_PER_TICK)));
         app.apply_view_snapshots();
         match result_rx.try_recv() {
             Ok(Ok(())) => app.set_live_status(LiveStatus::Done),
@@ -1447,6 +1675,17 @@ fn run_live_tui_loop(
                 {
                     app.set_live_status(LiveStatus::Failed);
                     app.live_error = Some("workflow task stopped without a result".to_string());
+                }
+            }
+        }
+
+        if app.save_and_quit_requested {
+            app.push_live_events(drain_live_events(&event_rx, None));
+            match app.save_live_events() {
+                Ok(_) => app.should_quit = true,
+                Err(error) => {
+                    app.toast = Some(ToastMessage::new(format!("save failed: {error}")));
+                    app.save_and_quit_requested = false;
                 }
             }
         }
@@ -1472,10 +1711,26 @@ fn run_live_tui_loop(
     Ok(())
 }
 
+fn drain_live_events(
+    event_rx: &mpsc::Receiver<WorkflowEvent>,
+    limit: Option<usize>,
+) -> Vec<WorkflowEvent> {
+    let mut event_batch = Vec::new();
+    let limit = limit.unwrap_or(usize::MAX);
+    for _ in 0..limit {
+        match event_rx.try_recv() {
+            Ok(event) => event_batch.push(event),
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    event_batch
+}
+
 fn render(frame: &mut Frame<'_>, app: &mut TuiReplayApp) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(5)])
+        .constraints([Constraint::Length(6), Constraint::Min(5)])
         .split(frame.area());
 
     render_header_pane(frame, app, root[0]);
@@ -1492,7 +1747,7 @@ fn render(frame: &mut Frame<'_>, app: &mut TuiReplayApp) {
         render_search_overlay(frame, app);
     }
     if app.confirm_quit {
-        render_quit_confirmation(frame);
+        render_quit_confirmation(frame, app);
     }
     if let Some(toast) = app.toast.as_ref() {
         render_toast(frame, toast);
@@ -1539,27 +1794,56 @@ fn render_header_pane(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(34), Constraint::Min(0)])
         .split(inner);
-    frame.render_widget(Paragraph::new(status_line(app)), rows[0]);
-    render_tab_bar(frame, app, rows[1]);
+    let workflow_tab_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(sections[0]);
+    render_workflow_status_indicator(frame, app, workflow_tab_rows[0]);
+    render_workflow_tabs_section(frame, app, workflow_tab_rows[1]);
+    render_workflow_details_section(frame, app, sections[1]);
 }
 
-fn render_tab_bar(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled(
-            " Workflows ",
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    spans.push(Span::raw(" "));
-    for (index, tab) in app.tabs.iter().enumerate() {
+fn render_workflow_status_indicator(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let (status, status_style) = header_status(app);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(status, status_style),
+        ])),
+        area,
+    );
+}
+
+fn render_workflow_tabs_section(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" workflows - tab/shift-tab ")
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible_range = visible_tab_range(app.active_tab, app.tabs.len(), 3);
+    let hidden = app.tabs.len().saturating_sub(visible_range.len());
+    let mut spans = vec![Span::raw(" ")];
+    for index in visible_range {
         let selected = index == app.active_tab;
         let style = if selected {
             Style::default()
@@ -1569,15 +1853,285 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layo
         } else {
             Style::default().fg(Color::White).bg(Color::DarkGray)
         };
-        spans.push(Span::styled(format!(" {} ", tab.label), style));
+        spans.push(Span::styled(format!(" {} ", app.tabs[index].label), style));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(
-        " Tab/Shift+Tab ",
-        Style::default().fg(Color::Gray),
-    ));
+    if hidden > 0 {
+        spans.push(Span::styled(
+            format!("+{hidden}"),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn visible_tab_range(active: usize, total: usize, limit: usize) -> std::ops::Range<usize> {
+    if total <= limit {
+        return 0..total;
+    }
+    let half = limit / 2;
+    let mut start = active.saturating_sub(half);
+    start = start.min(total.saturating_sub(limit));
+    start..start.saturating_add(limit)
+}
+
+fn render_workflow_details_section(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let area = pad_content_area(area, 2, 0);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(24),
+            Constraint::Length(3),
+            Constraint::Length(18),
+            Constraint::Length(3),
+            Constraint::Length(24),
+            Constraint::Min(0),
+        ])
+        .split(rows[0]);
+    render_workflow_run_details(frame, app, columns[0]);
+    render_event_count_details(frame, app, columns[2]);
+    render_token_usage_details(frame, app, columns[4]);
+    render_events_file_details(frame, app, rows[1]);
+}
+
+fn render_workflow_run_details(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let run_id = current_run_id(app);
+    let error = app.live_error.as_deref().map(|error| truncate(error, 48));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "workflow run",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(run_id, Style::default().fg(Color::White))),
+    ];
+    if !app.warnings.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("warnings {}", app.warnings.len()),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            error,
+            Style::default().fg(Color::Red),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_event_count_details(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let observed = app.events.len();
+    let graph_height = 1usize;
+    let graph_width = usize::from(area.width)
+        .saturating_sub(observed.to_string().len() + 1)
+        .min(12)
+        .max(1);
+    let mut lines = vec![Line::from(Span::styled(
+        "events",
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(event_rate_framegraph_lines(
+        app,
+        graph_width,
+        graph_height,
+        observed,
+    ));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_token_usage_details(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let (input, output) = app.observed_token_usage.unwrap_or((0, 0));
+    let lines = vec![
+        Line::from(Span::styled(
+            "token usages",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("+in ", Style::default().fg(Color::Green)),
+            Span::styled(format_count(input), Style::default().fg(Color::LightGreen)),
+            Span::raw(" "),
+            Span::styled("+out ", Style::default().fg(Color::Blue)),
+            Span::styled(format_count(output), Style::default().fg(Color::LightBlue)),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_events_file_details(
+    frame: &mut Frame<'_>,
+    app: &TuiReplayApp,
+    area: ratatui::layout::Rect,
+) {
+    let mut spans = vec![Span::styled(
+        "file: ",
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(path) = app.events_file.as_ref() {
+        spans.push(Span::styled(
+            path.display().to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "<unsaved>",
+            Style::default().fg(Color::DarkGray),
+        ));
+        if app.can_save_live_events() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                "s",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled("ave?", Style::default().fg(Color::Gray)));
+        }
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn event_rate_framegraph_lines(
+    app: &TuiReplayApp,
+    width: usize,
+    height: usize,
+    observed: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let height = height.max(1);
+    let bins = event_rate_bins(app, width.saturating_mul(2));
+    let max_count = bins.iter().copied().max().unwrap_or(0).max(1);
+    let subcell_height = height.saturating_mul(4).max(1);
+    let column_heights = bins
+        .iter()
+        .map(|count| {
+            if *count == 0 {
+                1
+            } else {
+                count
+                    .saturating_mul(subcell_height)
+                    .saturating_add(max_count - 1)
+                    / max_count
+            }
+        })
+        .collect::<Vec<_>>();
+
+    (0..height)
+        .map(|row_index| {
+            let row_top = height.saturating_sub(row_index).saturating_mul(4);
+            let row_bottom = row_top.saturating_sub(4);
+            let row = column_heights
+                .chunks(2)
+                .map(|chunk| {
+                    let left = chunk
+                        .first()
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(row_bottom)
+                        .min(4);
+                    let right = chunk
+                        .get(1)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(row_bottom)
+                        .min(4);
+                    event_rate_braille_cell(left, right)
+                })
+                .collect::<String>();
+            let mut spans = vec![Span::styled(row, event_rate_row_style(row_index, height))];
+            if row_index == height.saturating_sub(1) {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    observed.to_string(),
+                    Style::default().fg(Color::White),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn event_rate_braille_cell(left: usize, right: usize) -> char {
+    let left_mask = match left {
+        0 => 0x00,
+        1 => 0x40,
+        2 => 0x44,
+        3 => 0x46,
+        _ => 0x47,
+    };
+    let right_mask = match right {
+        0 => 0x00,
+        1 => 0x80,
+        2 => 0xa0,
+        3 => 0xb0,
+        _ => 0xb8,
+    };
+    char::from_u32(0x2800 + left_mask + right_mask).unwrap_or(' ')
+}
+
+fn event_rate_row_style(row_index: usize, height: usize) -> Style {
+    let level_from_bottom = height.saturating_sub(row_index);
+    let color = match level_from_bottom {
+        0 | 1 => Color::Rgb(170, 210, 130),
+        2 => Color::Rgb(224, 205, 130),
+        3 => Color::Rgb(235, 165, 120),
+        _ => Color::Rgb(238, 120, 120),
+    };
+    Style::default().fg(color)
+}
+
+fn event_rate_bins(app: &TuiReplayApp, width: usize) -> Vec<usize> {
+    let width = width.max(1);
+    let max_bin = app.latest_event_rate_bin;
+    let mut bins = vec![0usize; width];
+    for (bin, count) in &app.event_rate_bins {
+        let distance_from_latest = max_bin.saturating_sub(*bin);
+        let Ok(distance_from_latest) = usize::try_from(distance_from_latest) else {
+            continue;
+        };
+        if distance_from_latest >= width {
+            continue;
+        }
+        let index = width.saturating_sub(1).saturating_sub(distance_from_latest);
+        if let Some(value) = bins.get_mut(index) {
+            *value = *count;
+        }
+    }
+    bins
 }
 
 fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
@@ -2173,16 +2727,95 @@ fn pad_lines(lines: Vec<Line<'static>>, padding: &'static str) -> Vec<Line<'stat
         .collect()
 }
 
-fn render_quit_confirmation(frame: &mut Frame<'_>) {
-    let area = centered_rect(60, 5, frame.area());
-    let paragraph = Paragraph::new(vec![
-        Line::from("Quit live workflow TUI?"),
-        Line::from(""),
-        Line::from("Press y to quit the UI, n or Esc to stay."),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("Confirm quit"));
+fn render_quit_confirmation(frame: &mut Frame<'_>, app: &TuiReplayApp) {
+    let area = centered_rect(64, 7, frame.area());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" confirm quit ");
+    let inner = pad_content_area(block.inner(area), 2, 1);
     frame.render_widget(Clear, area);
-    frame.render_widget(paragraph, area);
+    frame.render_widget(block, area);
+
+    let button_line = |actions: &[ConfirmQuitAction]| {
+        let mut spans = Vec::new();
+        for (index, action) in actions.iter().copied().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(confirm_quit_button(
+                action,
+                app.confirm_quit_action == action,
+            ));
+        }
+        Line::from(spans)
+    };
+
+    let lines = if app.live_is_active() {
+        vec![
+            Line::from(Span::styled(
+                "Quit live workflow TUI?",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "The workflow is still running.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            button_line(&[ConfirmQuitAction::Quit, ConfirmQuitAction::Stay]),
+        ]
+    } else if app.live_events_unsaved() {
+        vec![
+            Line::from(Span::styled(
+                "Quit without saving event log?",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Live events are currently unsaved.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            button_line(&[
+                ConfirmQuitAction::SaveAndQuit,
+                ConfirmQuitAction::Quit,
+                ConfirmQuitAction::Stay,
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "Quit TUI?",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            button_line(&[ConfirmQuitAction::Quit, ConfirmQuitAction::Stay]),
+        ]
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn confirm_quit_button(action: ConfirmQuitAction, selected: bool) -> Span<'static> {
+    let (label, color) = match action {
+        ConfirmQuitAction::Quit => ("quit", Color::Red),
+        ConfirmQuitAction::SaveAndQuit => ("save & quit", Color::Green),
+        ConfirmQuitAction::Stay => ("stay", Color::Blue),
+    };
+    let label = format!(" {label} ");
+    let style = if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    };
+    Span::styled(label, style)
 }
 
 fn render_search_overlay(frame: &mut Frame<'_>, app: &TuiReplayApp) {
@@ -2226,18 +2859,49 @@ fn breathing_light() -> &'static str {
     FRAMES[tick % FRAMES.len()]
 }
 
-fn status_line(app: &TuiReplayApp) -> Line<'static> {
-    let run_id = app
-        .events
+fn current_run_id(app: &TuiReplayApp) -> String {
+    app.events
         .first()
         .and_then(|record| record.event.metadata.as_ref())
         .and_then(|metadata| metadata.run_id.as_deref())
-        .unwrap_or("<unknown-run>");
-    let warnings = if app.warnings.is_empty() {
-        "".to_string()
+        .unwrap_or("<unknown-run>")
+        .to_string()
+}
+
+fn live_delta_time(app: &TuiReplayApp) -> Option<String> {
+    app.live_status?;
+    let delta = app
+        .live_finished_delta
+        .or_else(|| app.live_started_at.map(|started_at| started_at.elapsed()))?;
+    Some(format_elapsed_seconds(delta.as_secs()))
+}
+
+fn live_events_save_path(app: &TuiReplayApp) -> PathBuf {
+    let run_id = sanitize_file_name(&current_run_id(app));
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(format!("{run_id}.jsonl"))
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() || sanitized == "_unknown-run_" {
+        "workflow-events".to_string()
     } else {
-        format!("  warnings {}", app.warnings.len())
-    };
+        sanitized
+    }
+}
+
+fn header_status(app: &TuiReplayApp) -> (String, Style) {
     if let Some(live_status) = app.live_status {
         let terminal_indicator = |fallback: &str| {
             if app
@@ -2249,43 +2913,45 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
                 breathing_light().to_string()
             }
         };
-        let (status, status_style) = match live_status {
+        return match live_status {
             LiveStatus::Running => (
-                format!("{} LIVE RUNNING", breathing_light()),
+                format!(
+                    "{} LIVE RUNNING {}",
+                    breathing_light(),
+                    live_delta_time(app).unwrap_or_else(|| "+00:00:00".to_string())
+                ),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             LiveStatus::Cancelling => (
-                format!("{} LIVE CANCELLING", breathing_light()),
+                format!(
+                    "{} LIVE CANCELLING {}",
+                    breathing_light(),
+                    live_delta_time(app).unwrap_or_else(|| "+00:00:00".to_string())
+                ),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             LiveStatus::Done => (
-                format!("{} LIVE DONE", terminal_indicator("✓")),
+                format!(
+                    "{} LIVE DONE {}",
+                    terminal_indicator("✓"),
+                    live_delta_time(app).unwrap_or_else(|| "+00:00:00".to_string())
+                ),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
             LiveStatus::Failed => (
-                format!("{} LIVE FAILED", terminal_indicator("✗")),
+                format!(
+                    "{} LIVE FAILED {}",
+                    terminal_indicator("✗"),
+                    live_delta_time(app).unwrap_or_else(|| "+00:00:00".to_string())
+                ),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
         };
-        let error = app
-            .live_error
-            .as_ref()
-            .map(|error| format!("  error: {}", truncate(error, 80)))
-            .unwrap_or_default();
-        return Line::from(vec![
-            Span::raw(" "),
-            Span::styled(status, status_style),
-            Span::raw(format!(
-                "  {run_id}  events {}  tab {}/{}{error}",
-                app.events.len(),
-                app.active_tab + 1,
-                app.tabs.len(),
-            )),
-        ]);
     }
-    let (playback, playback_style) = match app.playback {
+
+    match app.playback {
         PlaybackState::Playing => (
             format!("{} REPLAY PLAYING", breathing_light()),
             Style::default()
@@ -2314,19 +2980,117 @@ fn status_line(app: &TuiReplayApp) -> Line<'static> {
                 .fg(Color::Rgb(255, 165, 0))
                 .add_modifier(Modifier::BOLD),
         ),
-    };
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(playback, playback_style),
-        Span::raw(format!(
-            "  {run_id}  events {}/{}  tab {}/{}{}",
-            app.events.len(),
-            app.source_events.len(),
-            app.active_tab + 1,
-            app.tabs.len(),
-            warnings
-        )),
-    ])
+    }
+}
+
+fn workflow_token_usage(data: &Value) -> Option<(u64, u64)> {
+    data.get("tokenUsage")
+        .and_then(Value::as_object)
+        .and_then(token_usage_from_object)
+}
+
+fn provider_token_usage(data: &Value) -> Option<(u64, u64)> {
+    let provider_event = data.get("providerEvent").unwrap_or(data);
+    find_token_usage_pair(provider_event)
+}
+
+fn find_token_usage_pair(value: &Value) -> Option<(u64, u64)> {
+    match value {
+        Value::Object(object) => {
+            if let Some(usage) = object.get("usage").and_then(Value::as_object) {
+                if let Some(pair) = token_usage_from_object(usage) {
+                    return Some(pair);
+                }
+            }
+            if let Some(tokens) = object.get("tokens").and_then(Value::as_object) {
+                if let Some(pair) = token_usage_from_object(tokens) {
+                    return Some(pair);
+                }
+            }
+            if let Some(pair) = token_usage_from_object(object) {
+                return Some(pair);
+            }
+            object.values().find_map(find_token_usage_pair)
+        }
+        Value::Array(items) => items.iter().find_map(find_token_usage_pair),
+        _ => None,
+    }
+}
+
+fn token_usage_from_object(object: &serde_json::Map<String, Value>) -> Option<(u64, u64)> {
+    let input = first_u64(
+        object,
+        &[
+            "inputTokens",
+            "input_tokens",
+            "prompt_tokens",
+            "promptTokens",
+            "input",
+        ],
+    )?;
+    let output = first_u64(
+        object,
+        &[
+            "outputTokens",
+            "output_tokens",
+            "completion_tokens",
+            "completionTokens",
+            "output",
+        ],
+    )
+    .or_else(|| first_u64(object, &["reasoning_output_tokens", "reasoning"]));
+    Some((input, output.unwrap_or(0)))
+}
+
+fn first_u64(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_u64))
+}
+
+fn workflow_usage_key(record: &EventRecord, index: usize) -> String {
+    record
+        .event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .parent_step_id
+                .as_ref()
+                .or(metadata.step_id.as_ref())
+        })
+        .cloned()
+        .unwrap_or_else(|| format!("workflow:{index}"))
+}
+
+fn agent_usage_key(record: &EventRecord, index: usize) -> String {
+    record
+        .event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .step_id
+                .as_ref()
+                .or(metadata.session_id.as_ref())
+                .or(metadata.provider.as_ref())
+        })
+        .cloned()
+        .unwrap_or_else(|| format!("agent:{index}"))
+}
+
+fn sum_token_usage(usages: impl IntoIterator<Item = (u64, u64)>) -> (u64, u64) {
+    usages
+        .into_iter()
+        .fold((0, 0), |(total_in, total_out), (input, output)| {
+            (
+                total_in.saturating_add(input),
+                total_out.saturating_add(output),
+            )
+        })
+}
+
+fn format_count(value: u64) -> String {
+    value.to_string()
 }
 
 fn timeline_row_summary(app: &TuiReplayApp, row: &TimelineRow) -> String {
@@ -2788,9 +3552,20 @@ fn format_elapsed(nanos: u64) -> String {
     )
 }
 
+fn format_elapsed_seconds(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    format!("+{:02}:{:02}:{:02}", hours, minutes % 60, seconds % 60)
+}
+
 fn short_id(value: &str) -> String {
     let suffix = value.strip_prefix("step_").unwrap_or(value);
     suffix.chars().take(8).collect()
+}
+
+fn short_id4(value: &str) -> String {
+    let suffix = value.strip_prefix("step_").unwrap_or(value);
+    suffix.chars().take(4).collect()
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
