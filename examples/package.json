@@ -5,7 +5,7 @@
     "typecheck": "tsc -p jsconfig.json"
   },
   "devDependencies": {
-    "@smol-workflows/sdk": "0.1.0",
+    "@smol-workflows/sdk": "0.1.0-alpha.5",
     "typescript": "6.0.3"
   }
 }

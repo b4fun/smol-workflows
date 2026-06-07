@@ -9,12 +9,7 @@
     "noImplicitAny": false,
     "strictNullChecks": false,
     "disableSizeLimit": true,
-    "ignoreDeprecations": "6.0",
-    "types": ["@smol-workflows/sdk"],
-    "baseUrl": ".",
-    "paths": {
-      "workflow:extra": ["node_modules/@smol-workflows/sdk/dist/workflow-extra.d.ts"]
-    }
+    "types": ["@smol-workflows/sdk"]
   },
   "include": ["*.mjs"]
 }
