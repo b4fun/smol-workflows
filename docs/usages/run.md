@@ -93,6 +93,59 @@ smol-wf run ./workflow.mjs --agent-provider pi
 
 A workflow can still override the provider for individual calls with `agent(prompt, { provider })` or phase metadata.
 
+### `--model-map <alias>:<selector>`
+
+Define a model alias that workflow scripts can use in `agent(prompt, { model })` or phase metadata. The flag may be repeated.
+
+Basic aliases:
+
+```sh
+smol-wf run ./workflow.mjs \
+  --agent-provider pi \
+  --model-map deep:gpt-5.5 \
+  --model-map fast:gpt-5.4-nano
+```
+
+Workflow code can then use the aliases:
+
+```js
+await agent("Do careful synthesis", { model: "deep" });
+await agent("Classify these items", { model: "fast" });
+```
+
+Alias values use the same extended model selector syntax accepted by workflow `model` strings:
+
+```txt
+<model-id>[?provider=<model-provider>&thinking=<level>]
+```
+
+Example with a model provider and reasoning level:
+
+```sh
+smol-wf run ./workflow.mjs \
+  --agent-provider pi \
+  --model-map 'deep:gpt-5.5?provider=github-copilot&thinking=medium' \
+  --model-map 'fast:gpt-5.4-nano?provider=github-copilot&thinking=low'
+```
+
+This lets workflow code stay provider-neutral:
+
+```js
+await agent("Deep analysis", { model: "deep" });
+```
+
+The runner resolves `deep` to model ID `gpt-5.5`, model provider `github-copilot`, and thinking level `medium`. Providers that support provider-qualified model names pass the model as `github-copilot/gpt-5.5`; providers with native reasoning controls pass `thinking=medium` through those controls.
+
+Notes:
+
+- Quote selectors containing `?` or `&` in shells.
+- Alias keys are matched exactly before selector parsing.
+- Alias expansion is one level; recursive aliases are not supported.
+- Unknown aliases are treated as literal model selectors, so existing model names such as `sonnet` continue to work.
+- The selector query parameter `provider` means model provider, not `--agent-provider`.
+
+See [`../harness-capabilities/input-and-env.md`](../harness-capabilities/input-and-env.md#model-selector-syntax-and-alias-resolution) for provider-specific resolution behavior.
+
 ### `--db <path>`
 
 Use a specific SQLite durable workflow database.

@@ -5,6 +5,7 @@ use smol_workflow_engine::agent_providers::{
 };
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions};
+use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 struct FixedUsageProvider;
 struct RawEventsProvider;
 struct OptionsEchoProvider;
+struct NamedOptionsEchoProvider(&'static str);
 struct ConcurrentProbeProvider {
     current: AtomicUsize,
     max: AtomicUsize,
@@ -355,20 +357,43 @@ impl AgentProvider for OptionsEchoProvider {
     }
 
     async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
-        Ok(AgentProviderResult {
-            output: json!({
-                "prompt": input.prompt,
-                "options": input.options,
-                "context": {
-                    "phase": input.context.phase,
-                }
-            }),
-            session_id: None,
-            model: None,
-            usage: None,
-            isolation: None,
-            raw: None,
-        })
+        Ok(echo_options_result(input))
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentProvider for NamedOptionsEchoProvider {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn schema_mode(&self) -> AgentProviderSchemaMode {
+        AgentProviderSchemaMode::Builtin
+    }
+
+    fn usage_mode(&self) -> AgentProviderUsageMode {
+        AgentProviderUsageMode::Builtin
+    }
+
+    async fn run(&self, input: AgentProviderRunInput) -> anyhow::Result<AgentProviderResult> {
+        Ok(echo_options_result(input))
+    }
+}
+
+fn echo_options_result(input: AgentProviderRunInput) -> AgentProviderResult {
+    AgentProviderResult {
+        output: json!({
+            "prompt": input.prompt,
+            "options": input.options,
+            "context": {
+                "phase": input.context.phase,
+            }
+        }),
+        session_id: None,
+        model: None,
+        usage: None,
+        isolation: None,
+        raw: None,
     }
 }
 
@@ -381,6 +406,7 @@ fn run_debug(
         script_path,
         args,
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -416,6 +442,7 @@ export default { agent: await agent("inspect cluster") };
         script_path,
         args: json!({}),
         agent_provider: Arc::new(RawEventsProvider),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -529,6 +556,7 @@ export default { item: args.item };
         script_path: parent_path,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -621,6 +649,7 @@ throw new Error("child exploded");
         script_path: parent_path,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -699,6 +728,7 @@ throw new Error("integration boom");
         script_path,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -762,6 +792,7 @@ fn run_with_provider(
         script_path,
         args: json!({}),
         agent_provider: provider,
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -923,6 +954,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         script_path: fixture_path("no-meta.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -943,6 +975,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
         script_path: fixture_path("missing-default.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1016,6 +1049,7 @@ fn rejects_nested_child_workflow_fixture() {
         script_path: fixture_path("nested-parent.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1046,6 +1080,7 @@ fn applies_phase_metadata_defaults() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1074,6 +1109,100 @@ fn applies_phase_metadata_defaults() {
 }
 
 #[test]
+fn resolves_model_map_aliases_and_selector_query() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("model-map.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: 'model-map', description: 'model map test' };
+const result = await agent('mapped', { model: 'deep' });
+export default result;
+"#,
+    )
+    .expect("workflow should be written");
+
+    let mut model_map = BTreeMap::new();
+    model_map.insert(
+        "deep".to_string(),
+        "gpt-5.5?provider=github-copilot&thinking=medium".to_string(),
+    );
+    let provider = Arc::new(NamedOptionsEchoProvider("pi"));
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider.clone(),
+        model_map,
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should run");
+
+    assert_eq!(
+        result.output.result["options"],
+        json!({
+            "model": "github-copilot/gpt-5.5",
+            "modelProvider": "github-copilot",
+            "modelSelector": "gpt-5.5?provider=github-copilot&thinking=medium",
+            "requestedModel": "deep",
+            "thinking": "medium"
+        })
+    );
+}
+
+#[test]
+fn rejects_unrepresentable_model_selector_for_provider() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let script_path = temp.path().join("bad-model.workflow.js");
+    fs::write(
+        &script_path,
+        r#"
+export const meta = { name: 'bad-model', description: 'bad model test' };
+const result = await agent('mapped', { model: 'deep' });
+export default result;
+"#,
+    )
+    .expect("workflow should be written");
+
+    let mut model_map = BTreeMap::new();
+    model_map.insert(
+        "deep".to_string(),
+        "gpt-5.5?provider=github-copilot".to_string(),
+    );
+    let provider = Arc::new(NamedOptionsEchoProvider("claude-code"));
+    let error = block_on(run_workflow(RunWorkflowOptions {
+        script_path,
+        args: json!({}),
+        agent_provider: provider.clone(),
+        model_map,
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("do not support ?provider"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
 fn agent_provider_option_overrides_default_provider() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let script_path = temp.path().join("provider-override.workflow.js");
@@ -1084,6 +1213,7 @@ fn agent_provider_option_overrides_default_provider() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1112,6 +1242,7 @@ fn runs_parallel_agent_requests_concurrently() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1143,6 +1274,7 @@ fn starts_follow_up_agent_requests_when_capacity_frees() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1174,6 +1306,7 @@ fn honors_parallel_agent_request_limit() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1205,6 +1338,7 @@ fn honors_serial_parallel_agent_request_limit() {
         script_path,
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1237,6 +1371,7 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
         script_path: fixture_path("budget-parent.workflow.js"),
         args: json!({}),
         agent_provider: provider,
+        model_map: Default::default(),
         budget_total: Some(50),
         budget_spent: 0,
         nesting_depth: 0,
@@ -1305,6 +1440,7 @@ fn validates_schema_backed_agent_output_and_retries_once() {
         script_path: fixture_path("schema-validation.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1335,6 +1471,7 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
         script_path: fixture_path("schema-validation.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: None,
         budget_spent: 0,
         nesting_depth: 0,
@@ -1362,6 +1499,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
         script_path: fixture_path("on-agent-usage-budget.workflow.js"),
         args: json!({}),
         agent_provider: provider.clone(),
+        model_map: Default::default(),
         budget_total: Some(20),
         budget_spent: 0,
         nesting_depth: 0,

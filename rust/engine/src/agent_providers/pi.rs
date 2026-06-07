@@ -77,6 +77,9 @@ async fn run_pi(
     if let Some(model) = option_str(&input.options, "model") {
         args.extend(["--model".into(), model]);
     }
+    if let Some(thinking) = option_str(&input.options, "thinking") {
+        args.extend(["--thinking".into(), thinking]);
+    }
     args.push(prompt_arg);
 
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
