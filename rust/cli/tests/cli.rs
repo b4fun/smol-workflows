@@ -201,6 +201,57 @@ fn llm_skills_installs_workspace_skill_files() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn llm_skills_rejects_symlinked_target_dir() {
+    let root = temp_dir("llm-skills-symlink-dir");
+    let outside = temp_dir("llm-skills-symlink-dir-outside");
+    std::os::unix::fs::symlink(&outside, root.join(".agents")).expect("symlink should be created");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["llm", "skills"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing to install skills through symlinked directory"));
+    assert!(!outside.join("skills/smol-workflows").exists());
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn llm_skills_rejects_symlinked_destination_file() {
+    let root = temp_dir("llm-skills-symlink-file");
+    let outside = temp_dir("llm-skills-symlink-file-outside");
+    let list_dir = root.join(".agents/skills/smol-workflows/list");
+    fs::create_dir_all(&list_dir).expect("skill dir should be created");
+    fs::write(outside.join("SKILL.md"), "do not overwrite").expect("outside file should exist");
+    std::os::unix::fs::symlink(outside.join("SKILL.md"), list_dir.join("SKILL.md"))
+        .expect("symlink should be created");
+
+    let output = smol_wf()
+        .current_dir(&root)
+        .args(["llm", "skills"])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing to overwrite symlinked skill file"));
+    assert_eq!(
+        fs::read_to_string(outside.join("SKILL.md")).expect("outside file should be readable"),
+        "do not overwrite"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&outside);
+}
+
 #[test]
 fn llm_skills_claude_installs_under_claude_dir() {
     let root = temp_dir("llm-skills-claude");

@@ -1014,15 +1014,18 @@ impl SkillInstallTarget {
 async fn llm_skills_command(options: LlmSkillsOptions) -> anyhow::Result<()> {
     let cwd = env::current_dir()?;
     let workspace_root = find_repo_root(&cwd).unwrap_or(cwd);
-    let skills_root = workspace_root.join(options.target.root_relative_path());
-    fs::create_dir_all(&skills_root)?;
+    let skills_root = ensure_relative_dir_without_symlinks(
+        &workspace_root,
+        Path::new(options.target.root_relative_path()),
+    )?;
 
     for asset in SKILL_ASSETS {
-        let destination = skills_root.join(asset.relative_path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
+        let asset_path = Path::new(asset.relative_path);
+        if let Some(parent) = asset_path.parent() {
+            ensure_relative_dir_without_symlinks(&skills_root, parent)?;
         }
-        fs::write(&destination, asset.content)?;
+        let destination = skills_root.join(asset_path);
+        write_asset_without_following_symlink(&destination, asset.content)?;
         set_asset_permissions(&destination, asset.executable)?;
     }
 
@@ -1037,6 +1040,68 @@ async fn llm_skills_command(options: LlmSkillsOptions) -> anyhow::Result<()> {
     println!("    list/SKILL.md          Skill for discovering available workflows");
     println!("    run/SKILL.md           Skill for running workflow scripts");
     println!("    scripts/smol-wf.sh     Shared helper used by the skills");
+    Ok(())
+}
+
+fn ensure_relative_dir_without_symlinks(root: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            anyhow::bail!(
+                "skill install path {} must be relative and cannot contain parent components",
+                relative.display()
+            );
+        };
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "refusing to install skills through symlinked directory {}",
+                    path.display()
+                );
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                anyhow::bail!(
+                    "refusing to install skills because {} exists and is not a directory",
+                    path.display()
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(path)
+}
+
+fn write_asset_without_following_symlink(path: &Path, content: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing to overwrite symlinked skill file {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(path)?;
+        }
+        Ok(_) => {
+            anyhow::bail!(
+                "refusing to overwrite {} because it is not a regular file",
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
     Ok(())
 }
 
