@@ -8,6 +8,7 @@ use crate::agent_providers::{AgentProvider, AgentProviderResult, AgentProviderRu
 use crate::durable::json::{
     DurableRunMode, FailureReasonJSON, LocalTaskParamsJSON, WorkflowRunJSON,
 };
+use crate::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventSink};
 use crate::metadata::read_workflow_metadata;
 use crate::workflow::{
     run_agent_provider, run_workflow, RunWorkflowOptions, RunWorkflowResult, WorkflowAgentRunner,
@@ -18,7 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use super::sqlite::{new_id, now_ms, SqliteDurableStore};
@@ -28,7 +29,7 @@ const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const LOCAL_CLAIM_SCOPE: &str = "local";
 
 /// Options for a local durable workflow run.
-pub struct LocalDurableRunOptions<'a> {
+pub struct LocalDurableRunOptions {
     pub script_path: PathBuf,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
@@ -37,13 +38,11 @@ pub struct LocalDurableRunOptions<'a> {
     pub max_attempts: u32,
     pub resume_run_id: Option<String>,
     pub cancel_rx: Option<watch::Receiver<bool>>,
-    pub on_log: Option<crate::workflow::WorkflowLogCallback<'a>>,
-    pub on_phase: Option<crate::workflow::WorkflowPhaseCallback<'a>>,
-    pub on_agent_result: Option<crate::workflow::WorkflowAgentResultCallback<'a>>,
-    pub on_agent_finished: Option<crate::workflow::WorkflowAgentFinishedCallback>,
+    pub event_sink: Option<Arc<dyn crate::workflow::WorkflowEventSink>>,
+    pub session_log_sink: Option<Arc<dyn crate::workflow::AgentSessionLogSink>>,
 }
 
-impl<'a> LocalDurableRunOptions<'a> {
+impl LocalDurableRunOptions {
     pub fn new(script_path: PathBuf, args: Value, agent_provider: Arc<dyn AgentProvider>) -> Self {
         Self {
             script_path,
@@ -54,12 +53,72 @@ impl<'a> LocalDurableRunOptions<'a> {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             resume_run_id: None,
             cancel_rx: None,
-            on_log: None,
-            on_phase: None,
-            on_agent_result: None,
-            on_agent_finished: None,
+            event_sink: None,
+            session_log_sink: None,
         }
     }
+}
+
+struct RunScopedWorkflowEventSink {
+    inner: Arc<dyn WorkflowEventSink>,
+    run_id: String,
+    start: Instant,
+}
+
+impl RunScopedWorkflowEventSink {
+    fn new(inner: Arc<dyn WorkflowEventSink>, run_id: String) -> Self {
+        Self {
+            inner,
+            run_id,
+            start: Instant::now(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowEventSink for RunScopedWorkflowEventSink {
+    async fn emit(&self, event: WorkflowEvent) -> anyhow::Result<()> {
+        let workflow_depth = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.workflow_depth)
+            .unwrap_or(0);
+        if workflow_depth == 0
+            && matches!(
+                event.event_type.as_str(),
+                "workflow.started" | "workflow.result" | "workflow.error"
+            )
+        {
+            return Ok(());
+        }
+        self.emit_scoped(event).await
+    }
+}
+
+impl RunScopedWorkflowEventSink {
+    async fn emit_scoped(&self, mut event: WorkflowEvent) -> anyhow::Result<()> {
+        let metadata = event
+            .metadata
+            .get_or_insert_with(WorkflowEventMetadata::default);
+        if metadata.run_id.is_none() {
+            metadata.run_id = Some(self.run_id.clone());
+        }
+        if metadata.workflow_depth.is_none() {
+            metadata.workflow_depth = Some(0);
+        }
+        if event.event_type.as_str() != "workflow.started" && event.elapsed_nanos.is_none() {
+            event.elapsed_nanos = Some(elapsed_nanos(self.start));
+        }
+        self.inner.emit(event).await
+    }
+}
+
+fn elapsed_nanos(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn rfc3339_now() -> anyhow::Result<String> {
+    Ok(time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?)
 }
 
 /// Result of a local durable workflow run.
@@ -226,7 +285,7 @@ impl WorkflowAgentRunner for SqliteDurableAgentRunner {
 /// Execute a workflow locally while persisting durable task/run/attempt state.
 pub async fn run_local_durable_workflow(
     store: &mut SqliteDurableStore,
-    options: LocalDurableRunOptions<'_>,
+    options: LocalDurableRunOptions,
 ) -> anyhow::Result<LocalDurableRunResult> {
     store.init()?;
 
@@ -266,6 +325,19 @@ pub async fn run_local_durable_workflow(
         (task_id, run_id, 1)
     };
 
+    let workflow_event_sink = options.event_sink.as_ref().map(|sink| {
+        Arc::new(RunScopedWorkflowEventSink::new(
+            Arc::clone(sink),
+            run_id.clone(),
+        ))
+    });
+    if let Some(event_sink) = workflow_event_sink.as_ref() {
+        event_sink
+            .emit_scoped(WorkflowEvent::started(rfc3339_now()?))
+            .await
+            .context("failed to emit workflow started event")?;
+    }
+
     let last_attempt = first_attempt + max_attempts - 1;
     let mut last_error: Option<anyhow::Error> = None;
     for attempt in first_attempt..=last_attempt {
@@ -299,10 +371,12 @@ pub async fn run_local_durable_workflow(
             max_parallel_agent_requests: options.max_parallel_agent_requests,
             agent_runner,
             cancel_rx: options.cancel_rx.clone(),
-            on_log: options.on_log,
-            on_phase: options.on_phase,
-            on_agent_result: options.on_agent_result,
-            on_agent_finished: options.on_agent_finished.clone(),
+            event_sink: workflow_event_sink
+                .as_ref()
+                .map(|sink| Arc::clone(sink) as Arc<dyn WorkflowEventSink>),
+            event_parent_step_id: None,
+            event_stream_start: workflow_event_sink.as_ref().map(|sink| sink.start),
+            session_log_sink: options.session_log_sink.clone(),
         })
         .await;
 
@@ -318,6 +392,17 @@ pub async fn run_local_durable_workflow(
                     budget_spent: workflow.budget.spent,
                     now: now_ms(),
                 })?;
+                if let Some(event_sink) = workflow_event_sink.as_ref() {
+                    event_sink
+                        .emit_scoped(WorkflowEvent::result(
+                            workflow.token_usage.input_tokens,
+                            workflow.token_usage.output_tokens,
+                            workflow.token_usage.total_tokens,
+                            workflow.output.result.clone(),
+                        ))
+                        .await
+                        .context("failed to emit workflow result event")?;
+                }
                 return Ok(LocalDurableRunResult {
                     task_id,
                     run_id,
@@ -337,6 +422,12 @@ pub async fn run_local_durable_workflow(
                         failure_reason: &failure_reason,
                         now: now_ms(),
                     })?;
+                    if let Some(event_sink) = workflow_event_sink.as_ref() {
+                        event_sink
+                            .emit_scoped(WorkflowEvent::error(error.to_string(), None))
+                            .await
+                            .context("failed to emit workflow error event")?;
+                    }
                     return Err(error);
                 }
                 let terminal = attempt >= last_attempt;
@@ -348,6 +439,14 @@ pub async fn run_local_durable_workflow(
                     terminal,
                     now: now_ms(),
                 })?;
+                if terminal {
+                    if let Some(event_sink) = workflow_event_sink.as_ref() {
+                        event_sink
+                            .emit_scoped(WorkflowEvent::error(error.to_string(), None))
+                            .await
+                            .context("failed to emit workflow error event")?;
+                    }
+                }
                 last_error = Some(error);
             }
         }
@@ -1410,6 +1509,26 @@ mod tests {
         }
     }
 
+    struct TestSessionLogSink {
+        root: std::path::PathBuf,
+        saved_tx: Option<watch::Sender<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workflow::AgentSessionLogSink for TestSessionLogSink {
+        async fn write_agent_result(
+            &self,
+            provider: &str,
+            result: &AgentProviderResult,
+        ) -> anyhow::Result<()> {
+            write_test_raw_session(&self.root, provider, result)?;
+            if let Some(saved_tx) = &self.saved_tx {
+                let _ = saved_tx.send(true);
+            }
+            Ok(())
+        }
+    }
+
     fn write_test_raw_session(
         root: &std::path::Path,
         provider: &str,
@@ -2041,14 +2160,10 @@ export default { ok: true };
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
         let (saved_tx, mut saved_rx) = tokio::sync::watch::channel(false);
-        let raw_session_dir = raw_dir.clone();
-        options.on_agent_finished = Some(Arc::new(
-            move |_: &str, provider: &str, result: &AgentProviderResult| {
-                write_test_raw_session(&raw_session_dir, provider, result)?;
-                let _ = saved_tx.send(true);
-                Ok(())
-            },
-        ));
+        options.session_log_sink = Some(Arc::new(TestSessionLogSink {
+            root: raw_dir.clone(),
+            saved_tx: Some(saved_tx),
+        }));
 
         let run = run_local_durable_workflow(&mut store, options);
         tokio::pin!(run);
@@ -2093,12 +2208,10 @@ throw new Error("middle failure");
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
         options.max_attempts = 1;
-        let raw_session_dir = raw_dir.clone();
-        options.on_agent_finished = Some(Arc::new(
-            move |_: &str, provider: &str, result: &AgentProviderResult| {
-                write_test_raw_session(&raw_session_dir, provider, result)
-            },
-        ));
+        options.session_log_sink = Some(Arc::new(TestSessionLogSink {
+            root: raw_dir.clone(),
+            saved_tx: None,
+        }));
 
         let error = run_local_durable_workflow(&mut store, options)
             .await
@@ -2142,12 +2255,10 @@ export default { result: await agent("before cancel") };
         let mut store = SqliteDurableStore::open(&db_path).expect("store should open");
         let mut options = LocalDurableRunOptions::new(script_path, json!({}), provider);
         options.cancel_rx = Some(cancel_rx);
-        let raw_session_dir = raw_dir.clone();
-        options.on_agent_finished = Some(Arc::new(
-            move |_: &str, provider: &str, result: &AgentProviderResult| {
-                write_test_raw_session(&raw_session_dir, provider, result)
-            },
-        ));
+        options.session_log_sink = Some(Arc::new(TestSessionLogSink {
+            root: raw_dir.clone(),
+            saved_tx: None,
+        }));
 
         let error = run_local_durable_workflow(&mut store, options)
             .await

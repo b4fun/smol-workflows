@@ -6,9 +6,9 @@ Run a workflow script.
 smol-wf run <workflow-script> [run-options] [--args-<name> value ...]
 ```
 
-`smol-wf run` writes workflow progress, such as `[phase] ...` and `[log] ...`, to stderr. It writes the final machine-readable JSON report to stdout.
-
 ## Output
+
+By default, `smol-wf run` writes workflow progress, such as `[phase] ...` and `[log] ...`, to stderr. It writes the final machine-readable JSON report to stdout.
 
 The default JSON report has this shape:
 
@@ -33,6 +33,37 @@ smol-wf run ./examples/pod-diagnostics.mjs \
   | tee pod-diagnostics.json \
   | jq -r '.results.diagnostics'
 ```
+
+### `--events`
+
+Emit workflow events as JSON Lines instead of the default final JSON report.
+
+When `--events` is set, stdout is reserved for the event stream. The stream includes root and nested workflow lifecycle events, `phase(...)` / `log(...)` events, successful provider raw result payloads as `workflow.agent_event`, and terminal result/error events as `workflow.result` or `workflow.error`. Nested workflow events include `metadata.workflowDepth` and `metadata.parentStepId`. Provider raw transcripts can also be exported separately with `--save-raw-sessions`. Agent events are emitted from the completed provider result; failed-provider partial transcripts and live provider streaming are reserved for a future provider-streaming pass.
+
+Example:
+
+```sh
+smol-wf run ./examples/pod-diagnostics.mjs \
+  --agent-provider pi \
+  --events \
+  --args-target "coredns pods under kube-system"
+```
+
+Filter the final result from the event stream:
+
+```sh
+smol-wf run ./workflow.mjs --events \
+  | jq -c 'select(.type == "workflow.result" and (.metadata.workflowDepth // 0) == 0) | .data.results'
+```
+
+Filter agent provider events:
+
+```sh
+smol-wf run ./workflow.mjs --events \
+  | jq -c 'select(.type == "workflow.agent_event")'
+```
+
+See [`events.md`](events.md) for the event JSON format.
 
 ## Run Options
 
