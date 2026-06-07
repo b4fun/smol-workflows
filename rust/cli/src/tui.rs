@@ -1,3 +1,26 @@
+//! Terminal UI for replaying or observing workflow event streams.
+//!
+//! # Memory model
+//!
+//! Large provider traces can be hundreds of megabytes. The TUI therefore avoids
+//! keeping multiple full JSON copies of the same event:
+//!
+//! - replay input is parsed line-by-line with a `BufReader`, not loaded as one
+//!   giant string;
+//! - `EventRecord` stores the parsed `WorkflowEvent` behind an `Arc`, so
+//!   `source_events` and currently revealed `events` share payloads during
+//!   replay;
+//! - timeline view rebuilds run on a worker thread using lightweight
+//!   `TimelineViewEvent` summaries rather than cloning provider-owned JSON;
+//! - expensive search strings are built only while a non-empty search query is
+//!   applied;
+//! - Pi `message_update` payloads are compacted because they are hidden from the
+//!   default timeline and can dominate trace size with repeated partial message
+//!   snapshots.
+//!
+//! Keep this shape in mind when adding new UI state: prefer indices, metadata,
+//! or `Arc` references over cloning `WorkflowEvent.data` / raw provider payloads.
+
 use anyhow::Context;
 use crossterm::event::{
     self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -19,7 +42,7 @@ use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventType};
 use smol_workflow_engine::workflow::AgentSessionLogSink;
 use std::fs;
-use std::io::{self, Stdout};
+use std::io::{self, BufRead, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration as StdDuration, Instant};
@@ -155,8 +178,10 @@ pub fn parse_duration(value: &str) -> anyhow::Result<StdDuration> {
 
 #[derive(Clone, Debug)]
 struct EventRecord {
-    event: WorkflowEvent,
-    raw: Value,
+    /// Shared parsed event envelope. Replay keeps both the complete source
+    /// stream and the revealed prefix; using `Arc` prevents every reveal from
+    /// duplicating provider payload JSON.
+    event: Arc<WorkflowEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +209,11 @@ enum PlaybackState {
     Paused,
 }
 
+/// Lightweight projection used by the background timeline worker.
+///
+/// This intentionally excludes `WorkflowEvent.data`: timeline grouping, tabs,
+/// provider filtering, and non-search rendering only need event type/metadata.
+/// When search is active, `search_text` contains a compact searchable string.
 #[derive(Debug, Clone)]
 struct TimelineViewEvent {
     event_type: WorkflowEventType,
@@ -555,8 +585,11 @@ impl TuiReplayApp {
     fn push_live_events(&mut self, events: impl IntoIterator<Item = WorkflowEvent>) {
         let mut changed = false;
         for event in events {
-            let raw = serde_json::to_value(&event).unwrap_or(Value::Null);
-            let record = EventRecord { event, raw };
+            let mut event = event;
+            compact_hidden_agent_event_data(&mut event);
+            let record = EventRecord {
+                event: Arc::new(event),
+            };
             if self.root_start_time.is_none() {
                 let single = vec![record.clone()];
                 self.root_start_time = root_start_time(&single);
@@ -961,19 +994,68 @@ impl TuiReplayApp {
     }
 }
 
+fn compact_hidden_agent_event_data(event: &mut WorkflowEvent) {
+    if event.event_type != WorkflowEventType::AgentEvent {
+        return;
+    }
+    let provider = event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.provider.as_deref());
+    if provider != Some("pi") {
+        return;
+    }
+    let provider_event_type = event
+        .data
+        .get("providerEvent")
+        .or(Some(&event.data))
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str);
+    if provider_event_type != Some("message_update") {
+        return;
+    }
+
+    let mut compact = serde_json::Map::new();
+    if let Some(provider) = provider {
+        compact.insert("provider".to_string(), Value::String(provider.to_string()));
+    }
+    if let Some(metadata) = event.metadata.as_ref() {
+        if let Some(session_id) = metadata.session_id.as_ref() {
+            compact.insert("sessionId".to_string(), Value::String(session_id.clone()));
+        }
+        if let Some(step_id) = metadata.step_id.as_ref() {
+            compact.insert("stepId".to_string(), Value::String(step_id.clone()));
+        }
+    }
+    compact.insert(
+        "providerEvent".to_string(),
+        serde_json::json!({ "type": "message_update", "compacted": true }),
+    );
+    event.data = Value::Object(compact);
+}
+
 fn read_event_records(path: &Path) -> anyhow::Result<Vec<EventRecord>> {
-    let content = fs::read_to_string(path)
+    let file = fs::File::open(path)
         .with_context(|| format!("failed to read event stream {}", path.display()))?;
+    let reader = io::BufReader::new(file);
     let mut events = Vec::new();
-    for (line_index, line) in content.lines().enumerate() {
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from {}",
+                line_index + 1,
+                path.display()
+            )
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let raw: Value = serde_json::from_str(line)
-            .with_context(|| format!("invalid JSON on line {}", line_index + 1))?;
-        let event: WorkflowEvent = serde_json::from_value(raw.clone())
+        let mut event: WorkflowEvent = serde_json::from_str(&line)
             .with_context(|| format!("invalid workflow event on line {}", line_index + 1))?;
-        events.push(EventRecord { event, raw });
+        compact_hidden_agent_event_data(&mut event);
+        events.push(EventRecord {
+            event: Arc::new(event),
+        });
     }
     Ok(events)
 }
@@ -2254,7 +2336,7 @@ fn event_summary(app: &TuiReplayApp, record: &EventRecord) -> String {
 }
 
 fn raw_details_lines(record: &EventRecord, style: Style) -> Vec<Line<'static>> {
-    serde_json::to_string_pretty(&record.raw)
+    serde_json::to_string_pretty(record.event.as_ref())
         .unwrap_or_else(|_| "<invalid>".into())
         .lines()
         .map(|line| Line::from(Span::styled(line.to_string(), style)))
@@ -2463,8 +2545,7 @@ mod tests {
             data: json!({}),
         };
         EventRecord {
-            raw: serde_json::to_value(&event).unwrap(),
-            event,
+            event: Arc::new(event),
         }
     }
 
@@ -2479,8 +2560,7 @@ mod tests {
             data: json!({ "message": message }),
         };
         EventRecord {
-            raw: serde_json::to_value(&event).unwrap(),
-            event,
+            event: Arc::new(event),
         }
     }
 
