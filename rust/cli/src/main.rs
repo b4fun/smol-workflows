@@ -74,6 +74,17 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
             run_command(script_path, run_args).await
         }
         Some(("llm", matches)) => match matches.subcommand() {
+            Some(("txt", _)) => llm_txt_command(Vec::new()).await,
+            Some(("skills", matches)) => {
+                llm_skills_command(LlmSkillsOptions {
+                    target: if matches.get_flag("claude") {
+                        SkillInstallTarget::Claude
+                    } else {
+                        SkillInstallTarget::Agents
+                    },
+                })
+                .await
+            }
             Some(("list-workflows", _)) => list_workflows_command(Vec::new()).await,
             _ => Ok(()),
         },
@@ -941,6 +952,174 @@ fn humanize_duration(duration_ms: i64) -> String {
     format!("{}y", months / 12)
 }
 
+const TOP_LEVEL_AFTER_HELP: &str = include_str!("../assets/help.txt");
+const LLM_USAGE_TEXT: &str = include_str!("../assets/llm.txt");
+
+async fn llm_txt_command(argv: Vec<String>) -> anyhow::Result<()> {
+    if !argv.is_empty() {
+        anyhow::bail!("llm txt does not accept options yet");
+    }
+    print!("{LLM_USAGE_TEXT}");
+    Ok(())
+}
+
+struct SkillAsset {
+    relative_path: &'static str,
+    content: &'static str,
+    executable: bool,
+}
+
+const SKILL_ASSETS: &[SkillAsset] = &[
+    SkillAsset {
+        relative_path: "create/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/create/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "list/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/list/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "run/SKILL.md",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/run/SKILL.md"),
+        executable: false,
+    },
+    SkillAsset {
+        relative_path: "scripts/smol-wf.sh",
+        content: include_str!("../../../harness/plugins/smol-workflows/skills/scripts/smol-wf.sh"),
+        executable: true,
+    },
+];
+
+#[derive(Clone, Copy)]
+enum SkillInstallTarget {
+    Agents,
+    Claude,
+}
+
+struct LlmSkillsOptions {
+    target: SkillInstallTarget,
+}
+
+impl SkillInstallTarget {
+    fn root_relative_path(self) -> &'static str {
+        match self {
+            SkillInstallTarget::Agents => ".agents/skills/smol-workflows",
+            SkillInstallTarget::Claude => ".claude/skills/smol-workflows",
+        }
+    }
+}
+
+async fn llm_skills_command(options: LlmSkillsOptions) -> anyhow::Result<()> {
+    let cwd = env::current_dir()?;
+    let workspace_root = find_repo_root(&cwd).unwrap_or(cwd);
+    let skills_root = ensure_relative_dir_without_symlinks(
+        &workspace_root,
+        Path::new(options.target.root_relative_path()),
+    )?;
+
+    for asset in SKILL_ASSETS {
+        let asset_path = Path::new(asset.relative_path);
+        if let Some(parent) = asset_path.parent() {
+            ensure_relative_dir_without_symlinks(&skills_root, parent)?;
+        }
+        let destination = skills_root.join(asset_path);
+        write_asset_without_following_symlink(&destination, asset.content)?;
+        set_asset_permissions(&destination, asset.executable)?;
+    }
+
+    println!(
+        "Installed smol-workflows skills into {}",
+        skills_root.display()
+    );
+    println!();
+    println!("Files layout:");
+    println!("  {}/", options.target.root_relative_path());
+    println!("    create/SKILL.md        Skill for authoring workflow scripts");
+    println!("    list/SKILL.md          Skill for discovering available workflows");
+    println!("    run/SKILL.md           Skill for running workflow scripts");
+    println!("    scripts/smol-wf.sh     Shared helper used by the skills");
+    Ok(())
+}
+
+fn ensure_relative_dir_without_symlinks(root: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            anyhow::bail!(
+                "skill install path {} must be relative and cannot contain parent components",
+                relative.display()
+            );
+        };
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "refusing to install skills through symlinked directory {}",
+                    path.display()
+                );
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                anyhow::bail!(
+                    "refusing to install skills because {} exists and is not a directory",
+                    path.display()
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(path)
+}
+
+fn write_asset_without_following_symlink(path: &Path, content: &str) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing to overwrite symlinked skill file {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(path)?;
+        }
+        Ok(_) => {
+            anyhow::bail!(
+                "refusing to overwrite {} because it is not a regular file",
+                path.display()
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+fn set_asset_permissions(path: &Path, executable: bool) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = executable;
+    }
+    Ok(())
+}
+
 async fn list_workflows_command(argv: Vec<String>) -> anyhow::Result<()> {
     if !argv.is_empty() {
         anyhow::bail!("llm list-workflows does not accept options yet");
@@ -1699,9 +1878,15 @@ fn format_log_value(value: &Value) -> String {
 
 fn cli_command() -> ClapCommand {
     ClapCommand::new("smol-wf")
-        .about("CLI for the smol-workflows Rust engine")
+        .about(concat!(
+            "Agentic Workflows Runner\n\nVersion: ",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .version(env!("CARGO_PKG_VERSION"))
+        .override_usage("smol-wf <command> [flags]")
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .after_help(TOP_LEVEL_AFTER_HELP)
         .subcommand(
             ClapCommand::new("run")
                 .about("Run a workflow script")
@@ -1751,6 +1936,17 @@ fn cli_command() -> ClapCommand {
                 .about("LLM-facing helper commands")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(ClapCommand::new("txt").about("Print LLM-oriented usage text"))
+                .subcommand(
+                    ClapCommand::new("skills")
+                        .about("Install smol-workflows skills into the current workspace")
+                        .arg(
+                            Arg::new("claude")
+                                .long("claude")
+                                .help("Install under .claude/skills instead of .agents/skills")
+                                .action(clap::ArgAction::SetTrue),
+                        ),
+                )
                 .subcommand(ClapCommand::new("list-workflows").about("List discoverable workflows")),
         )
 }
