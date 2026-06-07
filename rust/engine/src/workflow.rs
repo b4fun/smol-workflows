@@ -1249,13 +1249,20 @@ async fn sleep_retry_backoff(
     if *cancel_rx.borrow() {
         bail!("workflow cancelled");
     }
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => Ok(()),
-        changed = cancel_rx.changed() => {
-            match changed {
-                Ok(()) if *cancel_rx.borrow() => bail!("workflow cancelled"),
-                Ok(()) => Ok(()),
-                Err(_) => Ok(()),
+    let sleep = tokio::time::sleep(Duration::from_millis(backoff_ms));
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return Ok(()),
+            changed = cancel_rx.changed() => {
+                match changed {
+                    Ok(()) if *cancel_rx.borrow() => bail!("workflow cancelled"),
+                    Ok(()) => continue,
+                    Err(_) => {
+                        sleep.await;
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -1268,14 +1275,11 @@ pub(crate) async fn run_agent_provider_with_retry(
     mut cancel_rx: Option<watch::Receiver<bool>>,
 ) -> anyhow::Result<AgentProviderResult> {
     let retry = agent_retry_policy(&input.options)?;
+    let provider = resolve_agent_provider(default_provider, provider_override)?;
     let mut final_result = None;
     for attempt in 1..=retry.max_attempts {
-        let attempt_result = run_agent_provider(
-            Arc::clone(&default_provider),
-            provider_override.clone(),
-            input.clone(),
-        )
-        .await;
+        let attempt_result =
+            run_agent_with_optional_isolation(Arc::clone(&provider), input.clone()).await;
         match attempt_result {
             Ok(result) => {
                 final_result = Some(Ok(result));
@@ -1303,12 +1307,19 @@ pub(crate) async fn run_agent_provider(
     provider_override: Option<String>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {
-    let provider: Arc<dyn AgentProvider> = if let Some(provider_override) = provider_override {
-        Arc::from(create_agent_provider(&provider_override)?)
-    } else {
-        default_provider
-    };
+    let provider = resolve_agent_provider(default_provider, provider_override)?;
     run_agent_with_optional_isolation(provider, input).await
+}
+
+fn resolve_agent_provider(
+    default_provider: Arc<dyn AgentProvider>,
+    provider_override: Option<String>,
+) -> anyhow::Result<Arc<dyn AgentProvider>> {
+    if let Some(provider_override) = provider_override {
+        Ok(Arc::from(create_agent_provider(&provider_override)?))
+    } else {
+        Ok(default_provider)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
