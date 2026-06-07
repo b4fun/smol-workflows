@@ -93,6 +93,8 @@ export type ParallelFn = <const Tasks extends readonly ParallelTask[]>(
 
 /** Agent options mirrored from the Dynamic Workflow reference. */
 export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchema> = {
+  /** Optional stable checkpoint key for durable replay; defaults to occurrence-based keys when omitted. */
+  key?: string;
   /** Optional display label for progress UIs and traces. */
   label?: string;
   /** Optional phase name used for tracing/grouping this agent run. */
@@ -179,13 +181,6 @@ export type WorkflowHandler<Input = unknown, Output = unknown> = (
   input: Input,
   ctx: WorkflowContext,
 ) => Awaitable<Output>;
-
-// @ts-ignore TS2664: workflow:extra is a host-provided virtual module.
-declare module "workflow:extra" {
-  export const sleep: WorkflowExtra["sleep"];
-  const extra: WorkflowExtra;
-  export default extra;
-}
 
 declare global {
   /** Global workflow arguments injected by the isolated workflow runner. */

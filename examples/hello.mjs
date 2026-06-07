@@ -1,3 +1,4 @@
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: 'hello',
   description: 'Minimal multi-phase smol-workflow example for local and SQLite-backed runs',
@@ -22,15 +23,16 @@ log(`Creating greeting drafts for ${name}`)
 
 const draftStyles = ['friendly', 'concise', 'enthusiastic']
 
-const draftResults = await pipeline(
+const draftResults = /** @type {Array<string | null>} */ (await pipeline(
   draftStyles,
+  // @ts-expect-error Pipeline stage inference is too deep for this illustrative JS example.
   (style) => agent(`Using this plan, write a ${style} greeting for ${name}: ${plan}`, {
     phase: 'Draft',
   }),
   (draft, style) => agent(`Improve this ${style} greeting for ${name}: ${draft}`, {
     phase: 'Draft',
   }),
-)
+))
 
 const drafts = Object.fromEntries(
   draftStyles.map((style, index) => [style, draftResults[index]]),

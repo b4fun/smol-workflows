@@ -1,6 +1,6 @@
 {
   "name": "@smol-workflows/sdk",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "TypeScript SDK and workflow runtime types for smol-workflow.",
   "license": "MIT",
   "repository": {
@@ -15,6 +15,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./workflow-extra": {
+      "types": "./dist/workflow-extra.d.ts",
+      "import": "./dist/workflow-extra.js"
     }
   },
   "files": [

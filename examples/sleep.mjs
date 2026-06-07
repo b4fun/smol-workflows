@@ -1,5 +1,6 @@
 import { sleep } from "workflow:extra";
 
+/** @type {import('@smol-workflows/sdk').WorkflowMetadata} */
 export const meta = {
   name: "sleep",
   description: "Pause briefly before continuing",
