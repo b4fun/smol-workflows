@@ -9,20 +9,20 @@ smol-wf tui <subcommand> ...
 The `tui` command group covers two related workflows:
 
 1. replaying a previously captured workflow event stream; and
-2. streaming a live workflow run.
+2. playing a live workflow run.
 
 The TUI consumes the same workflow event JSONL format described in [`events.md`](events.md). It does not require a different tracing format.
 
-> Status: `smol-wf tui replay` is implemented for interactive inspection, timed playback, and `--check` validation. `smol-wf tui run` is planned.
+> Status: `smol-wf tui replay` is implemented for interactive inspection, timed playback, and `--check` validation. `smol-wf tui run` is implemented for live workflow event streaming.
 
 ## Commands
 
 ```txt
 smol-wf tui replay <events-jsonl> [replay-options]
-smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]  # planned
+smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]
 ```
 
-## `smol-wf tui run` planned
+## `smol-wf tui run`
 
 Run a workflow and stream its events into an interactive terminal UI.
 
@@ -32,11 +32,11 @@ smol-wf tui run ./examples/pod-diagnostics.mjs \
   --args-target "coredns pods under kube-system"
 ```
 
-`tui run` should behave like `smol-wf run` with an interactive renderer attached. Internally it should run through the same durable execution path as `smol-wf run`, install a workflow event sink, and update the UI as events arrive.
+`tui run` behaves like `smol-wf run` with an interactive renderer attached. Internally it runs through the same durable execution path as `smol-wf run`, installs a workflow event sink, and updates the UI as events arrive.
 
 ### Output
 
-`tui run` owns the terminal while it is active. It should not write the default final JSON report to stdout and should not write the JSONL event stream to stdout. Instead, workflow events are rendered in the terminal.
+`tui run` owns the terminal while it is active. It does not write the default final JSON report to stdout and does not write the JSONL event stream to stdout. Instead, workflow events are rendered in the terminal.
 
 For machine-readable event output, use:
 
@@ -52,7 +52,7 @@ smol-wf tui replay events.jsonl
 
 ### Run options
 
-`tui run` should support the same workflow execution options as `smol-wf run` unless noted otherwise:
+`tui run` supports the same workflow execution options as `smol-wf run` unless noted otherwise:
 
 - `--db <path>`
 - `--resume-run <run-id>`
@@ -65,7 +65,7 @@ smol-wf tui replay events.jsonl
 - `--args-<name> <value>`
 - `--args-from-file <json-file>`
 
-`tui run` should not accept `--events`; the TUI itself is the event consumer. Users who want raw JSONL should use `smol-wf run --events`.
+`tui run` does not accept `--events`; the TUI itself is the event consumer. Users who want raw JSONL should use `smol-wf run --events`.
 
 ### Cancellation
 
@@ -94,7 +94,7 @@ smol-wf run ./workflow.mjs --events > events.jsonl
 smol-wf tui replay events.jsonl
 ```
 
-Replay starts at the beginning of the event stream with zero events revealed and playback paused. Press `n` to reveal one event at a time or `Space` to start playback. Replay uses a deterministic event reducer to build workflow scope tabs, the timeline/events list, and selected event details. Live mode should use the same reducer when it is implemented.
+Replay starts at the beginning of the event stream with zero events revealed and playback paused. Press `n` to reveal one event at a time or `Space` to start playback. Replay uses the same deterministic event reducer as live mode to build workflow scope tabs, the timeline/events list, and selected event details.
 
 ### Input
 
@@ -321,14 +321,11 @@ p            hide previous event and pause
 0            reset speed
 ```
 
-Planned live-only keybindings:
+Live-only keybindings:
 
 ```txt
-Space        toggle auto-follow latest event on/off
 c            request cancellation
 ```
-
-In live mode, Space should not pause workflow execution. The workflow continues running and events continue to be collected; it only stops the timeline selection from automatically following the newest event so the user can inspect earlier entries.
 
 Planned significant-event jump keybindings:
 
@@ -441,7 +438,7 @@ Recommended architecture:
 WorkflowEvent source -> shared reducer -> TUI app state -> ratatui renderer
 ```
 
-Both live and replay modes should share the same event reducer.
+Both live and replay modes share the same event reducer.
 
 Live mode event source:
 
@@ -455,4 +452,4 @@ Replay mode event source:
 JSONL file -> parser -> replay controller -> reducer
 ```
 
-Replay should be implemented first. It is easier to test and forces the event reducer to be deterministic. Live mode can then use the same reducer with a channel-backed event source.
+Replay and live modes use the same reducer. Replay reads from a JSONL file and live mode reads from a channel-backed `WorkflowEventSink`.

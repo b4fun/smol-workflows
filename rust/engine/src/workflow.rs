@@ -273,8 +273,12 @@ async fn run_workflow_inner(options: RunWorkflowOptions) -> anyhow::Result<RunWo
                             message: error.to_string(),
                         },
                     },
-                    Err(error) => WorkflowRuntimeRequestResolution::Err {
-                        message: error.to_string(),
+                    Err(error) => {
+                        let message = error.to_string();
+                        if let Err(emit_error) = state.emit_agent_failed_event(&id, provider.as_deref(), &message).await {
+                            log::debug!("failed to emit agent failure event: {emit_error:#}");
+                        }
+                        WorkflowRuntimeRequestResolution::Err { message }
                     },
                 };
                 if let Err(error) = send_js_command(&js_commands, JsCommand::ResolveRequest { id, resolution }).await {
@@ -523,6 +527,16 @@ fn raw_agent_event_payloads(raw: &Value) -> Vec<Value> {
     }
 }
 
+fn truncate_for_event(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 fn format_log_message(values: &[Value]) -> String {
     values
         .iter()
@@ -615,6 +629,7 @@ impl RunState {
             match request {
                 WorkflowRuntimeRequest::Agent { .. } => {
                     let (id, prepared) = self.prepare_agent_request(request);
+                    self.emit_agent_started_event(&id, &prepared).await?;
                     self.spawn_agent_task(agent_tasks, id, prepared);
                 }
                 WorkflowRuntimeRequest::Sleep { id, duration_ms } => {
@@ -696,16 +711,30 @@ impl RunState {
                         {
                             log::debug!("failed to emit drained agent events during cancellation: {error:#}");
                         }
+                        if let Err(error) = self
+                            .emit_agent_completed_event(&id, provider.as_deref(), &result)
+                            .await
+                        {
+                            log::debug!("failed to emit drained agent completion during cancellation: {error:#}");
+                        }
                         self.record_agent_run(&id, &input, provider, &result);
                         self.reject_request_for_cancellation(id, js_commands).await;
                     }
                     Ok(AgentTaskCompletion {
                         id,
+                        provider,
                         result: Err(error),
                         ..
                     }) => {
                         self.active_request_ids.remove(&id);
-                        log::debug!("agent task failed while draining cancellation: {error:#}");
+                        let message = error.to_string();
+                        if let Err(error) = self
+                            .emit_agent_failed_event(&id, provider.as_deref(), &message)
+                            .await
+                        {
+                            log::debug!("failed to emit drained agent failure during cancellation: {error:#}");
+                        }
+                        log::debug!("agent task failed while draining cancellation: {message}");
                         self.reject_request_for_cancellation(id, js_commands).await;
                     }
                     Err(error) => {
@@ -1015,6 +1044,26 @@ impl RunState {
         }
     }
 
+    async fn emit_agent_started_event(
+        &self,
+        id: &str,
+        prepared: &PreparedAgentRun,
+    ) -> anyhow::Result<()> {
+        let provider = prepared
+            .provider_override
+            .as_deref()
+            .unwrap_or_else(|| self.agent_provider.name());
+        let metadata = self.agent_event_metadata(id, Some(provider), None);
+        self.emit_event(WorkflowEvent::agent_started(
+            serde_json::json!({
+                "phase": prepared.input.context.phase,
+                "promptPreview": truncate_for_event(&prepared.input.prompt, 200),
+            }),
+            metadata,
+        ))
+        .await
+    }
+
     async fn apply_agent_result(
         &mut self,
         id: &str,
@@ -1026,6 +1075,8 @@ impl RunState {
             self.budget.spent = self.budget.spent.saturating_add(output_tokens);
         }
         self.emit_agent_result_events(id, provider.as_deref(), &result)
+            .await?;
+        self.emit_agent_completed_event(id, provider.as_deref(), &result)
             .await?;
         self.record_agent_run(id, input, provider, &result);
         log::debug!(
@@ -1046,22 +1097,64 @@ impl RunState {
         let Some(raw) = result.raw.as_ref() else {
             return Ok(());
         };
-        let provider = provider
-            .unwrap_or_else(|| self.agent_provider.name())
-            .to_string();
-        let metadata = WorkflowEventMetadata {
-            run_id: None,
-            step_id: Some(self.event_step_id(id)),
-            provider: Some(provider),
-            session_id: result.session_id.clone(),
-            workflow_depth: None,
-            parent_step_id: None,
-        };
+        let metadata = self.agent_event_metadata(id, provider, result.session_id.clone());
         for event_data in raw_agent_event_payloads(raw) {
             self.emit_event(WorkflowEvent::agent_event(event_data, metadata.clone()))
                 .await?;
         }
         Ok(())
+    }
+
+    async fn emit_agent_completed_event(
+        &self,
+        id: &str,
+        provider: Option<&str>,
+        result: &AgentProviderResult,
+    ) -> anyhow::Result<()> {
+        let metadata = self.agent_event_metadata(id, provider, result.session_id.clone());
+        self.emit_event(WorkflowEvent::agent_completed(
+            serde_json::json!({
+                "sessionId": result.session_id,
+                "model": result.model,
+                "usage": result.usage,
+            }),
+            metadata,
+        ))
+        .await
+    }
+
+    async fn emit_agent_failed_event(
+        &self,
+        id: &str,
+        provider: Option<&str>,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let metadata = self.agent_event_metadata(id, provider, None);
+        self.emit_event(WorkflowEvent::agent_failed(
+            serde_json::json!({ "message": message }),
+            metadata,
+        ))
+        .await
+    }
+
+    fn agent_event_metadata(
+        &self,
+        id: &str,
+        provider: Option<&str>,
+        session_id: Option<String>,
+    ) -> WorkflowEventMetadata {
+        WorkflowEventMetadata {
+            run_id: None,
+            step_id: Some(self.event_step_id(id)),
+            provider: Some(
+                provider
+                    .unwrap_or_else(|| self.agent_provider.name())
+                    .to_string(),
+            ),
+            session_id,
+            workflow_depth: None,
+            parent_step_id: None,
+        }
     }
 
     fn record_agent_run(

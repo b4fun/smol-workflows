@@ -78,6 +78,17 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
             _ => Ok(()),
         },
         Some(("tui", matches)) => match matches.subcommand() {
+            Some(("run", matches)) => {
+                let script_path = matches
+                    .get_one::<String>("workflow-script")
+                    .expect("required by clap")
+                    .clone();
+                let run_args = matches
+                    .get_many::<String>("run-args")
+                    .map(|values| values.cloned().collect())
+                    .unwrap_or_default();
+                tui_run_command(script_path, run_args).await
+            }
             Some(("replay", matches)) => {
                 let path = matches
                     .get_one::<String>("events-jsonl")
@@ -1100,6 +1111,35 @@ struct CliTokenUsageReport {
     total_tokens: u64,
 }
 
+async fn tui_run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
+    let options = parse_run_options(argv)?;
+    init_logging(options.log_level);
+
+    if options.events {
+        anyhow::bail!(
+            "--events is not supported with smol-wf tui run; the TUI consumes events directly"
+        );
+    }
+
+    let session_log_sink = options.save_raw_sessions.clone().map(|raw_session_dir| {
+        Arc::new(FileAgentSessionLogSink {
+            root: raw_session_dir,
+        }) as Arc<dyn AgentSessionLogSink>
+    });
+
+    tui::run_command(tui::RunCommandOptions {
+        script_path: PathBuf::from(script_path),
+        args: Value::Object(options.args),
+        agent_provider: options.agent_provider,
+        db_path: options.db_path,
+        db_path_is_default: options.db_path_is_default,
+        budget_total: options.budget_allowance,
+        max_parallel_agent_requests: options.max_parallel_agent_requests,
+        resume_run_id: options.resume_run_id,
+        session_log_sink,
+    })
+}
+
 async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
     let options = parse_run_options(argv)?;
     init_logging(options.log_level);
@@ -1720,6 +1760,27 @@ fn cli_command() -> ClapCommand {
                 .about("Interactively inspect workflow event streams")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(
+                    ClapCommand::new("run")
+                        .about("Run a workflow and stream live events in a terminal UI")
+                        .arg(
+                            Arg::new("workflow-script")
+                                .value_name("workflow-script")
+                                .help("Workflow JavaScript module to run")
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("run-args")
+                                .value_name("run-options")
+                                .help("Run options and workflow args")
+                                .num_args(0..)
+                                .trailing_var_arg(true)
+                                .allow_hyphen_values(true),
+                        )
+                        .after_help(
+                            "Run options match smol-wf run, except --events is not supported because the TUI consumes events directly.",
+                        ),
+                )
                 .subcommand(
                     ClapCommand::new("replay")
                         .about("Replay a workflow event JSONL stream in a terminal UI")

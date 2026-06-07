@@ -13,16 +13,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
+use smol_workflow_engine::agent_providers::create_agent_provider;
+use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDurableRunOptions};
+use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventType};
+use smol_workflow_engine::workflow::AgentSessionLogSink;
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration as StdDuration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration as TimeDuration, OffsetDateTime, UtcOffset};
+use tokio::sync::watch;
+
+mod provider;
 
 const MIN_REPLAY_SPEED: f64 = 0.1;
 const MAX_REPLAY_SPEED: f64 = 64.0;
+const SEARCH_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+const LIVE_POLL_INTERVAL: StdDuration = StdDuration::from_millis(33);
+const LIVE_EVENTS_PER_TICK: usize = 256;
+const SPINNER_INTERVAL_NANOS: i128 = 100_000_000;
 
 #[derive(Clone)]
 pub struct ReplayCommandOptions {
@@ -33,6 +45,18 @@ pub struct ReplayCommandOptions {
     pub max_delay: Option<StdDuration>,
 }
 
+pub struct RunCommandOptions {
+    pub script_path: PathBuf,
+    pub args: Value,
+    pub agent_provider: String,
+    pub db_path: PathBuf,
+    pub db_path_is_default: bool,
+    pub budget_total: Option<u64>,
+    pub max_parallel_agent_requests: Option<usize>,
+    pub resume_run_id: Option<String>,
+    pub session_log_sink: Option<Arc<dyn AgentSessionLogSink>>,
+}
+
 pub fn replay_command(options: ReplayCommandOptions) -> anyhow::Result<()> {
     let events = read_event_records(&options.path)?;
     if options.check {
@@ -41,6 +65,74 @@ pub fn replay_command(options: ReplayCommandOptions) -> anyhow::Result<()> {
     }
 
     run_replay_tui(events, options)
+}
+
+struct ChannelWorkflowEventSink {
+    tx: mpsc::Sender<WorkflowEvent>,
+}
+
+impl ChannelWorkflowEventSink {
+    fn new(tx: mpsc::Sender<WorkflowEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl smol_workflow_engine::events::WorkflowEventSink for ChannelWorkflowEventSink {
+    async fn emit(&self, event: WorkflowEvent) -> anyhow::Result<()> {
+        self.tx
+            .send(event)
+            .map_err(|_| anyhow::anyhow!("TUI event receiver stopped"))
+    }
+}
+
+pub fn run_command(options: RunCommandOptions) -> anyhow::Result<()> {
+    let (event_tx, event_rx) = mpsc::channel::<WorkflowEvent>();
+    let (result_tx, result_rx) = mpsc::channel::<anyhow::Result<()>>();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+    std::thread::spawn(move || {
+        let result = run_workflow_in_thread(options, event_tx, cancel_rx);
+        let _ = result_tx.send(result);
+    });
+
+    run_live_tui(event_rx, result_rx, cancel_tx)
+}
+
+fn run_workflow_in_thread(
+    options: RunCommandOptions,
+    event_tx: mpsc::Sender<WorkflowEvent>,
+    cancel_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let provider: Arc<dyn smol_workflow_engine::agent_providers::AgentProvider> =
+            Arc::from(create_agent_provider(&options.agent_provider)?);
+        if options.db_path_is_default {
+            if let Some(parent) = options.db_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to create default database directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+        let mut store = SqliteDurableStore::open(&options.db_path)?;
+        let mut durable_options =
+            LocalDurableRunOptions::new(options.script_path, options.args, provider);
+        durable_options.budget_total = options.budget_total;
+        durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
+        durable_options.resume_run_id = options.resume_run_id;
+        durable_options.cancel_rx = Some(cancel_rx);
+        durable_options.event_sink = Some(Arc::new(ChannelWorkflowEventSink::new(event_tx)));
+        durable_options.session_log_sink = options.session_log_sink;
+        run_local_durable_workflow(&mut store, durable_options)
+            .await
+            .map(|_| ())
+    })
 }
 
 pub fn parse_duration(value: &str) -> anyhow::Result<StdDuration> {
@@ -58,13 +150,13 @@ pub fn parse_duration(value: &str) -> anyhow::Result<StdDuration> {
     Ok(StdDuration::from_millis(value.parse()?))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct EventRecord {
     event: WorkflowEvent,
     raw: Value,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WorkflowScopeTab {
     label: String,
     workflow_depth: u32,
@@ -89,10 +181,115 @@ enum PlaybackState {
     Paused,
 }
 
+#[derive(Debug, Clone)]
+struct TimelineViewRequest {
+    generation: u64,
+    events: Vec<EventRecord>,
+    active_tab_key: Option<(u32, Option<String>)>,
+    search_query: String,
+}
+
+#[derive(Debug, Clone)]
+struct TimelineViewSnapshot {
+    generation: u64,
+    tabs: Vec<WorkflowScopeTab>,
+    active_tab: usize,
+    rows: Vec<TimelineRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveStatus {
+    Running,
+    Cancelling,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TimelineRow {
+    Event {
+        event_index: usize,
+    },
+    AgentGroup {
+        event_indices: Vec<usize>,
+    },
+    AgentChild {
+        event_index: usize,
+        position: usize,
+        total: usize,
+    },
+}
+
+impl TimelineRow {
+    fn event_index(&self) -> usize {
+        match self {
+            Self::Event { event_index } | Self::AgentChild { event_index, .. } => *event_index,
+            Self::AgentGroup { event_indices } => event_indices[0],
+        }
+    }
+}
+
+fn spawn_timeline_view_worker() -> (
+    mpsc::Sender<TimelineViewRequest>,
+    mpsc::Receiver<TimelineViewSnapshot>,
+) {
+    let (request_tx, request_rx) = mpsc::channel::<TimelineViewRequest>();
+    let (snapshot_tx, snapshot_rx) = mpsc::channel::<TimelineViewSnapshot>();
+    std::thread::spawn(move || {
+        while let Ok(mut request) = request_rx.recv() {
+            while let Ok(next) = request_rx.try_recv() {
+                request = next;
+            }
+
+            let mut tabs = build_scope_tabs(&request.events);
+            if tabs.is_empty() {
+                tabs.push(WorkflowScopeTab {
+                    label: "root".to_string(),
+                    workflow_depth: 0,
+                    parent_step_id: None,
+                });
+            }
+            let active_tab = request
+                .active_tab_key
+                .as_ref()
+                .and_then(|(depth, parent_step_id)| {
+                    tabs.iter().position(|tab| {
+                        tab.workflow_depth == *depth && tab.parent_step_id == *parent_step_id
+                    })
+                })
+                .unwrap_or(0);
+            let visible = tabs
+                .get(active_tab)
+                .map(|tab| visible_indices_for(&request.events, tab, &request.search_query))
+                .unwrap_or_default();
+            let rows = build_timeline_rows(&visible, &request.events);
+
+            if snapshot_tx
+                .send(TimelineViewSnapshot {
+                    generation: request.generation,
+                    tabs,
+                    active_tab,
+                    rows,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (request_tx, snapshot_rx)
+}
+
 struct TuiReplayApp {
     source_events: Vec<EventRecord>,
     events: Vec<EventRecord>,
     tabs: Vec<WorkflowScopeTab>,
+    timeline_rows: Vec<TimelineRow>,
+    view_request_tx: mpsc::Sender<TimelineViewRequest>,
+    view_snapshot_rx: mpsc::Receiver<TimelineViewSnapshot>,
+    view_generation: u64,
+    applied_view_generation: u64,
+    pending_select_latest: bool,
     active_tab: usize,
     selected: usize,
     selected_by_tab: Vec<usize>,
@@ -103,13 +300,18 @@ struct TuiReplayApp {
     root_start_time: Option<OffsetDateTime>,
     local_offset: Option<UtcOffset>,
     search_open: bool,
+    search_input: String,
     search_query: String,
+    search_changed_at: Option<Instant>,
     warnings: Vec<String>,
     playback: PlaybackState,
     timed: bool,
     speed: f64,
     max_delay: Option<StdDuration>,
     next_due: Option<Instant>,
+    live_status: Option<LiveStatus>,
+    live_error: Option<String>,
+    confirm_quit: bool,
     should_quit: bool,
 }
 
@@ -120,10 +322,17 @@ impl TuiReplayApp {
         let selected_by_tab = vec![0; tabs.len()];
         let root_start_time = root_start_time(&source_events);
         let local_offset = UtcOffset::current_local_offset().ok();
-        Self {
+        let (view_request_tx, view_snapshot_rx) = spawn_timeline_view_worker();
+        let mut app = Self {
             warnings: validate_events(&source_events),
             source_events,
             tabs,
+            timeline_rows: Vec::new(),
+            view_request_tx,
+            view_snapshot_rx,
+            view_generation: 0,
+            applied_view_generation: 0,
+            pending_select_latest: false,
             events,
             active_tab: 0,
             selected: 0,
@@ -135,42 +344,76 @@ impl TuiReplayApp {
             root_start_time,
             local_offset,
             search_open: false,
+            search_input: String::new(),
             search_query: String::new(),
+            search_changed_at: None,
             playback: PlaybackState::Paused,
             timed: options.timed,
             speed: normalize_replay_speed(options.speed),
             max_delay: options.max_delay,
             next_due: options.timed.then_some(Instant::now()),
+            live_status: None,
+            live_error: None,
+            confirm_quit: false,
             should_quit: false,
-        }
+        };
+        app.request_view_update();
+        app
     }
 
-    fn visible_indices(&self) -> Vec<usize> {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return Vec::new();
+    fn new_live() -> Self {
+        let tabs = vec![WorkflowScopeTab {
+            label: "root".to_string(),
+            workflow_depth: 0,
+            parent_step_id: None,
+        }];
+        let (view_request_tx, view_snapshot_rx) = spawn_timeline_view_worker();
+        let mut app = Self {
+            warnings: Vec::new(),
+            source_events: Vec::new(),
+            tabs,
+            timeline_rows: Vec::new(),
+            view_request_tx,
+            view_snapshot_rx,
+            view_generation: 0,
+            applied_view_generation: 0,
+            pending_select_latest: false,
+            events: Vec::new(),
+            active_tab: 0,
+            selected: 0,
+            selected_by_tab: vec![0],
+            details_scroll: 0,
+            focus_pane: FocusPane::Timeline,
+            raw_details: false,
+            time_display: TimeDisplayMode::Elapsed,
+            root_start_time: None,
+            local_offset: UtcOffset::current_local_offset().ok(),
+            search_open: false,
+            search_input: String::new(),
+            search_query: String::new(),
+            search_changed_at: None,
+            playback: PlaybackState::Paused,
+            timed: false,
+            speed: 1.0,
+            max_delay: None,
+            next_due: None,
+            live_status: Some(LiveStatus::Running),
+            live_error: None,
+            confirm_quit: false,
+            should_quit: false,
         };
-        let query = self.search_query.to_ascii_lowercase();
-        self.events
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| event_in_scope(record, tab))
-            .filter(|(_, record)| should_show_in_timeline(record))
-            .filter(|(_, record)| {
-                query.is_empty()
-                    || searchable_event_text(record)
-                        .to_ascii_lowercase()
-                        .contains(&query)
-                    || serde_json::to_string(&record.raw)
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .contains(&query)
-            })
-            .map(|(index, _)| index)
-            .collect()
+        app.request_view_update();
+        app
+    }
+
+    fn visible_rows(&self) -> &[TimelineRow] {
+        &self.timeline_rows
     }
 
     fn selected_event_index(&self) -> Option<usize> {
-        self.visible_indices().get(self.selected).copied()
+        self.visible_rows()
+            .get(self.selected)
+            .map(TimelineRow::event_index)
     }
 
     fn selected_event(&self) -> Option<&EventRecord> {
@@ -182,52 +425,84 @@ impl TuiReplayApp {
         self.events.len() >= self.source_events.len()
     }
 
-    fn rebuild_tabs(&mut self) {
-        let previous_active = self.tabs.get(self.active_tab).cloned();
-        self.tabs = build_scope_tabs(&self.events);
-        if self.tabs.is_empty() {
-            self.tabs.push(WorkflowScopeTab {
-                label: "root".to_string(),
-                workflow_depth: 0,
-                parent_step_id: None,
-            });
+    fn request_view_update(&mut self) {
+        self.view_generation = self.view_generation.saturating_add(1);
+        let active_tab_key = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.workflow_depth, tab.parent_step_id.clone()));
+        let request = TimelineViewRequest {
+            generation: self.view_generation,
+            events: self.events.clone(),
+            active_tab_key,
+            search_query: self.search_query.clone(),
+        };
+        let _ = self.view_request_tx.send(request);
+    }
+
+    fn apply_view_snapshots(&mut self) {
+        let mut latest = None;
+        while let Ok(snapshot) = self.view_snapshot_rx.try_recv() {
+            latest = Some(snapshot);
         }
+        let Some(snapshot) = latest else {
+            return;
+        };
+        if snapshot.generation < self.applied_view_generation {
+            return;
+        }
+        self.applied_view_generation = snapshot.generation;
+        self.tabs = snapshot.tabs;
+        self.active_tab = snapshot.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.timeline_rows = snapshot.rows;
         self.selected_by_tab.resize(self.tabs.len(), 0);
-        if let Some(previous_active) = previous_active {
-            if let Some(index) = self.tabs.iter().position(|tab| {
-                tab.workflow_depth == previous_active.workflow_depth
-                    && tab.parent_step_id == previous_active.parent_step_id
-            }) {
-                self.active_tab = index;
-            } else {
-                self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
-            }
+        if self.pending_select_latest {
+            self.pending_select_latest = false;
+            self.select_latest_visible();
         } else {
-            self.active_tab = 0;
+            self.clamp_selection();
         }
-        self.clamp_selection();
     }
 
     fn select_latest_visible(&mut self) {
-        let len = self.visible_indices().len();
+        let len = self.visible_rows().len();
         if len > 0 {
             self.selected = len - 1;
             self.remember_selection();
         }
     }
 
+    fn push_live_events(&mut self, events: impl IntoIterator<Item = WorkflowEvent>) {
+        let mut changed = false;
+        for event in events {
+            let raw = serde_json::to_value(&event).unwrap_or(Value::Null);
+            let record = EventRecord { event, raw };
+            if self.root_start_time.is_none() {
+                let single = vec![record.clone()];
+                self.root_start_time = root_start_time(&single);
+            }
+            self.source_events.push(record.clone());
+            self.events.push(record);
+            changed = true;
+        }
+        if changed {
+            self.pending_select_latest |= self.focus_pane == FocusPane::Timeline;
+            self.request_view_update();
+        }
+    }
+
     fn reveal_next_event(&mut self) {
         if let Some(event) = self.source_events.get(self.events.len()).cloned() {
             self.events.push(event);
-            self.rebuild_tabs();
-            self.select_latest_visible();
+            self.pending_select_latest = true;
+            self.request_view_update();
         }
     }
 
     fn hide_last_event(&mut self) {
         if self.events.pop().is_some() {
-            self.rebuild_tabs();
-            self.select_latest_visible();
+            self.pending_select_latest = true;
+            self.request_view_update();
             self.reset_details_scroll();
         }
     }
@@ -304,7 +579,7 @@ impl TuiReplayApp {
     }
 
     fn clamp_selection(&mut self) {
-        let len = self.visible_indices().len();
+        let len = self.visible_rows().len();
         if len == 0 {
             self.selected = 0;
         } else if self.selected >= len {
@@ -318,7 +593,7 @@ impl TuiReplayApp {
     }
 
     fn select_next(&mut self) {
-        let len = self.visible_indices().len();
+        let len = self.visible_rows().len();
         if len > 0 {
             let previous = self.selected;
             self.selected = (self.selected + 1).min(len - 1);
@@ -337,7 +612,7 @@ impl TuiReplayApp {
     }
 
     fn page_down(&mut self) {
-        let len = self.visible_indices().len();
+        let len = self.visible_rows().len();
         if len > 0 {
             let previous = self.selected;
             self.selected = (self.selected + 10).min(len - 1);
@@ -364,7 +639,7 @@ impl TuiReplayApp {
     }
 
     fn last(&mut self) {
-        let len = self.visible_indices().len();
+        let len = self.visible_rows().len();
         if len > 0 {
             let previous = self.selected;
             self.selected = len - 1;
@@ -394,11 +669,35 @@ impl TuiReplayApp {
         self.details_scroll = 0;
     }
 
+    fn mark_search_changed(&mut self) {
+        self.search_changed_at = Some(Instant::now());
+    }
+
+    fn apply_search_if_changed(&mut self) {
+        if self.search_input != self.search_query {
+            self.search_query = self.search_input.clone();
+            self.selected = 0;
+            self.reset_details_scroll();
+            self.request_view_update();
+        }
+        self.search_changed_at = None;
+    }
+
+    fn tick_search(&mut self) {
+        if self
+            .search_changed_at
+            .is_some_and(|changed_at| changed_at.elapsed() >= SEARCH_DEBOUNCE)
+        {
+            self.apply_search_if_changed();
+        }
+    }
+
     fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.remember_selection();
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
             self.restore_selection_for_active_tab();
+            self.request_view_update();
         }
     }
 
@@ -411,11 +710,28 @@ impl TuiReplayApp {
                 self.active_tab - 1
             };
             self.restore_selection_for_active_tab();
+            self.request_view_update();
         }
+    }
+
+    fn live_is_active(&self) -> bool {
+        matches!(
+            self.live_status,
+            Some(LiveStatus::Running | LiveStatus::Cancelling)
+        )
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
+            return;
+        }
+
+        if self.confirm_quit {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.should_quit = true,
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.confirm_quit = false,
+                _ => {}
+            }
             return;
         }
 
@@ -425,6 +741,7 @@ impl TuiReplayApp {
         }
 
         match key.code {
+            KeyCode::Char('q') | KeyCode::Esc if self.live_is_active() => self.confirm_quit = true,
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true
@@ -485,7 +802,11 @@ impl TuiReplayApp {
                     TimeDisplayMode::LocalTime => TimeDisplayMode::Elapsed,
                 }
             }
-            KeyCode::Char('/') => self.search_open = true,
+            KeyCode::Char('/') => {
+                self.search_input = self.search_query.clone();
+                self.search_changed_at = None;
+                self.search_open = true;
+            }
             _ => {}
         }
         self.clamp_selection();
@@ -493,22 +814,31 @@ impl TuiReplayApp {
 
     fn handle_search_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.search_open = false,
+            KeyCode::Esc => {
+                self.search_open = false;
+                self.search_input = self.search_query.clone();
+                self.search_changed_at = None;
+            }
+            KeyCode::Enter => {
+                self.apply_search_if_changed();
+                self.search_open = false;
+            }
             KeyCode::Backspace => {
-                self.search_query.pop();
-                self.selected = 0;
+                self.search_input.pop();
+                self.mark_search_changed();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search_query.clear();
-                self.selected = 0;
+                self.search_input.clear();
+                self.mark_search_changed();
             }
+            KeyCode::Char(ch)
+                if self.search_input.ends_with(ch) && key.kind == KeyEventKind::Repeat => {}
             KeyCode::Char(ch) => {
-                self.search_query.push(ch);
-                self.selected = 0;
+                self.search_input.push(ch);
+                self.mark_search_changed();
             }
             _ => {}
         }
-        self.clamp_selection();
     }
 }
 
@@ -700,234 +1030,79 @@ fn build_scope_tabs(events: &[EventRecord]) -> Vec<WorkflowScopeTab> {
     tabs
 }
 
-#[derive(Debug, Clone, Copy)]
-enum AgentEventRendererKind {
-    Default,
-    Pi,
-    Codex,
-    ClaudeCode,
-    OpenCode,
-}
+fn build_timeline_rows(visible_indices: &[usize], events: &[EventRecord]) -> Vec<TimelineRow> {
+    let mut grouped_rows = Vec::<TimelineRow>::new();
+    let mut group_row_by_key = std::collections::HashMap::<String, usize>::new();
 
-impl AgentEventRendererKind {
-    fn for_provider(provider: Option<&str>) -> Self {
-        match provider {
-            Some("pi") => Self::Pi,
-            Some("codex") => Self::Codex,
-            Some("claude-code") => Self::ClaudeCode,
-            Some("opencode") => Self::OpenCode,
-            _ => Self::Default,
+    for event_index in visible_indices.iter().copied() {
+        let record = &events[event_index];
+        let Some(group_key) = agent_group_key(record) else {
+            grouped_rows.push(TimelineRow::Event { event_index });
+            continue;
+        };
+
+        if let Some(row_index) = group_row_by_key.get(&group_key).copied() {
+            if let TimelineRow::AgentGroup { event_indices } = &mut grouped_rows[row_index] {
+                event_indices.push(event_index);
+            }
+            continue;
         }
+
+        group_row_by_key.insert(group_key, grouped_rows.len());
+        grouped_rows.push(TimelineRow::AgentGroup {
+            event_indices: vec![event_index],
+        });
     }
 
-    fn should_show_in_timeline(self, data: &Value) -> bool {
-        match self {
-            Self::Pi => data.get("type").and_then(Value::as_str) != Some("message_update"),
-            _ => true,
-        }
-    }
-
-    fn timeline_label(self, data: &Value) -> String {
-        let label = self.provider_event_label(data);
-        if let Some(text) = provider_texts(data).first() {
-            format!("{label} {}", truncate(text, 60))
-        } else if let Some(usage) = provider_usage_summary(data) {
-            format!("{label} {usage}")
-        } else {
-            label
-        }
-    }
-
-    fn provider_event_label(self, data: &Value) -> String {
-        match self {
-            Self::Codex => data
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("codex.raw")
-                .to_string(),
-            Self::Pi => data
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("pi.raw")
-                .to_string(),
-            Self::ClaudeCode => {
-                if let Some(response_type) = data
-                    .get("response")
-                    .and_then(|response| response.get("type"))
-                    .and_then(Value::as_str)
-                {
-                    format!("response.{response_type}")
-                } else if data
-                    .get("response")
-                    .and_then(|response| response.get("result"))
-                    .is_some()
-                {
-                    "response.result".to_string()
-                } else {
-                    "response".to_string()
+    let mut rows = Vec::with_capacity(visible_indices.len());
+    for row in grouped_rows {
+        match row {
+            TimelineRow::AgentGroup { event_indices } => {
+                let total = event_indices.len();
+                rows.push(TimelineRow::AgentGroup {
+                    event_indices: event_indices.clone(),
+                });
+                for (position, event_index) in event_indices.into_iter().enumerate().skip(1) {
+                    rows.push(TimelineRow::AgentChild {
+                        event_index,
+                        position,
+                        total,
+                    });
                 }
             }
-            Self::OpenCode => {
-                if let Some(items) = data.get("response").and_then(Value::as_array) {
-                    format!("response[{}]", items.len())
-                } else if data.get("session").is_some() {
-                    "session+response".to_string()
-                } else {
-                    "response".to_string()
-                }
+            TimelineRow::Event { event_index } => rows.push(TimelineRow::Event { event_index }),
+            TimelineRow::AgentChild { .. } => {
+                unreachable!("children are added in the expansion pass")
             }
-            Self::Default => data
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("raw")
-                .to_string(),
         }
     }
 
-    fn provider_name(self) -> &'static str {
-        match self {
-            Self::Pi => "pi",
-            Self::Codex => "codex",
-            Self::ClaudeCode => "claude-code",
-            Self::OpenCode => "opencode",
-            Self::Default => "provider",
-        }
-    }
-
-    fn details_lines(self, data: &Value) -> Vec<Line<'static>> {
-        let label = self.provider_event_label(data);
-        let mut lines = vec![Line::from(format!(
-            "{} event: {label}",
-            self.provider_name()
-        ))];
-        if let Some(usage) = provider_usage_summary(data) {
-            lines.push(Line::from(format!("usage: {usage}")));
-        }
-        let texts = provider_texts(data);
-        if !texts.is_empty() {
-            lines.push(Line::raw(""));
-            lines.push(Line::from("text:"));
-            for text in texts.iter().take(8) {
-                for line in text.lines() {
-                    lines.push(Line::from(format!("  {line}")));
-                }
-            }
-            if texts.len() > 8 {
-                lines.push(Line::from(format!(
-                    "  … {} more text fragments",
-                    texts.len() - 8
-                )));
-            }
-            return lines;
-        }
-
-        lines.push(Line::raw(""));
-        lines.extend(
-            serde_json::to_string_pretty(data)
-                .unwrap_or_else(|_| "<invalid>".into())
-                .lines()
-                .map(|line| Line::from(line.to_string())),
-        );
-        lines
-    }
+    rows
 }
 
-fn provider_texts(data: &Value) -> Vec<String> {
-    let mut texts = Vec::new();
-    collect_provider_texts(data, &mut texts);
-    texts.dedup();
-    texts
-}
-
-fn collect_provider_texts(value: &Value, texts: &mut Vec<String>) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                collect_provider_texts(item, texts);
-            }
-        }
-        Value::Object(object) => {
-            for (key, value) in object {
-                match (key.as_str(), value) {
-                    ("text" | "result" | "delta", Value::String(text))
-                        if !text.trim().is_empty() =>
-                    {
-                        texts.push(text.clone());
-                    }
-                    _ => collect_provider_texts(value, texts),
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn provider_usage_summary(data: &Value) -> Option<String> {
-    find_usage_like_object(data).map(format_usage_like_object)
-}
-
-fn find_usage_like_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
-    match value {
-        Value::Object(object) => {
-            if object.contains_key("usage") {
-                if let Some(usage) = object.get("usage").and_then(Value::as_object) {
-                    return Some(usage);
-                }
-            }
-            if object.contains_key("tokens") {
-                if let Some(tokens) = object.get("tokens").and_then(Value::as_object) {
-                    return Some(tokens);
-                }
-            }
-            for value in object.values() {
-                if let Some(usage) = find_usage_like_object(value) {
-                    return Some(usage);
-                }
-            }
-            None
-        }
-        Value::Array(items) => items.iter().find_map(find_usage_like_object),
-        _ => None,
-    }
-}
-
-fn format_usage_like_object(usage: &serde_json::Map<String, Value>) -> String {
-    let mut parts = Vec::new();
-    for key in [
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "cached_input_tokens",
-        "input",
-        "output",
-        "total",
-        "reasoning_output_tokens",
-        "reasoning",
-    ] {
-        if let Some(value) = usage.get(key).and_then(Value::as_u64) {
-            parts.push(format!("{key}={value}"));
-        }
-    }
-    if parts.is_empty() {
-        serde_json::to_string(&Value::Object(usage.clone())).unwrap_or_default()
-    } else {
-        parts.join(" ")
-    }
-}
-
-fn agent_event_renderer(record: &EventRecord) -> AgentEventRendererKind {
-    AgentEventRendererKind::for_provider(
-        record
-            .event
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.provider.as_deref()),
-    )
-}
-
-fn should_show_in_timeline(record: &EventRecord) -> bool {
-    record.event.event_type != WorkflowEventType::AgentEvent
-        || agent_event_renderer(record).should_show_in_timeline(&record.event.data)
+fn visible_indices_for(
+    events: &[EventRecord],
+    tab: &WorkflowScopeTab,
+    search_query: &str,
+) -> Vec<usize> {
+    let query = search_query.to_ascii_lowercase();
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| event_in_scope(record, tab))
+        .filter(|(_, record)| provider::should_show_in_timeline(record))
+        .filter(|(_, record)| {
+            query.is_empty()
+                || searchable_event_text(record)
+                    .to_ascii_lowercase()
+                    .contains(&query)
+                || serde_json::to_string(&record.raw)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains(&query)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn event_in_scope(record: &EventRecord, tab: &WorkflowScopeTab) -> bool {
@@ -947,6 +1122,18 @@ fn run_replay_tui(events: Vec<EventRecord>, options: ReplayCommandOptions) -> an
     let mut terminal = setup_terminal()?;
     let mut app = TuiReplayApp::new(events, &options);
     let result = run_tui_loop(&mut terminal, &mut app);
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+fn run_live_tui(
+    event_rx: mpsc::Receiver<WorkflowEvent>,
+    result_rx: mpsc::Receiver<anyhow::Result<()>>,
+    cancel_tx: watch::Sender<bool>,
+) -> anyhow::Result<()> {
+    let mut terminal = setup_terminal()?;
+    let mut app = TuiReplayApp::new_live();
+    let result = run_live_tui_loop(&mut terminal, &mut app, event_rx, result_rx, cancel_tx);
     restore_terminal(&mut terminal)?;
     result
 }
@@ -971,7 +1158,9 @@ fn run_tui_loop(
     app: &mut TuiReplayApp,
 ) -> anyhow::Result<()> {
     loop {
+        app.tick_search();
         app.tick_playback();
+        app.apply_view_snapshots();
         terminal.draw(|frame| render(frame, app))?;
         if app.should_quit {
             break;
@@ -979,6 +1168,60 @@ fn run_tui_loop(
         if event::poll(app.poll_timeout())? {
             if let CrosstermEvent::Key(key) = event::read()? {
                 app.handle_key(key);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_live_tui_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut TuiReplayApp,
+    event_rx: mpsc::Receiver<WorkflowEvent>,
+    result_rx: mpsc::Receiver<anyhow::Result<()>>,
+    cancel_tx: watch::Sender<bool>,
+) -> anyhow::Result<()> {
+    loop {
+        app.tick_search();
+        let mut event_batch = Vec::new();
+        for _ in 0..LIVE_EVENTS_PER_TICK {
+            match event_rx.try_recv() {
+                Ok(event) => event_batch.push(event),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        app.push_live_events(event_batch);
+        app.apply_view_snapshots();
+        match result_rx.try_recv() {
+            Ok(Ok(())) => app.live_status = Some(LiveStatus::Done),
+            Ok(Err(error)) => {
+                app.live_status = Some(LiveStatus::Failed);
+                app.live_error = Some(error.to_string());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if app.live_status == Some(LiveStatus::Running)
+                    || app.live_status == Some(LiveStatus::Cancelling)
+                {
+                    app.live_status = Some(LiveStatus::Failed);
+                    app.live_error = Some("workflow task stopped without a result".to_string());
+                }
+            }
+        }
+
+        terminal.draw(|frame| render(frame, app))?;
+        if app.should_quit {
+            break;
+        }
+        if event::poll(LIVE_POLL_INTERVAL)? {
+            if let CrosstermEvent::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('c') {
+                    let _ = cancel_tx.send(true);
+                    app.live_status = Some(LiveStatus::Cancelling);
+                } else {
+                    app.handle_key(key);
+                }
             }
         }
     }
@@ -1014,6 +1257,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiReplayApp) {
 
     if app.search_open {
         render_search_overlay(frame, app);
+    }
+    if app.confirm_quit {
+        render_quit_confirmation(frame);
     }
 }
 
@@ -1051,17 +1297,18 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layo
 }
 
 fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::layout::Rect) {
+    let rows = app.visible_rows();
     let title = if app.search_query.is_empty() {
         format!(
             " Timeline ({}/{}) ",
             app.selected.saturating_add(1),
-            app.visible_indices().len()
+            rows.len()
         )
     } else {
         format!(
             " Timeline ({}/{}) search: {} ",
             app.selected.saturating_add(1),
-            app.visible_indices().len(),
+            rows.len(),
             app.search_query
         )
     };
@@ -1070,22 +1317,22 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
     let (_title_area, content_area) = render_pane_shell(frame, area, title, title_color, focused);
     let content_area = pad_content_area(content_area, 2, 0);
 
-    let visible = app.visible_indices();
     let query = app.search_query.to_ascii_lowercase();
     let height = usize::from(content_area.height).max(1);
-    let start = scroll_start(app.selected, visible.len(), height);
-    let items = visible
+    let start = scroll_start(app.selected, rows.len(), height);
+    let items = rows
         .iter()
         .enumerate()
         .skip(start)
         .take(height)
-        .map(|(visible_index, event_index)| {
-            let summary = timeline_summary(app, &visible, *event_index);
-            let selected = visible_index == app.selected;
+        .map(|(row_index, row)| {
+            let event_index = row.event_index();
+            let summary = timeline_row_summary(app, row);
+            let selected = row_index == app.selected;
             let search_match = !query.is_empty() && summary.to_ascii_lowercase().contains(&query);
             let line = Line::from(vec![Span::styled(
                 summary,
-                timeline_event_style(&app.events[*event_index], selected, search_match),
+                timeline_event_style(&app.events[event_index], selected, search_match),
             )]);
             ListItem::new(line)
         })
@@ -1120,7 +1367,12 @@ fn event_type_style(event_type: &WorkflowEventType) -> Style {
         WorkflowEventType::Started => Style::default().fg(Color::Cyan),
         WorkflowEventType::Phase => Style::default().fg(Color::Magenta),
         WorkflowEventType::Log => Style::default().fg(Color::Gray),
+        WorkflowEventType::AgentStarted => Style::default().fg(Color::LightBlue),
         WorkflowEventType::AgentEvent => Style::default().fg(Color::Green),
+        WorkflowEventType::AgentCompleted => Style::default().fg(Color::LightGreen),
+        WorkflowEventType::AgentFailed => {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        }
         WorkflowEventType::Result => Style::default().fg(Color::LightGreen),
         WorkflowEventType::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         WorkflowEventType::Other(_) => Style::default().fg(Color::White),
@@ -1209,9 +1461,21 @@ fn pad_details_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn render_quit_confirmation(frame: &mut Frame<'_>) {
+    let area = centered_rect(60, 5, frame.area());
+    let paragraph = Paragraph::new(vec![
+        Line::from("Quit live workflow TUI?"),
+        Line::from(""),
+        Line::from("Press y to quit the UI, n or Esc to stay."),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Confirm quit"));
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
+}
+
 fn render_search_overlay(frame: &mut Frame<'_>, app: &TuiReplayApp) {
     let area = centered_rect(70, 3, frame.area());
-    let input = Paragraph::new(format!("/{}", app.search_query)).block(
+    let input = Paragraph::new(format!("/{}", app.search_input)).block(
         Block::default()
             .borders(Borders::ALL)
             .title("Search timeline"),
@@ -1243,6 +1507,12 @@ fn centered_rect(
         .split(vertical[1])[1]
 }
 
+fn running_spinner() -> &'static str {
+    const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+    let tick = (OffsetDateTime::now_utc().unix_timestamp_nanos() / SPINNER_INTERVAL_NANOS) as usize;
+    FRAMES[tick % FRAMES.len()]
+}
+
 fn status_line(app: &TuiReplayApp) -> String {
     let run_id = app
         .events
@@ -1259,6 +1529,25 @@ fn status_line(app: &TuiReplayApp) -> String {
         TimeDisplayMode::Elapsed => "elapsed",
         TimeDisplayMode::LocalTime => "local",
     };
+    if let Some(live_status) = app.live_status {
+        let status = match live_status {
+            LiveStatus::Running => format!("{} LIVE_RUNNING", running_spinner()),
+            LiveStatus::Cancelling => format!("{} LIVE_CANCELLING", running_spinner()),
+            LiveStatus::Done => "✓ LIVE_DONE".to_string(),
+            LiveStatus::Failed => "✗ LIVE_FAILED".to_string(),
+        };
+        let error = app
+            .live_error
+            .as_ref()
+            .map(|error| format!("  error: {}", truncate(error, 80)))
+            .unwrap_or_default();
+        return format!(
+            " {status}  {run_id}  events {}  tab {}/{}  time {time_mode}{error}",
+            app.events.len(),
+            app.active_tab + 1,
+            app.tabs.len(),
+        );
+    }
     let playback = match app.playback {
         PlaybackState::Playing => "REPLAY_PLAYING",
         PlaybackState::Paused if app.replay_complete() => "REPLAY_DONE",
@@ -1275,60 +1564,102 @@ fn status_line(app: &TuiReplayApp) -> String {
     )
 }
 
-fn timeline_summary(app: &TuiReplayApp, visible: &[usize], event_index: usize) -> String {
-    let record = &app.events[event_index];
-    if record.event.event_type != WorkflowEventType::AgentEvent {
-        return event_summary(app, record);
+fn timeline_row_summary(app: &TuiReplayApp, row: &TimelineRow) -> String {
+    match row {
+        TimelineRow::Event { event_index } => event_summary(app, &app.events[*event_index]),
+        TimelineRow::AgentGroup { event_indices } => agent_group_summary(app, event_indices),
+        TimelineRow::AgentChild {
+            event_index,
+            position,
+            total,
+        } => agent_child_summary(app, *event_index, *position, *total),
     }
+}
 
-    let Some(group_key) = agent_group_key(record) else {
-        return event_summary(app, record);
-    };
-    let matching = visible
+fn agent_group_summary(app: &TuiReplayApp, matching: &[usize]) -> String {
+    let record = &app.events[matching[0]];
+    let event = &record.event;
+    let elapsed = display_time(app, event);
+    let metadata = event.metadata.as_ref();
+    let provider = metadata
+        .and_then(|metadata| metadata.provider.as_deref())
+        .unwrap_or("<provider>");
+    let session = matching
         .iter()
-        .copied()
-        .filter(|index| agent_group_key(&app.events[*index]).as_deref() == Some(group_key.as_str()))
-        .collect::<Vec<_>>();
-    let first = matching.first().copied() == Some(event_index);
-    if first {
-        let event = &record.event;
-        let elapsed = display_time(app, event);
-        let metadata = event.metadata.as_ref();
-        let provider = metadata
-            .and_then(|metadata| metadata.provider.as_deref())
-            .unwrap_or("<provider>");
-        let session = metadata
-            .and_then(|metadata| metadata.session_id.as_deref())
-            .map(short_id)
-            .unwrap_or_else(|| "<session>".to_string());
-        let depth = metadata
-            .and_then(|metadata| metadata.workflow_depth)
-            .unwrap_or(0);
-        let indent = timeline_indent(depth);
-        format!(
-            "{elapsed} {indent}agent {provider} session={session} events={}",
-            matching.len()
-        )
+        .find_map(|index| {
+            app.events[*index]
+                .event
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.session_id.as_deref())
+        })
+        .map(short_id)
+        .unwrap_or_else(|| "pending".to_string());
+    let depth = metadata
+        .and_then(|metadata| metadata.workflow_depth)
+        .unwrap_or(0);
+    let indent = timeline_indent(depth);
+    let status = if matching
+        .iter()
+        .any(|index| app.events[*index].event.event_type == WorkflowEventType::AgentFailed)
+    {
+        "failed"
+    } else if matching
+        .iter()
+        .any(|index| app.events[*index].event.event_type == WorkflowEventType::AgentCompleted)
+    {
+        "completed"
     } else {
-        let position = matching
-            .iter()
-            .position(|index| *index == event_index)
-            .unwrap_or(0);
-        let branch = if position + 1 == matching.len() {
-            "└─"
-        } else {
-            "├─"
-        };
-        let event = &record.event;
-        let elapsed = display_time(app, event);
-        let depth = event
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.workflow_depth)
-            .unwrap_or(0);
-        let indent = timeline_indent(depth.saturating_add(1));
-        let label = agent_event_renderer(record).timeline_label(&event.data);
-        format!("{elapsed} {indent}{branch} {label}")
+        "running"
+    };
+    let provider_events = matching
+        .iter()
+        .filter(|index| app.events[**index].event.event_type == WorkflowEventType::AgentEvent)
+        .count();
+    format!(
+        "{elapsed} {indent}agent {provider} {status} session={session} events={provider_events}"
+    )
+}
+
+fn agent_child_summary(
+    app: &TuiReplayApp,
+    event_index: usize,
+    position: usize,
+    total: usize,
+) -> String {
+    let record = &app.events[event_index];
+    let event = &record.event;
+    let elapsed = display_time(app, event);
+    let branch = if position + 1 == total {
+        "└─"
+    } else {
+        "├─"
+    };
+    let depth = event
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.workflow_depth)
+        .unwrap_or(0);
+    let indent = timeline_indent(depth.saturating_add(1));
+    let label = agent_group_item_label(record);
+    format!("{elapsed} {indent}{branch} {label}")
+}
+
+fn agent_group_item_label(record: &EventRecord) -> String {
+    match record.event.event_type {
+        WorkflowEventType::AgentStarted => "started".to_string(),
+        WorkflowEventType::AgentCompleted => "completed".to_string(),
+        WorkflowEventType::AgentFailed => format!(
+            "failed {}",
+            record
+                .event
+                .data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        WorkflowEventType::AgentEvent => provider::timeline_label(record),
+        _ => event_summary_without_time(record),
     }
 }
 
@@ -1337,14 +1668,20 @@ fn timeline_indent(depth: u32) -> String {
 }
 
 fn agent_group_key(record: &EventRecord) -> Option<String> {
-    if record.event.event_type != WorkflowEventType::AgentEvent {
+    if !matches!(
+        record.event.event_type,
+        WorkflowEventType::AgentStarted
+            | WorkflowEventType::AgentEvent
+            | WorkflowEventType::AgentCompleted
+            | WorkflowEventType::AgentFailed
+    ) {
         return None;
     }
     let metadata = record.event.metadata.as_ref()?;
     metadata
-        .session_id
+        .step_id
         .as_ref()
-        .or(metadata.step_id.as_ref())
+        .or(metadata.session_id.as_ref())
         .cloned()
 }
 
@@ -1369,6 +1706,42 @@ fn searchable_event_text(record: &EventRecord) -> String {
         }
     }
     parts.join(" ")
+}
+
+fn event_summary_without_time(record: &EventRecord) -> String {
+    let event = &record.event;
+    match event.event_type {
+        WorkflowEventType::Started => "workflow.started".to_string(),
+        WorkflowEventType::Phase => format!(
+            "workflow.phase {}",
+            event.data.get("name").and_then(Value::as_str).unwrap_or("")
+        ),
+        WorkflowEventType::Log => format!(
+            "workflow.log {}",
+            truncate(
+                event
+                    .data
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                80,
+            )
+        ),
+        WorkflowEventType::AgentStarted => "agent.started".to_string(),
+        WorkflowEventType::AgentEvent => provider::timeline_label(record),
+        WorkflowEventType::AgentCompleted => "agent.completed".to_string(),
+        WorkflowEventType::AgentFailed => "agent.failed".to_string(),
+        WorkflowEventType::Result => "workflow.result".to_string(),
+        WorkflowEventType::Error => format!(
+            "workflow.error {}",
+            event
+                .data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        WorkflowEventType::Other(ref event_type) => event_type.clone(),
+    }
 }
 
 fn event_summary(app: &TuiReplayApp, record: &EventRecord) -> String {
@@ -1409,6 +1782,14 @@ fn event_summary(app: &TuiReplayApp, record: &EventRecord) -> String {
                 80
             )
         ),
+        WorkflowEventType::AgentStarted => {
+            let provider = event
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provider.as_deref())
+                .unwrap_or("<provider>");
+            format!("{elapsed} {indent}agent.started {provider}")
+        }
         WorkflowEventType::AgentEvent => {
             let metadata = event.metadata.as_ref();
             let provider = metadata
@@ -1418,8 +1799,29 @@ fn event_summary(app: &TuiReplayApp, record: &EventRecord) -> String {
                 .and_then(|metadata| metadata.session_id.as_deref())
                 .map(short_id)
                 .unwrap_or_else(|| "<session>".to_string());
-            let label = agent_event_renderer(record).timeline_label(&event.data);
+            let label = provider::timeline_label(record);
             format!("{elapsed} {indent}workflow.agent_event {provider} {session} {label}")
+        }
+        WorkflowEventType::AgentCompleted => {
+            let provider = event
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provider.as_deref())
+                .unwrap_or("<provider>");
+            format!("{elapsed} {indent}agent.completed {provider}")
+        }
+        WorkflowEventType::AgentFailed => {
+            let provider = event
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provider.as_deref())
+                .unwrap_or("<provider>");
+            let message = event
+                .data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("{elapsed} {indent}agent.failed {provider} {message}")
         }
         WorkflowEventType::Result => format!("{elapsed} {indent}workflow.result"),
         WorkflowEventType::Error => format!(
@@ -1498,10 +1900,26 @@ fn pretty_details_lines(
                 .and_then(Value::as_str)
                 .unwrap_or("")
         ),
+        WorkflowEventType::AgentStarted => format!(
+            "agent started:\n{}",
+            serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "<invalid>".into())
+        ),
         WorkflowEventType::AgentEvent => {
-            lines.extend(agent_event_renderer(record).details_lines(&event.data));
+            lines.extend(provider::details_lines(record));
             return lines;
         }
+        WorkflowEventType::AgentCompleted => format!(
+            "agent completed:\n{}",
+            serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "<invalid>".into())
+        ),
+        WorkflowEventType::AgentFailed => format!(
+            "agent failed: {}",
+            event
+                .data
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>")
+        ),
         WorkflowEventType::Result => format!(
             "result:\n{}",
             serde_json::to_string_pretty(&event.data).unwrap_or_else(|_| "<invalid>".into())
@@ -1594,5 +2012,122 @@ fn truncate(value: &str, max_chars: usize) -> String {
         format!("{truncated}…")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use smol_workflow_engine::events::WorkflowEventMetadata;
+
+    fn agent_record(
+        event_type: WorkflowEventType,
+        step_id: &str,
+        elapsed_nanos: u64,
+    ) -> EventRecord {
+        let event = WorkflowEvent {
+            event_type,
+            elapsed_nanos: Some(elapsed_nanos),
+            metadata: Some(WorkflowEventMetadata {
+                step_id: Some(step_id.to_string()),
+                provider: Some("test".to_string()),
+                workflow_depth: Some(0),
+                ..WorkflowEventMetadata::default()
+            }),
+            data: json!({}),
+        };
+        EventRecord {
+            raw: serde_json::to_value(&event).unwrap(),
+            event,
+        }
+    }
+
+    fn log_record(message: &str, elapsed_nanos: u64) -> EventRecord {
+        let event = WorkflowEvent {
+            event_type: WorkflowEventType::Log,
+            elapsed_nanos: Some(elapsed_nanos),
+            metadata: Some(WorkflowEventMetadata {
+                workflow_depth: Some(0),
+                ..WorkflowEventMetadata::default()
+            }),
+            data: json!({ "message": message }),
+        };
+        EventRecord {
+            raw: serde_json::to_value(&event).unwrap(),
+            event,
+        }
+    }
+
+    #[test]
+    fn timeline_rows_group_interleaved_agent_events_by_step_id() {
+        let events = vec![
+            agent_record(WorkflowEventType::AgentStarted, "step_a", 0),
+            agent_record(WorkflowEventType::AgentStarted, "step_b", 1),
+            agent_record(WorkflowEventType::AgentEvent, "step_a", 2),
+            agent_record(WorkflowEventType::AgentEvent, "step_b", 3),
+            agent_record(WorkflowEventType::AgentCompleted, "step_a", 4),
+            agent_record(WorkflowEventType::AgentCompleted, "step_b", 5),
+        ];
+        let visible = (0..events.len()).collect::<Vec<_>>();
+
+        assert_eq!(
+            build_timeline_rows(&visible, &events),
+            vec![
+                TimelineRow::AgentGroup {
+                    event_indices: vec![0, 2, 4]
+                },
+                TimelineRow::AgentChild {
+                    event_index: 2,
+                    position: 1,
+                    total: 3
+                },
+                TimelineRow::AgentChild {
+                    event_index: 4,
+                    position: 2,
+                    total: 3
+                },
+                TimelineRow::AgentGroup {
+                    event_indices: vec![1, 3, 5]
+                },
+                TimelineRow::AgentChild {
+                    event_index: 3,
+                    position: 1,
+                    total: 3
+                },
+                TimelineRow::AgentChild {
+                    event_index: 5,
+                    position: 2,
+                    total: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn timeline_rows_keep_non_agent_events_in_stream_order() {
+        let events = vec![
+            log_record("before", 0),
+            agent_record(WorkflowEventType::AgentStarted, "step_a", 1),
+            agent_record(WorkflowEventType::AgentEvent, "step_a", 2),
+            log_record("after", 3),
+        ];
+        let visible = (0..events.len()).collect::<Vec<_>>();
+
+        assert_eq!(
+            build_timeline_rows(&visible, &events),
+            vec![
+                TimelineRow::Event { event_index: 0 },
+                TimelineRow::AgentGroup {
+                    event_indices: vec![1, 2]
+                },
+                TimelineRow::AgentChild {
+                    event_index: 2,
+                    position: 1,
+                    total: 2
+                },
+                TimelineRow::Event { event_index: 3 },
+            ]
+        );
     }
 }

@@ -13,7 +13,10 @@ type WorkflowEventType =
   | "workflow.started"
   | "workflow.phase"
   | "workflow.log"
+  | "workflow.agent_started"
   | "workflow.agent_event"
+  | "workflow.agent_completed"
+  | "workflow.agent_failed"
   | "workflow.result"
   | "workflow.error"
   | string;
@@ -48,6 +51,8 @@ Fields:
 The top-level envelope belongs to smol-workflows. The `data` payload belongs to the event type.
 
 For `workflow.agent_event`, `data` is the raw provider event payload. It must not be translated into a shared smol-workflows message/tool/result schema. Consumers should use `metadata.provider` before interpreting `data`. Not every producer emits `workflow.agent_event`; the current CLI emits agent events from successful completed provider results, while `--save-raw-sessions` can also write provider transcripts separately.
+
+`workflow.agent_started`, `workflow.agent_completed`, and `workflow.agent_failed` are workflow-owned lifecycle events for an `agent(...)` call. They are intentionally separate from provider-owned `workflow.agent_event` payloads.
 
 ## Metadata
 
@@ -199,6 +204,38 @@ Example:
 }
 ```
 
+### `workflow.agent_started`
+
+Emitted when the workflow runtime starts an `agent(...)` call. This event is workflow-owned and provider-agnostic, so live UIs can show an in-flight agent before provider raw events are available.
+
+Payload shape:
+
+```ts
+type WorkflowAgentStartedEvent = {
+  phase?: string | null;
+  promptPreview: string;
+};
+```
+
+Example:
+
+```json
+{
+  "type": "workflow.agent_started",
+  "elapsedNanos": 12000000,
+  "metadata": {
+    "runId": "run_123",
+    "workflowDepth": 0,
+    "stepId": "step_4",
+    "provider": "codex"
+  },
+  "data": {
+    "phase": "Inspect",
+    "promptPreview": "Inspect coredns pods..."
+  }
+}
+```
+
 ### `workflow.agent_event`
 
 Emitted for events produced by an agent provider during an `agent(...)` call. Current CLI emission is result-backed rather than live-streamed: raw provider payloads are emitted after a successful provider result is available, before the workflow receives that agent result.
@@ -234,6 +271,32 @@ Example:
 ```
 
 Provider-specific examples are documented in [`../harness-capabilities/session-event.md`](../harness-capabilities/session-event.md).
+
+### `workflow.agent_completed`
+
+Emitted when an `agent(...)` call completes successfully. This event is workflow-owned and emitted after any result-backed `workflow.agent_event` payloads for the call.
+
+Payload shape:
+
+```ts
+type WorkflowAgentCompletedEvent = {
+  sessionId?: string;
+  model?: string;
+  usage?: unknown;
+};
+```
+
+### `workflow.agent_failed`
+
+Emitted when an `agent(...)` call fails before producing a successful `AgentProviderResult`.
+
+Payload shape:
+
+```ts
+type WorkflowAgentFailedEvent = {
+  message: string;
+};
+```
 
 ### `workflow.result`
 

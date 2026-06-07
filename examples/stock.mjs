@@ -152,4 +152,6 @@ Synthesize these findings into a comprehensive investment report. Be direct, opi
   { schema: SYNTHESIS_SCHEMA, phase: 'Synthesize' }
 )
 
+log(synthesis.executiveSummary)
+
 export default { decomposition, findings: validFindings, synthesis }
