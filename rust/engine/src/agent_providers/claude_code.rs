@@ -56,6 +56,9 @@ async fn run_claude_code(
     if let Some(model) = option_str(&input.options, "model") {
         args.extend(["--model".into(), model]);
     }
+    if let Some(thinking) = option_str(&input.options, "thinking") {
+        args.extend(["--effort".into(), thinking]);
+    }
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         args.extend(["--agent".into(), agent_type]);
     }

@@ -12,7 +12,7 @@ use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -68,6 +68,7 @@ pub struct RunWorkflowOptions {
     pub script_path: PathBuf,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
+    pub model_map: BTreeMap<String, String>,
     pub budget_total: Option<u64>,
     pub budget_spent: u64,
     pub nesting_depth: usize,
@@ -182,6 +183,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions) -> anyhow::Result<RunWo
         metadata,
         event_start,
         agent_provider: options.agent_provider,
+        model_map: options.model_map,
         logs: Vec::new(),
         phases: Vec::new(),
         agent_calls: Vec::new(),
@@ -415,6 +417,7 @@ struct RunState {
     metadata: WorkflowMetadata,
     event_start: Instant,
     agent_provider: Arc<dyn AgentProvider>,
+    model_map: BTreeMap<String, String>,
     logs: Vec<Vec<Value>>,
     phases: Vec<WorkflowPhaseCall>,
     agent_calls: Vec<WorkflowRuntimeRequest>,
@@ -613,10 +616,21 @@ impl RunState {
                 .pop_front()
                 .expect("pending request should exist");
             match request {
-                WorkflowRuntimeRequest::Agent { .. } => {
-                    let (id, prepared) = self.prepare_agent_request(request);
-                    self.spawn_agent_task(agent_tasks, id, prepared);
-                }
+                WorkflowRuntimeRequest::Agent { .. } => match self.prepare_agent_request(request) {
+                    Ok((id, prepared)) => self.spawn_agent_task(agent_tasks, id, prepared),
+                    Err((id, error)) => {
+                        send_js_command(
+                            js_commands,
+                            JsCommand::ResolveRequest {
+                                id,
+                                resolution: WorkflowRuntimeRequestResolution::Err {
+                                    message: error.to_string(),
+                                },
+                            },
+                        )
+                        .await?;
+                    }
+                },
                 WorkflowRuntimeRequest::Sleep { id, duration_ms } => {
                     self.spawn_sleep_task(sleep_tasks, id, duration_ms);
                 }
@@ -879,7 +893,7 @@ impl RunState {
     fn prepare_agent_request(
         &mut self,
         request: WorkflowRuntimeRequest,
-    ) -> (String, PreparedAgentRun) {
+    ) -> Result<(String, PreparedAgentRun), (String, anyhow::Error)> {
         match request {
             WorkflowRuntimeRequest::Agent {
                 id,
@@ -891,7 +905,10 @@ impl RunState {
                     prompt: prompt.clone(),
                     options: options.clone(),
                 });
-                (id, self.prepare_agent_run(prompt, options))
+                match self.prepare_agent_run(prompt, options) {
+                    Ok(prepared) => Ok((id, prepared)),
+                    Err(error) => Err((id, error)),
+                }
             }
             WorkflowRuntimeRequest::Workflow { .. } | WorkflowRuntimeRequest::Sleep { .. } => {
                 unreachable!("prepare_agent_request only accepts agent requests")
@@ -978,7 +995,11 @@ impl RunState {
         });
     }
 
-    fn prepare_agent_run(&self, prompt: String, options: Option<Value>) -> PreparedAgentRun {
+    fn prepare_agent_run(
+        &self,
+        prompt: String,
+        options: Option<Value>,
+    ) -> anyhow::Result<PreparedAgentRun> {
         let options = apply_phase_defaults(options, &self.metadata);
         let context = AgentProviderContext {
             phase: options
@@ -993,11 +1014,13 @@ impl RunState {
             .and_then(|options| options.get("provider"))
             .and_then(Value::as_str)
             .map(ToString::to_string);
+        let provider_name = provider_override
+            .as_deref()
+            .unwrap_or_else(|| self.agent_provider.name());
+        let options = resolve_model_options(options, provider_name, &self.model_map)?;
         log::debug!(
             "agent call provider={} phase={:?} model={:?} prompt_len={}",
-            provider_override
-                .as_deref()
-                .unwrap_or_else(|| self.agent_provider.name()),
+            provider_name,
             context.phase.as_deref(),
             options
                 .as_ref()
@@ -1005,14 +1028,14 @@ impl RunState {
                 .and_then(Value::as_str),
             prompt.len()
         );
-        PreparedAgentRun {
+        Ok(PreparedAgentRun {
             provider_override,
             input: AgentProviderRunInput {
                 prompt,
                 options,
                 context,
             },
-        }
+        })
     }
 
     async fn apply_agent_result(
@@ -1115,6 +1138,7 @@ impl RunState {
             script_path,
             args: args.unwrap_or(Value::Null),
             agent_provider: Arc::clone(&self.agent_provider),
+            model_map: self.model_map.clone(),
             budget_total: self.budget.total,
             budget_spent: self.budget.spent,
             nesting_depth: self.nesting_depth + 1,
@@ -1431,6 +1455,221 @@ fn with_structured_output_retry_prompt(prompt: &str, errors: &[String]) -> Strin
     ];
     lines.extend(errors.iter().map(|error| format!("- {error}")));
     lines.join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedModelSelector {
+    requested: String,
+    selector: String,
+    model_id: String,
+    model_provider: Option<String>,
+    thinking: Option<String>,
+}
+
+impl ResolvedModelSelector {
+    fn provider_model(&self) -> String {
+        match &self.model_provider {
+            Some(provider) => format!("{provider}/{}", self.model_id),
+            None => self.model_id.clone(),
+        }
+    }
+}
+
+fn resolve_model_options(
+    options: Option<Value>,
+    agent_provider: &str,
+    model_map: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<Value>> {
+    let Some(model) = options
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("model"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+    else {
+        return Ok(options);
+    };
+
+    let mapped_selector = model_map.get(&model).cloned();
+    let alias_matched = mapped_selector.is_some();
+    let selector = mapped_selector.unwrap_or_else(|| model.clone());
+    let resolved = parse_model_selector(&model, &selector)?;
+    validate_model_selector_for_provider(&resolved, agent_provider)?;
+
+    let mut object = options
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    object.insert(
+        "model".to_string(),
+        Value::String(resolved.provider_model()),
+    );
+
+    let selector_has_extra_parts = alias_matched
+        || resolved.selector.contains('?')
+        || resolved.model_provider.is_some()
+        || resolved.thinking.is_some();
+    if selector_has_extra_parts {
+        object.insert(
+            "requestedModel".to_string(),
+            Value::String(resolved.requested.clone()),
+        );
+        object.insert(
+            "modelSelector".to_string(),
+            Value::String(resolved.selector.clone()),
+        );
+    } else {
+        object.remove("requestedModel");
+        object.remove("modelSelector");
+    }
+
+    if let Some(provider) = resolved.model_provider {
+        object.insert("modelProvider".to_string(), Value::String(provider));
+    } else {
+        object.remove("modelProvider");
+    }
+    if let Some(thinking) = resolved.thinking {
+        object.insert("thinking".to_string(), Value::String(thinking));
+    } else {
+        object.remove("thinking");
+    }
+    Ok(Some(Value::Object(object)))
+}
+
+fn parse_model_selector(requested: &str, selector: &str) -> anyhow::Result<ResolvedModelSelector> {
+    let (model_part, query) = selector.split_once('?').unwrap_or((selector, ""));
+    if model_part.trim().is_empty() {
+        bail!("model selector must include a model id: {selector}");
+    }
+
+    let (slash_provider, model_id) = match model_part.split_once('/') {
+        Some((provider, model_id)) if !provider.is_empty() && !model_id.is_empty() => {
+            (Some(provider.to_string()), model_id.to_string())
+        }
+        Some(_) => bail!("model selector provider/model form is invalid: {selector}"),
+        None => (None, model_part.to_string()),
+    };
+
+    let mut query_provider = None::<String>;
+    let mut thinking = None::<String>;
+    if !query.is_empty() {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (key, value) = pair.split_once('=').ok_or_else(|| {
+                anyhow!("model selector query parameter must use key=value: {pair}")
+            })?;
+            let key = percent_decode(key)?;
+            let value = percent_decode(value)?;
+            if value.is_empty() {
+                bail!("model selector query parameter `{key}` must not be empty");
+            }
+            match key.as_str() {
+                "provider" => set_unique_query_value(&mut query_provider, key, value)?,
+                "thinking" => set_unique_query_value(&mut thinking, key, value)?,
+                _ => bail!("unknown model selector query parameter `{key}`"),
+            }
+        }
+    }
+
+    let model_provider = match (slash_provider, query_provider) {
+        (Some(slash), Some(query)) if slash != query => bail!(
+            "conflicting model provider qualifiers in selector `{selector}`: `{slash}` and `{query}`"
+        ),
+        (Some(provider), Some(_)) | (Some(provider), None) | (None, Some(provider)) => {
+            Some(provider)
+        }
+        (None, None) => None,
+    };
+
+    Ok(ResolvedModelSelector {
+        requested: requested.to_string(),
+        selector: selector.to_string(),
+        model_id,
+        model_provider,
+        thinking,
+    })
+}
+
+fn set_unique_query_value(
+    target: &mut Option<String>,
+    key: String,
+    value: String,
+) -> anyhow::Result<()> {
+    if target.replace(value).is_some() {
+        bail!("duplicate model selector query parameter `{key}`");
+    }
+    Ok(())
+}
+
+fn percent_decode(value: &str) -> anyhow::Result<String> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    bail!("invalid percent escape in model selector query: {value}");
+                }
+                let high = hex_value(bytes[index + 1]).ok_or_else(|| {
+                    anyhow!("invalid percent escape in model selector query: {value}")
+                })?;
+                let low = hex_value(bytes[index + 2]).ok_or_else(|| {
+                    anyhow!("invalid percent escape in model selector query: {value}")
+                })?;
+                output.push((high << 4) | low);
+                index += 3;
+            }
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(output).context("model selector query is not valid UTF-8")
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn validate_model_selector_for_provider(
+    resolved: &ResolvedModelSelector,
+    agent_provider: &str,
+) -> anyhow::Result<()> {
+    match agent_provider {
+        "codex" => {
+            if resolved.model_provider.is_some() {
+                bail!("Codex model selectors do not support ?provider=... or provider/model form");
+            }
+            if resolved.thinking.is_some() {
+                bail!("Codex model selectors do not support thinking=...");
+            }
+        }
+        "claude-code" => {
+            if resolved.model_provider.is_some() {
+                bail!("Claude Code model selectors do not support ?provider=... or provider/model form");
+            }
+        }
+        "opencode" => {
+            if resolved.model_provider.is_none() {
+                bail!("OpenCode model selectors must use provider/model or ?provider=...");
+            }
+        }
+        "debug" | "pi" => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 fn apply_phase_defaults(options: Option<Value>, metadata: &WorkflowMetadata) -> Option<Value> {

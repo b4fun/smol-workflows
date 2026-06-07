@@ -90,6 +90,9 @@ async fn run_opencode(
     if let Some(model) = option_str(&input.options, "model") {
         args.extend(["--model".into(), model]);
     }
+    if let Some(thinking) = option_str(&input.options, "thinking") {
+        args.extend(["--variant".into(), thinking]);
+    }
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         args.extend(["--agent".into(), agent_type]);
     }
@@ -167,6 +170,9 @@ async fn run_opencode_via_server(
     });
     if let Some(model) = model {
         body["model"] = model;
+    }
+    if let Some(thinking) = option_str(&input.options, "thinking") {
+        body["variant"] = Value::String(thinking);
     }
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         body["agent"] = Value::String(agent_type);
@@ -251,6 +257,9 @@ async fn run_opencode_structured(
     });
     if let Some(model) = model {
         body["model"] = model;
+    }
+    if let Some(thinking) = option_str(&input.options, "thinking") {
+        body["variant"] = Value::String(thinking);
     }
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         body["agent"] = Value::String(agent_type);

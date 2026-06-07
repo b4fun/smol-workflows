@@ -20,6 +20,7 @@ use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
 use smol_workflow_engine::metadata::{read_workflow_metadata, WorkflowMetadata};
 use smol_workflow_engine::workflow::AgentSessionLogSink;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -1107,6 +1108,7 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         provider,
     );
     durable_options.budget_total = options.budget_allowance;
+    durable_options.model_map = options.model_map;
     durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
     durable_options.resume_run_id = options.resume_run_id;
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -1242,6 +1244,7 @@ struct RunCliOptions {
     agent_provider: String,
     args: Map<String, Value>,
     budget_allowance: Option<u64>,
+    model_map: BTreeMap<String, String>,
     max_parallel_agent_requests: Option<usize>,
     db_path: PathBuf,
     db_path_is_default: bool,
@@ -1255,6 +1258,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
     let mut workflow_arg_tokens = Vec::new();
     let mut agent_provider = "debug".to_string();
     let mut budget_allowance = None;
+    let mut model_map = BTreeMap::<String, String>::new();
     let mut log_level = LevelFilter::Off;
     let mut resume_run_id = None;
     let mut db_path = None;
@@ -1325,6 +1329,17 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
             continue;
         }
 
+        if token == "--model-map" || token.starts_with("--model-map=") {
+            let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
+            let (alias, selector) = parse_model_map_entry(&parsed.value)?;
+            model_map.insert(alias, selector);
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
         if token == "--log-level" || token.starts_with("--log-level=") {
             let parsed = parse_flag_token(token, argv.get(index + 1).map(String::as_str))?;
             log_level = parse_log_level(&parsed.value, "--log-level")?;
@@ -1383,6 +1398,7 @@ fn parse_run_options(argv: Vec<String>) -> anyhow::Result<RunCliOptions> {
         agent_provider,
         args: parse_workflow_args(&workflow_arg_tokens)?,
         budget_allowance,
+        model_map,
         max_parallel_agent_requests,
         db_path: match db_path {
             Some(db_path) => db_path,
@@ -1492,6 +1508,22 @@ fn is_workflow_arg_token(token: &str) -> bool {
 struct ParsedFlag {
     value: String,
     consumed_next: bool,
+}
+
+fn parse_model_map_entry(value: &str) -> anyhow::Result<(String, String)> {
+    let Some((alias, selector)) = value.split_once(':') else {
+        anyhow::bail!("--model-map must use <alias>:<selector>");
+    };
+    if alias.is_empty() {
+        anyhow::bail!("--model-map alias must not be empty");
+    }
+    if selector.is_empty() {
+        anyhow::bail!("--model-map selector must not be empty");
+    }
+    if alias.contains('?') || alias.contains('&') || alias.contains('=') || alias.contains('/') {
+        anyhow::bail!("--model-map alias must be a simple name, got: {alias}");
+    }
+    Ok((alias.to_string(), selector.to_string()))
 }
 
 fn parse_flag_token(token: &str, next: Option<&str>) -> anyhow::Result<ParsedFlag> {
@@ -1688,7 +1720,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --model-map alias:selector (repeatable)\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
                 ),
         )
         .subcommand(
