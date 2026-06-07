@@ -318,6 +318,7 @@ Writes workflow progress/debug information to stderr without changing the workfl
 | Command group | Purpose | Reference |
 | --- | --- | --- |
 | `smol-wf run` | Run a workflow script. | [`docs/usages/run.md`](docs/usages/run.md) |
+| `smol-wf tui` | Interactively stream or replay workflow events in a terminal UI. | [`docs/usages/tui.md`](docs/usages/tui.md) |
 | `smol-wf history` | Get workflow runs history. | [`docs/usages/history.md`](docs/usages/history.md) |
 | `smol-wf llm` | LLM-facing helper commands, such as workflow discovery. | [`docs/usages/llm.md`](docs/usages/llm.md) |
 
