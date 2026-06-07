@@ -6,23 +6,23 @@ Interactively inspect workflow execution in a terminal UI.
 smol-wf tui <subcommand> ...
 ```
 
-The `tui` command group is intended for two related workflows:
+The `tui` command group covers two related workflows:
 
-1. streaming a live workflow run; and
-2. replaying a previously captured workflow event stream.
+1. replaying a previously captured workflow event stream; and
+2. streaming a live workflow run.
 
-The TUI consumes the same workflow event JSONL format described in [`events.md`](events.md). It should not require a different tracing format.
+The TUI consumes the same workflow event JSONL format described in [`events.md`](events.md). It does not require a different tracing format.
 
-> Status: planned usage. This document describes the intended CLI/user-facing behavior for the TUI implementation.
+> Status: `smol-wf tui replay` is implemented for interactive inspection, timed playback, and `--check` validation. `smol-wf tui run` is planned.
 
 ## Commands
 
 ```txt
-smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]
 smol-wf tui replay <events-jsonl> [replay-options]
+smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]  # planned
 ```
 
-## `smol-wf tui run`
+## `smol-wf tui run` planned
 
 Run a workflow and stream its events into an interactive terminal UI.
 
@@ -94,7 +94,7 @@ smol-wf run ./workflow.mjs --events > events.jsonl
 smol-wf tui replay events.jsonl
 ```
 
-Replay should use the same reducer/rendering path as live mode. This keeps live and replay views consistent.
+Replay starts at the beginning of the event stream with zero events revealed and playback paused. Press `n` to reveal one event at a time or `Space` to start playback. Replay uses a deterministic event reducer to build workflow scope tabs, the timeline/events list, and selected event details. Live mode should use the same reducer when it is implemented.
 
 ### Input
 
@@ -110,7 +110,7 @@ smol-wf tui replay -
 
 #### `--timed`
 
-Replay events using their `elapsedNanos` timing.
+Replay events using their `elapsedNanos` timing once playback is started. Without `--timed`, playback advances as quickly as the terminal loop can render, while `n` still steps one event at a time.
 
 ```sh
 smol-wf tui replay events.jsonl --timed
@@ -136,6 +136,8 @@ Examples:
 - `2.0`: twice as fast;
 - `1.0`: original timing;
 - `0.5`: half speed.
+
+Replay speed is clamped to a practical range of `0.1` to `64.0`. Very small values such as `0.01` would make normal event gaps appear frozen in an interactive terminal.
 
 #### `--max-delay <duration>`
 
@@ -197,7 +199,7 @@ The initial TUI layout prioritizes observability over editing/configuration.
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ smol-workflows  run_...  RUNNING  elapsed 00:01:23  provider pi             │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ [root] [child step_a1b2] [child step_c3d4]                                  │
+│ Workflows   root   child step_a1b2   child step_c3d4        Tab/Shift+Tab    │
 ├───────────────────────────────────┬─────────────────────────────────────────┤
 │ Timeline / Events                 │ Details                                 │
 │                                   │                                         │
@@ -232,12 +234,12 @@ Should show:
 
 ### Workflow scope tabs
 
-Workflow scopes should be represented as tabs instead of a tree. The first tab is always the root workflow. Child workflows follow in the order their `workflow.started` events appear in the JSONL stream.
+Workflow scopes should be represented as an htop-like tab bar instead of a tree. The first tab is always the root workflow. Child workflows follow in the order their `workflow.started` events appear in the JSONL stream. The active tab should be visually highlighted with an inverse/bright style, while inactive tabs remain visible as separate tab segments.
 
 Example tab row:
 
 ```txt
-[root] [child step_a1b2] [child step_c3d4]
+Workflows   root   child step_a1b2   child step_c3d4        Tab/Shift+Tab
 ```
 
 Tab labels should be concise and stable for the current stream:
@@ -246,11 +248,10 @@ Tab labels should be concise and stable for the current stream:
 - child workflow: `child <short-parentStepId>`;
 - if a workflow name is available later, the UI may prefer `name` plus a short ID.
 
-Selecting a tab scopes the timeline/events list to that workflow scope:
+Selecting a tab scopes the timeline/events list:
 
-- root tab shows events with `workflowDepth == 0`;
-- child tab shows events with that child scope's `parentStepId`;
-- an optional `all` view may show the full unfiltered stream.
+- root tab shows the full stream, with child workflow events indented under their workflow scope;
+- child tab shows events with that child scope's `parentStepId`.
 
 Nested workflows should be ordered by JSONL order, not by `parentStepId` value. `parentStepId` is only a correlation key.
 
@@ -265,6 +266,23 @@ The timeline/events pane is on the left. A chronological event list shows:
 - concise payload summary.
 
 The selected timeline entry drives the details pane.
+
+Child workflow events should be visually nested in the root timeline using their `workflowDepth` and `parentStepId`. Switching to a child tab shows only that child workflow scope.
+
+Agent events should be visually grouped by agent session. The first `workflow.agent_event` for a session is rendered as a synthetic-looking group header using its `metadata.sessionId`, and later events for the same session are indented beneath it. The group header is still backed by the first real agent event; no extra event is added to the stream.
+
+Example:
+
+```txt
+00:09.000   workflow.started child=79840680
+00:09.010   workflow.phase Child
+00:09.210   agent codex session=019ea09d events=4
+00:09.211     ├─ thread.started
+00:09.212     ├─ turn.started
+00:09.230     ├─ item.completed
+00:09.240     └─ turn.completed
+00:09.300   workflow.result
+```
 
 Timeline search should use an overlay. Pressing `/` opens a search input overlay without leaving the timeline. Matching entries are highlighted in-place, and navigation keys can jump between matches. Closing the overlay returns focus to the timeline while preserving the current match selection.
 
@@ -281,42 +299,40 @@ For `workflow.agent_event`, pretty view may show provider-specific summaries, bu
 
 ## Keybindings
 
-Suggested default keybindings:
+Implemented replay keybindings:
 
 ```txt
 q / Esc      quit
-?            help
-Tab          cycle focus between timeline and details
-←/→          switch workflow scope tab
-↑/↓          move selection
-PgUp/PgDn    scroll
-Home/End     jump to first/latest event in the active tab
-/            search
-f            filter
-a            show agent events
-l            show logs
-p            show phases
-r            toggle raw JSON/details
+Tab          switch to next workflow scope tab
+Shift+Tab    switch to previous workflow scope tab
+←/→          switch focus between timeline and details panes
+↑/↓          move timeline selection or scroll details, depending on focused pane
+PgUp/PgDn    page timeline selection or details scroll, depending on focused pane
+Home/End     jump to first/latest timeline event; Home scrolls details to top when details is focused
+/            open search overlay
+Enter / Esc  close search overlay
+r            toggle pretty/raw details view
+t            toggle elapsed/local time display
+Space        play/pause replay playback
+n            reveal next event and pause
+p            hide previous event and pause
++            faster
+-            slower
+0            reset speed
 ```
 
-Live-only:
+Planned live-only keybindings:
 
 ```txt
 Space        toggle auto-follow latest event on/off
 c            request cancellation
 ```
 
-In live mode, Space does not pause workflow execution. The workflow continues running and events continue to be collected; it only stops the timeline selection from automatically following the newest event so the user can inspect earlier entries.
+In live mode, Space should not pause workflow execution. The workflow continues running and events continue to be collected; it only stops the timeline selection from automatically following the newest event so the user can inspect earlier entries.
 
-Replay-only:
+Planned significant-event jump keybindings:
 
 ```txt
-Space        play/pause replay playback
-n            next event
-p            previous event
-+            faster
--            slower
-0            reset speed
 [            previous significant event
 ]            next significant event
 ```
@@ -331,7 +347,9 @@ Significant events include:
 
 ## Filtering and search
 
-The TUI should support filtering by:
+Search is implemented with the `/` overlay. It filters/highlights matching timeline entries within the active workflow scope.
+
+Additional filtering is planned for:
 
 - event type;
 - workflow depth;

@@ -191,6 +191,45 @@ fn llm_list_workflows_reports_empty_table() {
 }
 
 #[test]
+fn tui_replay_check_summarizes_event_stream() {
+    let root = temp_dir("tui-replay-check");
+    let events_path = root.join("events.jsonl");
+    fs::write(
+        &events_path,
+        r#"{"type":"workflow.started","metadata":{"runId":"run_test","workflowDepth":0},"data":{"startTime":"2026-06-07T00:00:00Z"}}
+{"type":"workflow.started","elapsedNanos":1,"metadata":{"runId":"run_test","workflowDepth":1,"parentStepId":"step_child"},"data":{"startTime":"2026-06-07T00:00:00Z"}}
+{"type":"workflow.result","elapsedNanos":2,"metadata":{"runId":"run_test","workflowDepth":1,"parentStepId":"step_child"},"data":{"tokenUsage":{"inputTokens":0,"outputTokens":0,"totalTokens":0},"results":{}}}
+{"type":"workflow.agent_event","elapsedNanos":3,"metadata":{"runId":"run_test","workflowDepth":0,"stepId":"step_agent","provider":"debug","sessionId":"debug-session"},"data":{"output":"ok"}}
+{"type":"workflow.result","elapsedNanos":4,"metadata":{"runId":"run_test","workflowDepth":0},"data":{"tokenUsage":{"inputTokens":1,"outputTokens":2,"totalTokens":3},"results":{"ok":true}}}
+"#,
+    )
+    .expect("events should be written");
+
+    let output = smol_wf()
+        .args([
+            "tui",
+            "replay",
+            events_path.to_str().expect("path should be utf8"),
+            "--check",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("total: 5"));
+    assert!(stdout.contains("tabs: 2"));
+    assert!(stdout.contains("agentEvents: 1"));
+    assert!(stdout.contains("rootResults: 1"));
+    assert!(stdout.contains("warnings: 0"));
+}
+
+#[test]
 fn run_passes_prefixed_cli_args_into_workflow_args() {
     let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args([
