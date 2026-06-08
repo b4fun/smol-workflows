@@ -49,7 +49,8 @@
 //! - timeline rows are derived from the event stream. Agent lifecycle/provider
 //!   events are grouped by `metadata.stepId`, root scope shows nested workflows,
 //!   child scopes filter by `parentStepId`, and the visible list has right-side
-//!   scroll indicators plus an 8-row virtual bottom margin;
+//!   scroll indicators plus an 8-row virtual bottom margin. Moving selection to
+//!   the latest row re-enables follow-latest during live/replay updates;
 //! - details has `pretty/raw` in the border (`p` / `r` select modes), a fixed
 //!   top-right metadata overlay (`m` toggles), word-wrapped body text that flows
 //!   around the overlay, right-side scroll indicators, and `y` copies the
@@ -892,9 +893,14 @@ impl TuiReplayApp {
         if len > 0 {
             let previous = self.selected;
             self.selected = (self.selected + 1).min(len - 1);
-            if self.selected != previous {
+            if self.selected == len - 1 {
+                self.follow_latest = true;
+                self.selected_event_anchor = None;
+            } else if self.selected != previous {
                 self.follow_latest = false;
                 self.anchor_current_selection();
+            }
+            if self.selected != previous {
                 self.reset_details_scroll();
             }
         }

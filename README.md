@@ -322,6 +322,28 @@ Writes workflow progress/debug information to stderr without changing the workfl
 | `smol-wf history` | Get workflow runs history. | [`docs/usages/history.md`](docs/usages/history.md) |
 | `smol-wf llm` | LLM-facing helper commands, such as workflow discovery. | [`docs/usages/llm.md`](docs/usages/llm.md) |
 
+### Terminal UI
+
+Use the TUI to observe workflows live or replay a saved event stream.
+
+![smol-wf TUI live workflow demo](docs/assets/smol-wf-tui-stock-demo-30s.gif)
+
+```sh
+# Run a workflow with live event visibility.
+smol-wf tui run ./workflow.mjs --agent-provider pi --args-target "coredns pods under kube-system"
+
+# Save an event stream from a normal run, then replay it.
+smol-wf run ./workflow.mjs --events > events.jsonl
+smol-wf tui replay events.jsonl
+
+# Validate/summarize an event stream without opening the interactive UI.
+smol-wf tui replay events.jsonl --check
+```
+
+The live TUI shows workflow scopes, provider events, token usage, an event-rate graph, selected-event details, and raw/pretty views. Live event logs start unsaved; after the workflow stops, press `s` or choose `save & quit` to write `$PWD/<run-id>.jsonl`. Replay starts paused with zero revealed events and advances according to `elapsedNanos`, with long gaps capped by `--max-delay` (`50ms` by default).
+
+See [`docs/usages/tui.md`](docs/usages/tui.md) for keybindings and replay options.
+
 ## Agent providers
 
 The engine includes built-in agent providers for `debug`, `codex`, `claude-code`, `pi`, and `opencode`. Providers can be selected globally with `--agent-provider` or per call with `agent(prompt, { provider })`.

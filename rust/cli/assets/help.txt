@@ -6,6 +6,13 @@ Running workflows:
     smol-wf run ./workflow.mjs --agent-provider pi --args-target "coredns pods under kube-system"
     smol-wf run ./.agents/workflows/pod-diagnostics.mjs --agent-provider opencode --args-from-file args.json
 
+Terminal UI:
+  smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]
+    Run a workflow and observe live workflow/provider events.
+
+  smol-wf tui replay <events-jsonl> [--max-delay 50ms] [--check]
+    Replay or validate a workflow event JSONL stream.
+
 Run history:
   smol-wf history [flags]
     Show previous workflow runs from the local SQLite history database.
