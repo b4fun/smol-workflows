@@ -8,5 +8,7 @@ pkgs.mkShell {
     rustc
     rustfmt
     clippy
+    vhs
+    ffmpeg
   ];
 }
