@@ -1,0 +1,21 @@
+Running workflows:
+  smol-wf run <workflow-script> [run-options] [--args-<name> value ...]
+    Run a JavaScript workflow. Progress logs go to stderr; final JSON goes to stdout.
+
+  Examples:
+    smol-wf run ./workflow.mjs --agent-provider pi --args-target "coredns pods under kube-system"
+    smol-wf run ./.agents/workflows/pod-diagnostics.mjs --agent-provider opencode --args-from-file args.json
+
+Run history:
+  smol-wf history [flags]
+    Show previous workflow runs from the local SQLite history database.
+
+LLM usage guide:
+  smol-wf llm txt
+    Dump llms.txt-style usage guidance for LLM and coding agents.
+
+Workflow discovery:
+  smol-wf llm list-workflows
+    List workflow scripts under .agents/workflows and .claude/workflows.
+
+Run "smol-wf <command> --help" for command-specific flags.
