@@ -1958,15 +1958,13 @@ fn validate_model_selector_for_provider(
                 bail!("Codex model selectors do not support thinking=...");
             }
         }
-        "claude-code" => {
-            if resolved.model_provider.is_some() {
-                bail!("Claude Code model selectors do not support ?provider=... or provider/model form");
-            }
+        "claude-code" if resolved.model_provider.is_some() => {
+            bail!(
+                "Claude Code model selectors do not support ?provider=... or provider/model form"
+            );
         }
-        "opencode" => {
-            if resolved.model_provider.is_none() {
-                bail!("OpenCode model selectors must use provider/model or ?provider=...");
-            }
+        "opencode" if resolved.model_provider.is_none() => {
+            bail!("OpenCode model selectors must use provider/model or ?provider=...");
         }
         "debug" | "pi" => {}
         _ => {}

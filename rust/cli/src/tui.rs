@@ -1106,17 +1106,13 @@ impl TuiReplayApp {
             KeyCode::BackTab => self.previous_tab(),
             KeyCode::Char('2') => self.focus_pane = FocusPane::Details,
             KeyCode::Char('1') => self.focus_pane = FocusPane::Timeline,
-            KeyCode::Char('p') => {
-                if self.raw_details {
-                    self.raw_details = false;
-                    self.reset_details_scroll();
-                }
+            KeyCode::Char('p') if self.raw_details => {
+                self.raw_details = false;
+                self.reset_details_scroll();
             }
-            KeyCode::Char('r') => {
-                if !self.raw_details {
-                    self.raw_details = true;
-                    self.reset_details_scroll();
-                }
+            KeyCode::Char('r') if !self.raw_details => {
+                self.raw_details = true;
+                self.reset_details_scroll();
             }
             KeyCode::Char('t') => {
                 self.time_display = match self.time_display {
@@ -1125,13 +1121,11 @@ impl TuiReplayApp {
                 }
             }
             KeyCode::Char('m') => self.metadata_open = !self.metadata_open,
-            KeyCode::Char('y') => {
-                if !self.last_details_visible_text.trim().is_empty() {
-                    match copy_to_clipboard(&self.last_details_visible_text) {
-                        Ok(()) => self.toast = Some(ToastMessage::new("content copied")),
-                        Err(error) => {
-                            self.toast = Some(ToastMessage::new(format!("copy failed: {error}")))
-                        }
+            KeyCode::Char('y') if !self.last_details_visible_text.trim().is_empty() => {
+                match copy_to_clipboard(&self.last_details_visible_text) {
+                    Ok(()) => self.toast = Some(ToastMessage::new("content copied")),
+                    Err(error) => {
+                        self.toast = Some(ToastMessage::new(format!("copy failed: {error}")))
                     }
                 }
             }

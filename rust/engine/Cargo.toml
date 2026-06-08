@@ -3,6 +3,9 @@ name = "smol-workflow-engine"
 description = "Rust implementation of the smol-workflows engine."
 version.workspace = true
 edition.workspace = true
+license-file = "../../LICENSE"
+repository = "https://github.com/b4fun/smol-workflows"
+readme = "README.md"
 
 [lib]
 name = "smol_workflow_engine"
