@@ -304,7 +304,10 @@ mod tests {
         let records = store.migration_records().unwrap();
         assert_eq!(records.len(), embedded_migrations::MIGRATIONS.len());
         assert_eq!(records[0].id, 1);
-        assert_eq!(records[0].introduced_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            records[0].introduced_version,
+            embedded_migrations::MIGRATIONS[0].introduced_version
+        );
 
         let table_count: i64 = store
             .connection()
