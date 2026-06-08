@@ -1001,22 +1001,22 @@ struct SkillAsset {
 const SKILL_ASSETS: &[SkillAsset] = &[
     SkillAsset {
         relative_path: "create/SKILL.md",
-        content: include_str!("../../../harness/plugins/smol-workflows/skills/create/SKILL.md"),
+        content: include_str!("../assets/skills/create/SKILL.md"),
         executable: false,
     },
     SkillAsset {
         relative_path: "list/SKILL.md",
-        content: include_str!("../../../harness/plugins/smol-workflows/skills/list/SKILL.md"),
+        content: include_str!("../assets/skills/list/SKILL.md"),
         executable: false,
     },
     SkillAsset {
         relative_path: "run/SKILL.md",
-        content: include_str!("../../../harness/plugins/smol-workflows/skills/run/SKILL.md"),
+        content: include_str!("../assets/skills/run/SKILL.md"),
         executable: false,
     },
     SkillAsset {
         relative_path: "scripts/smol-wf.sh",
-        content: include_str!("../../../harness/plugins/smol-workflows/skills/scripts/smol-wf.sh"),
+        content: include_str!("../assets/skills/scripts/smol-wf.sh"),
         executable: true,
     },
 ];
