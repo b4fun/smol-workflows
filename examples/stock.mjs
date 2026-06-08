@@ -9,7 +9,7 @@ export const meta = {
   ],
 }
 
-const STOCKS = Array.isArray(args.stocks) ? args.stocks.map(String) : ['NVDA', 'SPCE']
+const STOCKS = Array.isArray(args.stocks) ? args.stocks.map(String) : ['NVDA', 'INTC']
 
 // ── Phase 1: Analyze the ask ──────────────────────────────────────────────────
 phase('Analyze')
@@ -153,3 +153,5 @@ Synthesize these findings into a comprehensive investment report. Be direct, opi
 )
 
 export default { decomposition, findings: validFindings, synthesis }
+
+log(synthesis.executiveSummary)

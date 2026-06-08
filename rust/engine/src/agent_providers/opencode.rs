@@ -108,17 +108,23 @@ async fn run_opencode(
         options.timeout_ms,
     )
     .await?;
-    let raw = parse_output(&stdout);
-    let candidate = extract_output(&raw).unwrap_or(stdout);
-    let session_id = extract_session_id(&raw)
+    let parsed = parse_output(&stdout);
+    let events = match &parsed {
+        Value::Array(items) => items.clone(),
+        value => vec![value.clone()],
+    };
+    let candidate = extract_output(&parsed).unwrap_or(stdout);
+    let session_id = extract_session_id(&parsed)
         .context("OpenCode provider response did not include a session id")?;
     Ok(AgentProviderResult {
         output: Value::String(candidate.trim_end().to_string()),
         session_id: Some(session_id),
-        model: extract_model(&raw).or_else(|| option_model(&input.options)),
-        usage: extract_usage(&raw, true),
+        model: extract_model(&parsed).or_else(|| option_model(&input.options)),
+        usage: extract_usage(&parsed, true),
         isolation: None,
-        raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
+        raw: Some(to_json_value(
+            json!({ "events": events, "response": parsed, "stderr": stderr }),
+        )),
     })
 }
 
@@ -199,7 +205,7 @@ async fn run_opencode_via_server(
         usage: extract_usage(&response, true),
         isolation: None,
         raw: Some(to_json_value(
-            json!({ "session": session, "response": response, "serverLogs": logs }),
+            json!({ "events": [session, response], "session": session, "response": response, "serverLogs": logs }),
         )),
     })
 }
@@ -286,7 +292,7 @@ async fn run_opencode_structured(
         usage: extract_usage(&response, true),
         isolation: None,
         raw: Some(to_json_value(
-            json!({ "session": session, "response": response, "serverLogs": logs }),
+            json!({ "events": [session, response], "session": session, "response": response, "serverLogs": logs }),
         )),
     })
 }

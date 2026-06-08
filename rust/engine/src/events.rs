@@ -27,8 +27,14 @@ pub enum WorkflowEventType {
     Phase,
     /// Workflow code called `log(...)`.
     Log,
+    /// A workflow-owned `agent(...)` call started.
+    AgentStarted,
     /// Raw provider event payload associated with an `agent(...)` call.
     AgentEvent,
+    /// A workflow-owned `agent(...)` call completed successfully.
+    AgentCompleted,
+    /// A workflow-owned `agent(...)` call failed.
+    AgentFailed,
     /// A workflow scope completed successfully.
     Result,
     /// A workflow scope failed after event streaming had started.
@@ -47,7 +53,10 @@ impl WorkflowEventType {
             Self::Started => "workflow.started",
             Self::Phase => "workflow.phase",
             Self::Log => "workflow.log",
+            Self::AgentStarted => "workflow.agent_started",
             Self::AgentEvent => "workflow.agent_event",
+            Self::AgentCompleted => "workflow.agent_completed",
+            Self::AgentFailed => "workflow.agent_failed",
             Self::Result => "workflow.result",
             Self::Error => "workflow.error",
             Self::Other(event_type) => event_type.as_str(),
@@ -61,7 +70,10 @@ impl From<&str> for WorkflowEventType {
             "workflow.started" => Self::Started,
             "workflow.phase" => Self::Phase,
             "workflow.log" => Self::Log,
+            "workflow.agent_started" => Self::AgentStarted,
             "workflow.agent_event" => Self::AgentEvent,
+            "workflow.agent_completed" => Self::AgentCompleted,
+            "workflow.agent_failed" => Self::AgentFailed,
             "workflow.result" => Self::Result,
             "workflow.error" => Self::Error,
             value => Self::Other(value.to_string()),
@@ -230,10 +242,40 @@ impl WorkflowEvent {
         }
     }
 
+    /// Construct a `workflow.agent_started` event.
+    pub fn agent_started(data: Value, metadata: WorkflowEventMetadata) -> Self {
+        Self {
+            event_type: WorkflowEventType::AgentStarted,
+            elapsed_nanos: None,
+            metadata: Some(metadata),
+            data,
+        }
+    }
+
     /// Construct a `workflow.agent_event` event from raw provider data.
     pub fn agent_event(data: Value, metadata: WorkflowEventMetadata) -> Self {
         Self {
             event_type: WorkflowEventType::AgentEvent,
+            elapsed_nanos: None,
+            metadata: Some(metadata),
+            data,
+        }
+    }
+
+    /// Construct a `workflow.agent_completed` event.
+    pub fn agent_completed(data: Value, metadata: WorkflowEventMetadata) -> Self {
+        Self {
+            event_type: WorkflowEventType::AgentCompleted,
+            elapsed_nanos: None,
+            metadata: Some(metadata),
+            data,
+        }
+    }
+
+    /// Construct a `workflow.agent_failed` event.
+    pub fn agent_failed(data: Value, metadata: WorkflowEventMetadata) -> Self {
+        Self {
+            event_type: WorkflowEventType::AgentFailed,
             elapsed_nanos: None,
             metadata: Some(metadata),
             data,

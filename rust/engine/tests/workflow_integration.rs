@@ -535,8 +535,10 @@ export default { agent: await agent("inspect cluster") };
             "workflow.started",
             "workflow.phase",
             "workflow.log",
+            "workflow.agent_started",
             "workflow.agent_event",
             "workflow.agent_event",
+            "workflow.agent_completed",
             "workflow.result",
         ]
     );
@@ -556,15 +558,19 @@ export default { agent: await agent("inspect cluster") };
         events[2].data,
         json!({ "message": "checking {\"target\":\"cluster\"}" })
     );
+    assert_eq!(events[3].event_type.as_str(), "workflow.agent_started");
+    assert_eq!(events[3].data["phase"], json!("Inspect"));
     assert_eq!(
-        events[3].data,
+        events[4].data["providerEvent"],
         json!({ "type": "provider.start", "prompt": "inspect cluster" })
     );
+    assert_eq!(events[4].data["provider"], json!("raw-events"));
+    assert_eq!(events[4].data["sessionId"], json!("raw-session-1"));
     assert_eq!(
-        events[4].data,
+        events[5].data["providerEvent"],
         json!({ "type": "provider.done", "session": "raw-session-1" })
     );
-    for event in &events[3..=4] {
+    for event in &events[4..=5] {
         let metadata = event
             .metadata
             .as_ref()
@@ -574,8 +580,13 @@ export default { agent: await agent("inspect cluster") };
         assert_eq!(metadata.session_id.as_deref(), Some("raw-session-1"));
         assert_eq!(metadata.run_id, None);
     }
+    assert_eq!(events[6].event_type.as_str(), "workflow.agent_completed");
     assert_eq!(
-        events[5].data,
+        events[6].metadata.as_ref().unwrap().session_id.as_deref(),
+        Some("raw-session-1")
+    );
+    assert_eq!(
+        events[7].data,
         json!({
             "tokenUsage": {
                 "inputTokens": 3,

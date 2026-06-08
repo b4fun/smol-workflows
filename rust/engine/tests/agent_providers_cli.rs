@@ -60,6 +60,11 @@ async fn claude_code_provider_invokes_print_mode_and_extracts_usage() {
     assert_eq!(usage.cache_write_tokens, Some(4));
     assert_eq!(usage.total_tokens, Some(24));
     assert_eq!(usage.cost.unwrap().total, Some(0.123));
+    assert_eq!(result.raw.as_ref().unwrap()["events"][0]["type"], "result");
+    assert_eq!(
+        result.raw.as_ref().unwrap()["events"][0]["session_id"],
+        "claude-session-1"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -78,10 +83,11 @@ async fn claude_code_provider_parses_structured_output_and_stdin() {
     assert_eq!(result.output["summary"], "structured claude summary");
     assert_eq!(result.output["prompt"], "structured snapshot");
     assert_eq!(
-        result.raw.as_ref().unwrap()["response"]["argv"],
+        result.raw.as_ref().unwrap()["events"][0]["argv"],
         json!([
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--input-format",
             "text",
             "--json-schema",
@@ -110,12 +116,13 @@ async fn claude_code_provider_maps_agent_type_to_agent_flag() {
         .expect("provider should run");
 
     assert_eq!(
-        result.raw.as_ref().unwrap()["response"]["argv"],
+        result.raw.as_ref().unwrap()["events"][0]["argv"],
         json!([
             "--agent",
             "reviewer",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--input-format",
             "text",
             "--print"
@@ -303,6 +310,11 @@ async fn opencode_provider_supports_json_run_and_structured_server_mode() {
     assert_eq!(result.output, json!("fake opencode: hello opencode"));
     assert_eq!(result.session_id.as_deref(), Some("opencode-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(19));
+    assert_eq!(result.raw.as_ref().unwrap()["events"][0]["type"], "session");
+    assert_eq!(
+        result.raw.as_ref().unwrap()["events"][0]["sessionID"],
+        "opencode-session-1"
+    );
 
     let long_prompt = format!("long opencode {}", "x".repeat(40_000));
     let long = provider
@@ -311,7 +323,14 @@ async fn opencode_provider_supports_json_run_and_structured_server_mode() {
         .expect("long prompt should use server transport");
     assert_eq!(long.output, json!(format!("fake opencode: {long_prompt}")));
     assert_eq!(
-        long.raw.as_ref().unwrap()["response"]["request"]["parts"][0]["text"],
+        long.raw.as_ref().unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        long.raw.as_ref().unwrap()["events"][1]["request"]["parts"][0]["text"],
         long_prompt
     );
 
@@ -325,11 +344,11 @@ async fn opencode_provider_supports_json_run_and_structured_server_mode() {
         Some("opencode-session-structured")
     );
     assert_eq!(
-        structured.raw.as_ref().unwrap()["response"]["request"]["format"]["type"],
+        structured.raw.as_ref().unwrap()["events"][1]["request"]["format"]["type"],
         "json_schema"
     );
     assert_eq!(
-        structured.raw.as_ref().unwrap()["response"]["request"]["format"]["retryCount"],
+        structured.raw.as_ref().unwrap()["events"][1]["request"]["format"]["retryCount"],
         2
     );
 
@@ -426,6 +445,11 @@ async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output(
     assert_eq!(result.output, json!("fake pi: hello pi"));
     assert_eq!(result.session_id.as_deref(), Some("pi-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(26));
+    assert_eq!(result.raw.as_ref().unwrap()["events"][0]["type"], "session");
+    assert_eq!(
+        result.raw.as_ref().unwrap()["events"][0]["id"],
+        "pi-session-1"
+    );
 
     let long_prompt = format!("long prompt {}", "x".repeat(40_000));
     let long = provider

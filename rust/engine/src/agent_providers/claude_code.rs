@@ -64,7 +64,8 @@ async fn run_claude_code(
     }
     args.extend([
         "--output-format".into(),
-        "json".into(),
+        "stream-json".into(),
+        "--verbose".into(),
         "--input-format".into(),
         "text".into(),
     ]);
@@ -84,11 +85,21 @@ async fn run_claude_code(
         options.timeout_ms,
     )
     .await?;
-    let raw = parse_json_or_text(&stdout);
+    let events = parse_json_lines(&stdout);
+    let raw = if events.is_empty() {
+        parse_json_or_text(&stdout)
+    } else {
+        Value::Array(events.clone())
+    };
     let structured = option_schema(&input.options).is_some();
     let output = extract_output(&raw, structured)?;
     let session_id = extract_session_id(&raw)
         .context("Claude Code provider response did not include a session id")?;
+    let event_payloads = if events.is_empty() {
+        vec![raw.clone()]
+    } else {
+        events
+    };
 
     Ok(AgentProviderResult {
         output,
@@ -96,7 +107,9 @@ async fn run_claude_code(
         model: extract_model(&raw).or_else(|| option_model(&input.options)),
         usage: extract_usage(&raw),
         isolation: None,
-        raw: Some(to_json_value(json!({ "response": raw, "stderr": stderr }))),
+        raw: Some(to_json_value(
+            json!({ "events": event_payloads, "response": raw, "stderr": stderr }),
+        )),
     })
 }
 
@@ -122,16 +135,25 @@ fn extract_output(raw: &Value, structured: bool) -> anyhow::Result<Value> {
 }
 
 fn extract_structured_output(raw: &Value) -> Option<Value> {
-    let record = raw.as_object()?;
-    record
-        .get("structured_output")
-        .or_else(|| record.get("structuredOutput"))
-        .cloned()
+    match raw {
+        Value::Array(items) => items.iter().find_map(extract_structured_output),
+        Value::Object(record) => record
+            .get("structured_output")
+            .or_else(|| record.get("structuredOutput"))
+            .cloned(),
+        _ => None,
+    }
 }
 
 fn extract_output_candidate(raw: &Value) -> Value {
     match raw {
         Value::String(_) => raw.clone(),
+        Value::Array(items) => items
+            .iter()
+            .rev()
+            .map(extract_output_candidate)
+            .find(|value| !value.is_null())
+            .unwrap_or_else(|| raw.clone()),
         Value::Object(record) => {
             for key in ["result", "output", "text", "content"] {
                 if let Some(value) = record.get(key) {
@@ -191,29 +213,47 @@ fn extract_fenced_json(text: &str) -> Option<&str> {
 }
 
 fn extract_session_id(raw: &Value) -> Option<String> {
-    let record = raw.as_object()?;
-    record
-        .get("session_id")
-        .or_else(|| record.get("sessionId"))
-        .or_else(|| record.get("sessionID"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
+    match raw {
+        Value::Array(items) => items.iter().find_map(extract_session_id),
+        Value::Object(record) => {
+            if let Some(value) = record
+                .get("session_id")
+                .or_else(|| record.get("sessionId"))
+                .or_else(|| record.get("sessionID"))
+                .and_then(Value::as_str)
+            {
+                return Some(value.to_string());
+            }
+            record.values().find_map(extract_session_id)
+        }
+        _ => None,
+    }
 }
 
 fn extract_usage(raw: &Value) -> Option<AgentUsage> {
-    let usage = find_first_usage_object(raw)?;
-    let mut normalized = normalize_usage(&usage);
+    let mut usage_objects = Vec::new();
+    find_usage_objects(raw, &mut usage_objects);
+    let usage = usage_objects.last()?;
+    let mut normalized = normalize_usage(usage);
     if normalized.cost.is_none() {
-        if let Some(root) = raw.as_object() {
-            if let Some(total) = number_field_f64(root, &["total_cost_usd", "costUSD", "cost_usd"])
-            {
-                normalized.cost = Some(AgentUsageCost {
-                    total: Some(total),
-                    currency: Some("USD".into()),
-                    ..AgentUsageCost::default()
-                });
-            }
+        if let Some(total) = find_total_cost_usd(raw) {
+            normalized.cost = Some(AgentUsageCost {
+                total: Some(total),
+                currency: Some("USD".into()),
+                ..AgentUsageCost::default()
+            });
         }
     }
     Some(normalized)
+}
+
+fn find_total_cost_usd(value: &Value) -> Option<f64> {
+    match value {
+        Value::Array(items) => items.iter().find_map(find_total_cost_usd),
+        Value::Object(record) => {
+            number_field_f64(record, &["total_cost_usd", "costUSD", "cost_usd"])
+                .or_else(|| record.values().find_map(find_total_cost_usd))
+        }
+        _ => None,
+    }
 }

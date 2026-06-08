@@ -2,7 +2,7 @@ use super::types::{
     AgentProvider, AgentProviderResult, AgentProviderRunInput, AgentProviderSchemaMode,
     AgentProviderUsageMode, AgentUsage, AgentUsageCost,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DebugAgentProvider;
@@ -65,7 +65,7 @@ impl AgentProvider for DebugAgentProvider {
                 ..AgentUsage::default()
             }),
             isolation: None,
-            raw: Some(json!({ "output": output })),
+            raw: None,
         })
     }
 }

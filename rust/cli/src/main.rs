@@ -1,7 +1,8 @@
 mod dto_history;
 mod paths;
+mod tui;
 
-use clap::{Arg, Command as ClapCommand};
+use clap::{Arg, ArgAction, Command as ClapCommand};
 use comfy_table::{presets::NOTHING, Cell, Table};
 use dto_history::{
     HistoryAttempt, HistoryOptions, HistoryRunDetail, HistoryRunSummary, HistoryStep,
@@ -86,6 +87,34 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 .await
             }
             Some(("list-workflows", _)) => list_workflows_command(Vec::new()).await,
+            _ => Ok(()),
+        },
+        Some(("tui", matches)) => match matches.subcommand() {
+            Some(("run", matches)) => {
+                let script_path = matches
+                    .get_one::<String>("workflow-script")
+                    .expect("required by clap")
+                    .clone();
+                let run_args = matches
+                    .get_many::<String>("run-args")
+                    .map(|values| values.cloned().collect())
+                    .unwrap_or_default();
+                tui_run_command(script_path, run_args).await
+            }
+            Some(("replay", matches)) => {
+                let path = matches
+                    .get_one::<String>("events-jsonl")
+                    .expect("required by clap");
+                let max_delay = matches
+                    .get_one::<String>("max-delay")
+                    .map(|value| tui::parse_duration(value))
+                    .transpose()?;
+                tui::replay_command(tui::ReplayCommandOptions {
+                    path: PathBuf::from(path),
+                    check: matches.get_flag("check"),
+                    max_delay,
+                })
+            }
             _ => Ok(()),
         },
         Some(("history", matches)) => {
@@ -1256,6 +1285,35 @@ struct CliTokenUsageReport {
     total_tokens: u64,
 }
 
+async fn tui_run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
+    let options = parse_run_options(argv)?;
+    init_logging(options.log_level);
+
+    if options.events {
+        anyhow::bail!(
+            "--events is not supported with smol-wf tui run; the TUI consumes events directly"
+        );
+    }
+
+    let session_log_sink = options.save_raw_sessions.clone().map(|raw_session_dir| {
+        Arc::new(FileAgentSessionLogSink {
+            root: raw_session_dir,
+        }) as Arc<dyn AgentSessionLogSink>
+    });
+
+    tui::run_command(tui::RunCommandOptions {
+        script_path: PathBuf::from(script_path),
+        args: Value::Object(options.args),
+        agent_provider: options.agent_provider,
+        db_path: options.db_path,
+        db_path_is_default: options.db_path_is_default,
+        budget_total: options.budget_allowance,
+        max_parallel_agent_requests: options.max_parallel_agent_requests,
+        resume_run_id: options.resume_run_id,
+        session_log_sink,
+    })
+}
+
 async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<()> {
     let options = parse_run_options(argv)?;
     init_logging(options.log_level);
@@ -1906,6 +1964,59 @@ fn cli_command() -> ClapCommand {
                 )
                 .after_help(
                     "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --model-map alias:selector (repeatable)\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("tui")
+                .about("Interactively inspect workflow event streams")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    ClapCommand::new("run")
+                        .about("Run a workflow and stream live events in a terminal UI")
+                        .arg(
+                            Arg::new("workflow-script")
+                                .value_name("workflow-script")
+                                .help("Workflow JavaScript module to run")
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("run-args")
+                                .value_name("run-options")
+                                .help("Run options and workflow args")
+                                .num_args(0..)
+                                .trailing_var_arg(true)
+                                .allow_hyphen_values(true),
+                        )
+                        .after_help(
+                            "Run options match smol-wf run, except --events is not supported because the TUI consumes events directly.",
+                        ),
+                )
+                .subcommand(
+                    ClapCommand::new("replay")
+                        .about("Replay a workflow event JSONL stream in a terminal UI")
+                        .arg(
+                            Arg::new("events-jsonl")
+                                .value_name("events-jsonl")
+                                .help("Workflow event JSONL file to replay")
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("check")
+                                .long("check")
+                                .help("Validate and summarize the event stream without opening the TUI")
+                                .action(ArgAction::SetTrue),
+                        )
+                        .arg(
+                            Arg::new("max-delay")
+                                .long("max-delay")
+                                .value_name("duration")
+                                .help("Cap replay pauses, e.g. 5s or 250ms; defaults to 50ms")
+                                .num_args(1),
+                        )
+                        .after_help(
+                            "Examples:\n  smol-wf run ./workflow.mjs --events > events.jsonl\n  smol-wf tui replay events.jsonl\n  smol-wf tui replay events.jsonl --max-delay 5s\n  smol-wf tui replay events.jsonl --check",
+                        ),
                 ),
         )
         .subcommand(

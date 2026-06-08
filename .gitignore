@@ -2,6 +2,8 @@
 *.db-*
 *.sqlite
 *.sqlite-*
+# events log
+*.jsonl
 
 # direnv
 .direnv/
@@ -9,3 +11,4 @@
 
 # Rust
 /target/
+

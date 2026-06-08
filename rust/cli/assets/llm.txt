@@ -24,6 +24,16 @@ Commands:
     Run a workflow script. Progress is written to stderr. The final JSON report
     is written to stdout unless --events is used.
 
+  smol-wf tui run <workflow-script> [run-options] [--args-<name> value ...]
+    Run a workflow in the terminal UI and observe live workflow/provider events.
+    Live runs start with an unsaved event log; after the workflow stops, press
+    s or choose save & quit to write $PWD/<run-id>.jsonl.
+
+  smol-wf tui replay <events-jsonl> [--max-delay 50ms] [--check]
+    Replay a workflow event JSONL stream in the terminal UI. Replay starts
+    paused with zero revealed events and uses elapsedNanos timing. --check
+    validates/summarizes the stream without opening the interactive UI.
+
 Common run options:
   --agent-provider debug|claude-code|codex|opencode|pi
   --model-map alias:selector        Repeatable model alias mapping.
@@ -31,9 +41,17 @@ Common run options:
   --max-parallel-agents count       Optional agent concurrency cap.
   --args-<name> value               Pass a workflow argument.
   --args-from-file <json-file>      Load workflow arguments from a JSON object.
+  --events                          Write workflow event JSONL to stdout.
 
 Default run stdout JSON shape:
   {"tokenUsage":{"inputTokens":0,"outputTokens":0,"totalTokens":0},"runID":"run_...","results":{}}
+
+Workflow event stream shape:
+  {"type":"workflow.started","elapsedNanos":0,"metadata":{"runId":"run_...","workflowDepth":0},"data":{}}
+  Common types include workflow.started, workflow.phase, workflow.log,
+  workflow.agent_started, workflow.agent_event, workflow.agent_completed,
+  workflow.agent_failed, workflow.result, and workflow.error. Agent provider
+  events are wrapped in workflow.agent_event.data.providerEvent.
 
 Workflow script shape:
   export const meta = { name: "my-workflow", description: "What it does" }
