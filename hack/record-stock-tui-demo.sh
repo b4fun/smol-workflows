@@ -10,8 +10,8 @@
 #   6. Copies the 30s outputs to docs/assets/.
 #
 # Requirements:
-#   - nix-shell must be available. The script uses:
-#       nix-shell -p vhs ffmpeg
+#   - vhs and ffmpeg must be available on PATH. The repository shell.nix includes
+#     both tools for development shells.
 #
 # Usage:
 #   hack/record-stock-tui-demo.sh
@@ -46,6 +46,19 @@ RESEARCH_WAIT="${SMOL_WF_RESEARCH_WAIT:-240s}"
 DONE_WAIT="${SMOL_WF_DONE_WAIT:-300s}"
 SAVE_WAIT="${SMOL_WF_SAVE_WAIT:-60s}"
 ASSET_BASENAME="smol-wf-tui-stock-demo-30s"
+
+command -v vhs >/dev/null || {
+  echo "error: vhs is required on PATH" >&2
+  exit 1
+}
+command -v ffmpeg >/dev/null || {
+  echo "error: ffmpeg is required on PATH" >&2
+  exit 1
+}
+command -v ffprobe >/dev/null || {
+  echo "error: ffprobe is required on PATH" >&2
+  exit 1
+}
 
 mkdir -p "$WORKSPACE" "$ROOT/docs/assets"
 
@@ -120,17 +133,14 @@ Sleep 2s
 EOF
 
 cd "$WORKSPACE"
-nix-shell -p vhs ffmpeg --run 'vhs stock-live.tape'
+vhs stock-live.tape
 
-nix-shell -p ffmpeg --run '
-set -euo pipefail
 duration=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 stock-live.mp4)
-setpts=$(awk -v d="$duration" "BEGIN { printf \"%.8f\", 30.0/d }")
+setpts=$(awk -v d="$duration" 'BEGIN { printf "%.8f", 30.0/d }')
 echo "duration=$duration setpts=$setpts"
 ffmpeg -y -i stock-live.mp4 -filter:v "setpts=${setpts}*PTS" -an -movflags +faststart stock-live-30s.mp4
 ffmpeg -y -i stock-live-30s.mp4 -vf "fps=12,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" stock-live-30s.palette.png
 ffmpeg -y -i stock-live-30s.mp4 -i stock-live-30s.palette.png -lavfi "fps=12,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" stock-live-30s.gif
-'
 
 cp "$WORKSPACE/stock-live-30s.mp4" "$ROOT/docs/assets/$ASSET_BASENAME.mp4"
 cp "$WORKSPACE/stock-live-30s.gif" "$ROOT/docs/assets/$ASSET_BASENAME.gif"
