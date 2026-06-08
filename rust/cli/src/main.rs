@@ -1308,6 +1308,7 @@ async fn tui_run_command(script_path: String, argv: Vec<String>) -> anyhow::Resu
         db_path: options.db_path,
         db_path_is_default: options.db_path_is_default,
         budget_total: options.budget_allowance,
+        model_map: options.model_map,
         max_parallel_agent_requests: options.max_parallel_agent_requests,
         resume_run_id: options.resume_run_id,
         session_log_sink,

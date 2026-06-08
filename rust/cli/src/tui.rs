@@ -79,6 +79,7 @@ use smol_workflow_engine::durable::runner::{run_local_durable_workflow, LocalDur
 use smol_workflow_engine::durable::sqlite::SqliteDurableStore;
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventMetadata, WorkflowEventType};
 use smol_workflow_engine::workflow::AgentSessionLogSink;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Stdout, Write};
 use std::path::{Path, PathBuf};
@@ -115,6 +116,7 @@ pub struct RunCommandOptions {
     pub db_path: PathBuf,
     pub db_path_is_default: bool,
     pub budget_total: Option<u64>,
+    pub model_map: BTreeMap<String, String>,
     pub max_parallel_agent_requests: Option<usize>,
     pub resume_run_id: Option<String>,
     pub session_log_sink: Option<Arc<dyn AgentSessionLogSink>>,
@@ -187,6 +189,7 @@ fn run_workflow_in_thread(
         let mut durable_options =
             LocalDurableRunOptions::new(options.script_path, options.args, provider);
         durable_options.budget_total = options.budget_total;
+        durable_options.model_map = options.model_map;
         durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;
         durable_options.resume_run_id = options.resume_run_id;
         durable_options.cancel_rx = Some(cancel_rx);
