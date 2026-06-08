@@ -30,6 +30,39 @@ fn smol_wf_run(script: &str) -> Command {
 }
 
 #[test]
+fn packaged_skill_assets_match_harness_sources() {
+    let cli_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = cli_root
+        .parent()
+        .and_then(Path::parent)
+        .expect("CLI crate should live under rust/cli");
+    let source_root = repo_root.join("harness/plugins/smol-workflows/skills");
+
+    if !source_root.exists() {
+        // The published crate intentionally contains only the copied assets, not
+        // the repository-level harness tree. Skip this source-tree sync check
+        // when tests are run from a packaged crate.
+        return;
+    }
+
+    for asset in [
+        "create/SKILL.md",
+        "list/SKILL.md",
+        "run/SKILL.md",
+        "scripts/smol-wf.sh",
+    ] {
+        let source = fs::read_to_string(source_root.join(asset))
+            .unwrap_or_else(|error| panic!("failed to read source asset {asset}: {error}"));
+        let packaged = fs::read_to_string(cli_root.join("assets/skills").join(asset))
+            .unwrap_or_else(|error| panic!("failed to read packaged asset {asset}: {error}"));
+        assert_eq!(
+            packaged, source,
+            "rust/cli/assets/skills/{asset} is out of sync; run hack/sync-cli-skill-assets.sh"
+        );
+    }
+}
+
+#[test]
 fn run_help_does_not_treat_h_as_script_path() {
     let output = smol_wf()
         .args(["run", "-h"])

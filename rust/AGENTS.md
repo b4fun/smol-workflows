@@ -14,6 +14,15 @@ Examples:
 
 When making user-visible CLI changes, also review and update `rust/cli/assets/llm.txt` so `smol-wf llm txt` stays accurate for coding agents.
 
+The CLI also packages copies of the smol-workflows agent skills under `rust/cli/assets/skills/` because published Cargo crates cannot include files from the repository-level `harness/` tree. Treat `harness/plugins/smol-workflows/skills/` as the canonical source. After editing those harness skills, run:
+
+```sh
+./hack/sync-cli-skill-assets.sh
+cargo test -p smol-workflow-cli --test cli packaged_skill_assets_match_harness_sources
+```
+
+Do not hand-copy the files. The sync test is intended to catch drift between the harness skills and the packaged CLI copies.
+
 After making Rust workspace changes, run the relevant format, lint, and test commands before handing off. At minimum, prefer:
 
 ```sh
