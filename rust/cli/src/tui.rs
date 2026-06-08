@@ -1955,8 +1955,7 @@ fn render_event_count_details(
     let graph_height = 1usize;
     let graph_width = usize::from(area.width)
         .saturating_sub(observed.to_string().len() + 1)
-        .min(12)
-        .max(1);
+        .clamp(1, 12);
     let mut lines = vec![Line::from(Span::styled(
         "events",
         Style::default()
