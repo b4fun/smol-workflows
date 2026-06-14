@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Local git-worktree sandbox provider for smol-workflows.
+
+This provider is a local development/reference provider. It creates a temporary
+`git worktree` for the requested host repository and returns that directory as
+the sandbox cwd. It is not a security sandbox.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+from typing import Any
+
+PROVIDER = "local-worktree"
+ROOT_ENV = "SMOL_WORKFLOW_SANDBOX_WORKTREE_ROOT"
+
+
+@dataclass(frozen=True)
+class Metadata:
+    protocol_version: str
+    request_id: str
+    sandbox_group_id: str
+    tags: dict[str, str]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Metadata:
+        return cls(
+            protocol_version=str(data.get("protocol_version", "sandbox.v1")),
+            request_id=str(data.get("request_id", "")),
+            sandbox_group_id=str(data.get("sandbox_group_id", "default")),
+            tags={str(k): str(v) for k, v in data.get("tags", {}).items()},
+        )
+
+
+@dataclass(frozen=True)
+class ProfileRef:
+    provider: str
+    name: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProfileRef:
+        return cls(provider=str(data.get("provider", "")), name=str(data.get("name", "")))
+
+
+@dataclass(frozen=True)
+class WorkspaceSync:
+    host_path: Path
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorkspaceSync:
+        return cls(host_path=Path(str(data["host_path"])))
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    exec: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"exec": self.exec}
+
+
+@dataclass(frozen=True)
+class ProviderError:
+    code: str
+    message: str
+    retryable: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SandboxSession:
+    id: str
+    cwd: str | None = None
+    capabilities: Capabilities = Capabilities()
+    provider_session_id: str | None = None
+    provider_state_json: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "id": self.id,
+            "capabilities": self.capabilities.to_dict(),
+        }
+        if self.provider_session_id is not None:
+            data["provider_session_id"] = self.provider_session_id
+        if self.cwd is not None:
+            data["cwd"] = self.cwd
+        if self.provider_state_json is not None:
+            data["provider_state_json"] = self.provider_state_json
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SandboxSession:
+        capabilities = data.get("capabilities", {})
+        return cls(
+            id=str(data["id"]),
+            cwd=optional_str(data.get("cwd")),
+            capabilities=Capabilities(exec=bool(capabilities.get("exec", False))),
+            provider_session_id=optional_str(data.get("provider_session_id")),
+            provider_state_json=optional_str(data.get("provider_state_json")),
+        )
+
+
+@dataclass(frozen=True)
+class OpenSandboxRequest:
+    metadata: Metadata
+    profile: ProfileRef
+    workspace_sync: WorkspaceSync
+    cwd: str | None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OpenSandboxRequest:
+        return cls(
+            metadata=Metadata.from_dict(data.get("metadata", {})),
+            profile=ProfileRef.from_dict(data.get("profile", {})),
+            workspace_sync=WorkspaceSync.from_dict(data["workspace_sync"]),
+            cwd=optional_str(data.get("cwd")),
+        )
+
+
+@dataclass(frozen=True)
+class CloseSandboxRequest:
+    metadata: Metadata
+    session: SandboxSession
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CloseSandboxRequest:
+        return cls(
+            metadata=Metadata.from_dict(data.get("metadata", {})),
+            session=SandboxSession.from_dict(data.get("session", {})),
+        )
+
+
+@dataclass(frozen=True)
+class CleanupSandboxGroupRequest:
+    metadata: Metadata
+    sandbox_group_id: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CleanupSandboxGroupRequest:
+        return cls(
+            metadata=Metadata.from_dict(data.get("metadata", {})),
+            sandbox_group_id=str(data.get("sandbox_group_id", "default")),
+        )
+
+
+@dataclass(frozen=True)
+class WorktreeProviderState:
+    repo_path: Path
+    worktree_path: Path
+    branch_name: str
+    state_path: Path
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "repo_path": str(self.repo_path),
+                "worktree_path": str(self.worktree_path),
+                "branch_name": self.branch_name,
+                "state_path": str(self.state_path),
+            },
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> WorktreeProviderState:
+        data = json.loads(value)
+        return cls(
+            repo_path=Path(data["repo_path"]),
+            worktree_path=Path(data["worktree_path"]),
+            branch_name=str(data["branch_name"]),
+            state_path=Path(data["state_path"]),
+        )
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        write_error("missing_command", "missing sandbox provider command", False)
+        return 0
+
+    command = sys.argv[1]
+    try:
+        if command == "capabilities":
+            return capabilities()
+        if command == "open":
+            return open_sandbox()
+        if command == "close":
+            return close_sandbox()
+        if command == "cleanup-group":
+            return cleanup_group()
+        if command == "exec":
+            write_json({"error": provider_error("unsupported", "local-worktree does not support exec", False)})
+            return 0
+
+        write_json({"error": provider_error("unknown_command", f"unknown sandbox provider command `{command}`", False)})
+        return 0
+    except Exception as error:  # noqa: BLE001 - provider errors should become JSON when possible.
+        print(f"local-worktree provider error: {error}", file=sys.stderr)
+        write_error("provider_failure", str(error), False)
+        return 0
+
+
+def capabilities() -> int:
+    read_request()
+    write_json({"capabilities": Capabilities(exec=False).to_dict()})
+    return 0
+
+
+def open_sandbox() -> int:
+    request = OpenSandboxRequest.from_dict(read_request())
+    if request.profile.provider != PROVIDER:
+        write_json({"error": provider_error(
+            "bad_profile",
+            f"local-worktree can only open provider `{PROVIDER}`, got `{request.profile.provider}`",
+            False,
+        )})
+        return 0
+
+    repo_path = Path(git_stdout(request.workspace_sync.host_path, "rev-parse", "--show-toplevel").strip())
+    head = git_stdout(repo_path, "rev-parse", "HEAD").strip()
+
+    session_id = f"local_worktree_{unique_suffix()}"
+    branch_name = f"smol-wf-sandbox-{session_id}"
+    group_dir = provider_root() / sanitize_path_component(request.metadata.sandbox_group_id)
+    worktrees_dir = group_dir / "worktrees"
+    sessions_dir = group_dir / "sessions"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    worktree_path = worktrees_dir / session_id
+    state_path = sessions_dir / f"{session_id}.json"
+    git_check(repo_path, "worktree", "add", "-b", branch_name, str(worktree_path), head)
+
+    cwd = effective_cwd(worktree_path, request.cwd)
+    state = WorktreeProviderState(
+        repo_path=repo_path,
+        worktree_path=worktree_path,
+        branch_name=branch_name,
+        state_path=state_path,
+    )
+    state_json = state.to_json()
+    state_path.write_text(state_json, encoding="utf-8")
+
+    session = SandboxSession(
+        id=session_id,
+        cwd=str(cwd),
+        capabilities=Capabilities(exec=False),
+        provider_state_json=state_json,
+    )
+    write_json({"session": session.to_dict()})
+    return 0
+
+
+def close_sandbox() -> int:
+    request = CloseSandboxRequest.from_dict(read_request())
+    if request.session.provider_state_json:
+        close_state(WorktreeProviderState.from_json(request.session.provider_state_json))
+    write_json({})
+    return 0
+
+
+def cleanup_group() -> int:
+    request = CleanupSandboxGroupRequest.from_dict(read_request())
+    group_dir = provider_root() / sanitize_path_component(request.sandbox_group_id)
+    sessions_dir = group_dir / "sessions"
+    cleaned_count = 0
+
+    if sessions_dir.exists():
+        for state_path in sessions_dir.glob("*.json"):
+            try:
+                state = WorktreeProviderState.from_json(state_path.read_text(encoding="utf-8"))
+                close_state(state)
+                cleaned_count += 1
+            except Exception as error:  # noqa: BLE001 - cleanup is best-effort.
+                print(f"failed to clean {state_path}: {error}", file=sys.stderr)
+
+    shutil.rmtree(group_dir, ignore_errors=True)
+    write_json({"cleaned_count": cleaned_count})
+    return 0
+
+
+def close_state(state: WorktreeProviderState) -> None:
+    if state.worktree_path.exists():
+        git_best_effort(state.repo_path, "worktree", "remove", "--force", str(state.worktree_path))
+    git_best_effort(state.repo_path, "branch", "-D", state.branch_name)
+    try:
+        state.state_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def effective_cwd(worktree_path: Path, cwd: str | None) -> Path:
+    if not cwd:
+        return worktree_path
+    requested = Path(cwd)
+    if requested.is_absolute():
+        requested = Path(*requested.parts[1:])
+    return worktree_path / requested
+
+
+def provider_root() -> Path:
+    configured = os.environ.get(ROOT_ENV)
+    if configured:
+        return Path(configured)
+    return Path(os.environ.get("TMPDIR", "/tmp")) / "smol-workflow-sandbox" / PROVIDER
+
+
+def read_request() -> dict[str, Any]:
+    raw = sys.stdin.read()
+    return json.loads(raw or "{}")
+
+
+def write_json(value: Any) -> None:
+    json.dump(value, sys.stdout, separators=(",", ":"))
+
+
+def write_error(code: str, message: str, retryable: bool) -> None:
+    write_json({"error": provider_error(code, message, retryable)})
+
+
+def provider_error(code: str, message: str, retryable: bool) -> dict[str, Any]:
+    return ProviderError(code=code, message=message, retryable=retryable).to_dict()
+
+
+def optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def git_stdout(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed with {result.returncode}: {result.stderr}")
+    return result.stdout
+
+
+def git_check(cwd: Path, *args: str) -> None:
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed with {result.returncode}: {result.stderr}")
+
+
+def git_best_effort(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+
+
+def unique_suffix() -> str:
+    return f"{os.getpid()}_{time.time_ns()}"
+
+
+def sanitize_path_component(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+    return sanitized or "default"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
