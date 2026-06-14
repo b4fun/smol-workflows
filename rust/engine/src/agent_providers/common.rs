@@ -1,12 +1,12 @@
 use super::types::{AgentUsage, AgentUsageCost};
-use anyhow::{anyhow, bail, Context};
+use crate::environment::{
+    AgentExecutionEnvironment, ExecRequest, LocalExecutionEnvironment, NullExecEventSink,
+};
+use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 pub async fn run_command(
     provider: &str,
@@ -24,46 +24,37 @@ pub async fn run_command(
         stdin.map(|value| value.len()).unwrap_or(0),
         timeout_ms
     );
-    let mut child = Command::new(command);
-    child.args(args);
-    if let Some(cwd) = cwd {
-        child.current_dir(cwd);
-    }
-    child.envs(env);
-    child.stdout(Stdio::piped()).stderr(Stdio::piped());
-    if stdin.is_some() {
-        child.stdin(Stdio::piped());
-    } else {
-        child.stdin(Stdio::null());
-    }
-
-    let mut child = child
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("failed to spawn {provider} provider command `{command}`"))?;
-
-    if let Some(stdin) = stdin {
-        if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin
-                .write_all(stdin.as_bytes())
-                .await
-                .with_context(|| format!("failed to write {provider} provider stdin"))?;
-        }
-    }
+    let environment = LocalExecutionEnvironment::new(cwd.map(|path| path.to_path_buf()))?;
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(command.to_string());
+    argv.extend(args.iter().cloned());
+    let request = ExecRequest {
+        argv,
+        cwd: None,
+        env: env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        stdin: stdin.map(|value| value.as_bytes().to_vec()),
+    };
+    let mut sink = NullExecEventSink;
 
     let output = if let Some(timeout_ms) = timeout_ms {
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
-            .await
+        match tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            environment.exec(request, &mut sink),
+        )
+        .await
         {
             Ok(output) => output?,
             Err(_) => bail!("{provider} provider timed out after {timeout_ms}ms"),
         }
     } else {
-        child.wait_with_output().await?
+        environment.exec(request, &mut sink).await?
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if output.status.success() {
+    if output.exit_code == 0 {
         log::debug!(
             "{provider} provider CLI completed stdout={} stderr={}",
             stdout.len(),
@@ -73,7 +64,7 @@ pub async fn run_command(
     } else {
         bail!(
             "{provider} provider exited with {}{}",
-            status_text(output.status.code()),
+            status_text(Some(output.exit_code)),
             format_command_failure(&stdout, &stderr)
         )
     }
