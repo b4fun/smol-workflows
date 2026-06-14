@@ -1617,33 +1617,53 @@ fn sandbox_isolation_request(
         .get("cwd")
         .and_then(Value::as_str)
         .map(ToString::to_string);
+    let (provider, profile) = parse_sandbox_profile_ref(&profile)?;
     Ok(Some(SandboxIsolationRequest {
-        provider: sandbox_provider_for_profile(&profile),
+        provider,
         profile,
         cwd,
     }))
 }
 
-fn sandbox_provider_for_profile(profile: &str) -> String {
-    if profile == "local-worktree" || profile.starts_with("local-worktree:") {
-        "local-worktree".to_string()
-    } else {
-        profile.to_string()
+fn parse_sandbox_profile_ref(value: &str) -> anyhow::Result<(String, String)> {
+    let (provider, profile) = value.split_once('/').ok_or_else(|| {
+        anyhow!("agent sandbox isolation.profile must use <provider>/<profile>, got `{value}`")
+    })?;
+    validate_sandbox_provider_name(provider)?;
+    if profile.is_empty() {
+        bail!(
+            "agent sandbox isolation.profile must include a non-empty provider-local profile name"
+        );
     }
+    Ok((provider.to_string(), profile.to_string()))
+}
+
+fn validate_sandbox_provider_name(provider: &str) -> anyhow::Result<()> {
+    let valid = !provider.is_empty()
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && provider
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && provider
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if !valid {
+        bail!("invalid sandbox provider name `{provider}`; expected lowercase letters, digits, and hyphens, starting and ending with an alphanumeric character");
+    }
+    Ok(())
 }
 
 fn sandbox_provider_plugin(
     request: &SandboxIsolationRequest,
 ) -> anyhow::Result<SandboxProviderPlugin> {
-    match request.provider.as_str() {
-        "local-worktree" => {
-            let path = std::env::var_os("SMOL_WORKFLOW_SANDBOX_LOCAL_WORKTREE_PROVIDER")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("sandbox-providers/local-worktree"));
-            Ok(SandboxProviderPlugin::new(path))
-        }
-        provider => bail!("unsupported sandbox provider `{provider}`"),
-    }
+    Ok(SandboxProviderPlugin::new(format!(
+        "smol-sandbox-{}",
+        request.provider
+    )))
 }
 
 struct WorktreeIsolation {

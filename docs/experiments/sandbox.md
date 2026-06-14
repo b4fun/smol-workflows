@@ -51,17 +51,19 @@ Conceptual example:
 }
 ```
 
-The workflow SDK references the profile by name only. The runner resolves that workflow-facing profile alias to a concrete provider-local profile reference, conceptually `<provider-name, profile-name>`, then combines it with the current workflow/run context to produce a concrete sandbox invocation.
+The workflow SDK references a sandbox profile with an explicit `<provider>/<profile>` convention.
 
 For example:
 
 ```txt
-workflow code:       profile = "node-repo"
-runtime mapping:    "node-repo" -> <provider = "e2b", profile = "node-22-repo">
-provider receives:  ProfileRef { provider: "e2b", name: "node-22-repo" }
+workflow code:       profile = "local-worktree/repo"
+runtime parses:      provider = "local-worktree", profile = "repo"
+provider receives:  ProfileRef { provider: "local-worktree", name: "repo" }
 ```
 
-The detailed profile body may remain local to the sandbox provider. In that model the runtime does not send provider template/env/secret/resource/network settings to the provider; it only tells the selected provider which local profile name to use.
+The provider part selects a sandbox provider plugin. The profile part is provider-local and is passed through as data. The detailed profile body remains local to the sandbox provider. The runtime does not send provider template/env/secret/resource/network settings to the provider; it only tells the selected provider which local profile name to use.
+
+Future global config may add aliases such as `node-repo -> local-worktree/repo`, but the initial runtime convention is explicit `<provider>/<profile>`.
 
 ## Proposed SDK usage
 
@@ -71,7 +73,7 @@ Preferred one-step agent isolation:
 const result = await agent("Inspect the repository and summarize findings", {
   isolation: {
     type: "sandbox",
-    profile: "node-repo",
+    profile: "local-worktree/repo",
   },
 });
 
@@ -84,7 +86,7 @@ With an optional sandbox-internal working directory override:
 const result = await agent("Debug the API package", {
   isolation: {
     type: "sandbox",
-    profile: "node-repo",
+    profile: "local-worktree/repo",
     cwd: "/workspace/packages/api",
   },
 });
@@ -336,7 +338,7 @@ The provider should receive a normalized, validated object containing only what 
 - local host workspace path supplied by the workflow runner
 - optional effective sandbox cwd
 
-The provider can load provider/template/env/secret/resource/network/lifecycle/workspace-sync settings from its own local profile registry. The runtime may keep a project/user/runner mapping from workflow-facing profile names to provider-local references, for example `node-repo -> <e2b, node-22-repo>`.
+The provider can load provider/template/env/secret/resource/network/lifecycle/workspace-sync settings from its own local profile registry. The runtime does not tell the provider where that registry lives; profile lookup is provider-owned.
 
 Workflow-specific observability fields such as workflow name, step id, phase, and agent label should primarily remain in the runtime trace. They do not need to be passed to the provider unless a provider needs opaque tags for billing, cleanup, or debugging.
 
@@ -345,6 +347,20 @@ Secrets, env vars, resources, network policy, image/template, sandbox workspace 
 The runtime should not tell the provider whether to use VCS sync, archive sync, warm snapshots, or uncommitted-delta sync. Those choices belong to the provider-local profile. The runtime only provides the local host workspace path as source material; the provider plugin decides whether and how to use it.
 
 ### Binary plugin protocol
+
+The runtime discovers sandbox provider plugins from `PATH` using a fixed executable naming convention:
+
+```txt
+smol-sandbox-<provider>
+```
+
+For example, `profile: "local-worktree/repo"` selects provider `local-worktree`, so the runtime invokes:
+
+```txt
+smol-sandbox-local-worktree
+```
+
+The provider name must be a safe command-name component. The initial convention is lowercase ASCII letters, digits, and hyphens, starting and ending with an alphanumeric character. The runtime must reject provider names that include path separators, whitespace, shell metacharacters, uppercase letters, underscores, or leading/trailing hyphens.
 
 Conceptual command shape:
 
@@ -507,8 +523,9 @@ message Error {
 
 Notes:
 
+- Workflow `isolation.profile` uses `<provider>/<profile>`. The runtime parses this into `ProfileRef.provider` and `ProfileRef.name`.
 - `<ProfileRef.provider, ProfileRef.name>` is the stable runtime-to-provider profile reference.
-- Provider-local profile details do not need to be sent over the protocol. The provider loads them from its own configuration.
+- Provider-local profile details do not need to be sent over the protocol. The provider loads them from its own configuration and decides where to look them up.
 - `WorkspaceSync` is supplied by the workflow runner. It carries the local host workspace path only; it does not describe the sandbox workspace itself.
 - `WorkspaceSync.host_path` is for the local plugin process. Providers should avoid sending local absolute paths to remote services unless required, and runtime traces should redact or normalize host paths when necessary.
 - The provider profile owns repo identity, upstream remotes, warm snapshot strategy, sandbox workspace directory, sync mode, whether uncommitted deltas are included, and any provider-specific patch/upload behavior.

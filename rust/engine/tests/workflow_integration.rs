@@ -69,6 +69,8 @@ struct RuntimeRetryRunner {
     calls: AtomicUsize,
 }
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Default)]
 struct CollectingEventSink {
     events: Mutex<Vec<WorkflowEvent>>,
@@ -978,16 +980,42 @@ fn runs_sandbox_isolated_agent_with_local_worktree_provider() {
     git(repo.path(), &["add", "."]);
     git(repo.path(), &["commit", "-m", "initial"]);
 
+    let _env_guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should be created");
     let provider_script =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sandbox-providers/local-worktree");
-    std::env::set_var(
-        "SMOL_WORKFLOW_SANDBOX_LOCAL_WORKTREE_PROVIDER",
-        provider_script,
-    );
+    let provider_bin = bin_dir.join("smol-sandbox-local-worktree");
+    fs::copy(&provider_script, &provider_bin).expect("provider script should be copied");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&provider_bin)
+            .expect("provider script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&provider_bin, permissions)
+            .expect("provider script should be executable");
+    }
+    let old_path = std::env::var_os("PATH");
+    let next_path = match old_path.as_ref() {
+        Some(old_path) if !old_path.is_empty() => {
+            let mut paths = vec![bin_dir.clone()];
+            paths.extend(std::env::split_paths(old_path));
+            std::env::join_paths(paths).expect("PATH should be joinable")
+        }
+        _ => bin_dir.clone().into_os_string(),
+    };
+    std::env::set_var("PATH", next_path);
 
     let provider = Arc::new(CwdProbeProvider::new());
-    let result = run_with_provider(repo.path().join("workflow.mjs"), provider.clone())
-        .expect("workflow should run with sandbox isolation");
+    let result = run_with_provider(repo.path().join("workflow.mjs"), provider.clone());
+    if let Some(old_path) = old_path {
+        std::env::set_var("PATH", old_path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    let result = result.expect("workflow should run with sandbox isolation");
 
     let sandbox_cwd = provider.cwd().expect("provider cwd should be captured");
     assert_ne!(sandbox_cwd, repo.path());
@@ -1006,7 +1034,7 @@ fn runs_sandbox_isolated_agent_with_local_worktree_provider() {
         .expect("agent run should include isolation info");
     assert_eq!(isolation.kind, "sandbox");
     assert_eq!(isolation.provider.as_deref(), Some("local-worktree"));
-    assert_eq!(isolation.profile.as_deref(), Some("local-worktree"));
+    assert_eq!(isolation.profile.as_deref(), Some("repo"));
     assert_eq!(
         isolation.cwd.as_deref(),
         Some(sandbox_cwd.to_string_lossy().as_ref())
