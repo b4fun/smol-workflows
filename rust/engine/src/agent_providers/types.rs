@@ -40,9 +40,11 @@
 //!    other provider calls up to the configured concurrency limit.
 //! 4. The scheduler resolves or rejects the JS promise with the provider result.
 
+use crate::environment::AgentExecutionEnvironment;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -99,11 +101,12 @@ pub struct AgentProviderContext {
     pub cwd: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentProviderRunInput {
     pub prompt: String,
     pub options: Option<Value>,
     pub context: AgentProviderContext,
+    pub environment: Arc<dyn AgentExecutionEnvironment>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

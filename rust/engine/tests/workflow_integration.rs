@@ -3,6 +3,9 @@ use smol_workflow_engine::agent_providers::{
     AgentProvider, AgentProviderResult, AgentProviderRunInput, AgentProviderSchemaMode,
     AgentProviderUsageMode, AgentUsage, DebugAgentProvider,
 };
+use smol_workflow_engine::environment::{
+    AgentExecutionEnvironment, ExecEvent, ExecEventSink, ExecRequest, SandboxExecutionEnvironment,
+};
 use smol_workflow_engine::events::{WorkflowEvent, WorkflowEventSink};
 use smol_workflow_engine::workflow::{run_workflow, RunWorkflowOptions, WorkflowAgentRunner};
 use std::collections::BTreeMap;
@@ -54,6 +57,11 @@ struct DynamicSchedulingProbeProvider {
 
 struct CwdProbeProvider {
     cwd: Mutex<Option<PathBuf>>,
+}
+
+#[derive(Default)]
+struct RecordingExecSink {
+    events: Vec<ExecEvent>,
 }
 
 struct SchemaRetryProvider {
@@ -194,6 +202,14 @@ impl CwdProbeProvider {
 
     fn cwd(&self) -> Option<PathBuf> {
         self.cwd.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecEventSink for RecordingExecSink {
+    async fn event(&mut self, event: ExecEvent) -> anyhow::Result<()> {
+        self.events.push(event);
+        Ok(())
     }
 }
 
@@ -1070,6 +1086,97 @@ fn runs_sandbox_isolated_agent_with_local_worktree_provider() {
             .is_empty(),
         "sandbox branch should be deleted during cleanup"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn sandbox_environment_exec_preserves_binary_output() {
+    use smol_workflow_sandbox::{
+        Metadata as SandboxMetadata, OpenSandboxRequest, ProfileRef, WorkspaceSync,
+    };
+
+    let repo = tempfile::tempdir().expect("temp repo");
+    git(repo.path(), &["init", "--initial-branch=main"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(repo.path(), &["config", "user.name", "Test User"]);
+    fs::write(repo.path().join("tracked.txt"), "tracked").expect("tracked file");
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "initial"]);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+    let provider_script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sandbox-providers/local-worktree");
+    let provider_bin = bin_dir.join("smol-sandbox-local-worktree");
+    fs::copy(&provider_script, &provider_bin).expect("provider script should be copied");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&provider_bin)
+            .expect("provider script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&provider_bin, permissions)
+            .expect("provider script should be executable");
+    }
+
+    block_on(async {
+        let env = SandboxExecutionEnvironment::open(
+            provider_bin,
+            OpenSandboxRequest {
+                metadata: SandboxMetadata::new("req_open", "sbxgrp_binary_exec"),
+                profile: ProfileRef {
+                    provider: "local-worktree".to_string(),
+                    name: "repo".to_string(),
+                },
+                workspace_sync: WorkspaceSync {
+                    host_path: repo.path().to_path_buf(),
+                },
+                cwd: None,
+            },
+        )
+        .await
+        .expect("sandbox env should open");
+
+        let mut sink = RecordingExecSink::default();
+        let output = env
+            .exec(
+                ExecRequest {
+                    argv: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        "import sys; sys.stdout.buffer.write(bytes([0,1,2,255])); sys.stderr.buffer.write(bytes([254,0]))".to_string(),
+                    ],
+                    ..ExecRequest::default()
+                },
+                &mut sink,
+            )
+            .await
+            .expect("sandbox exec should run");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, vec![0, 1, 2, 255]);
+        assert_eq!(output.stderr, vec![254, 0]);
+        assert!(sink.events.iter().any(
+            |event| matches!(event, ExecEvent::Stdout { chunk } if chunk == &vec![0, 1, 2, 255])
+        ));
+        assert!(sink
+            .events
+            .iter()
+            .any(|event| matches!(event, ExecEvent::Stderr { chunk } if chunk == &vec![254, 0])));
+
+        let sandbox_cwd = env
+            .cwd()
+            .map(|path| PathBuf::from(path.as_str()))
+            .expect("sandbox cwd should be available");
+        env.close().await.expect("sandbox env should close");
+        assert!(
+            !sandbox_cwd.exists(),
+            "sandbox worktree should be cleaned up"
+        );
+    });
 }
 
 #[test]

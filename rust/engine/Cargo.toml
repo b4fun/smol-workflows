@@ -19,6 +19,7 @@ integration-test = []
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 blake3 = "1"
 jsonschema = { version = "0.46", default-features = false }
 log = "0.4"

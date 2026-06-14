@@ -9,6 +9,7 @@ the sandbox cwd. It is not a security sandbox.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import base64
 import json
 import os
 from pathlib import Path
@@ -16,11 +17,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from typing import Any
 
 PROVIDER = "local-worktree"
 ROOT_ENV = "SMOL_WORKFLOW_SANDBOX_WORKTREE_ROOT"
+SPAWNED: dict[str, list[subprocess.Popen[bytes]]] = {}
+SPAWNED_LOCK = threading.Lock()
+WRITE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -128,19 +134,6 @@ class OpenSandboxRequest:
 
 
 @dataclass(frozen=True)
-class CloseSandboxRequest:
-    metadata: Metadata
-    session: SandboxSession
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CloseSandboxRequest:
-        return cls(
-            metadata=Metadata.from_dict(data.get("metadata", {})),
-            session=SandboxSession.from_dict(data.get("session", {})),
-        )
-
-
-@dataclass(frozen=True)
 class CleanupSandboxGroupRequest:
     metadata: Metadata
     sandbox_group_id: str
@@ -183,47 +176,98 @@ class WorktreeProviderState:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        write_error("missing_command", "missing sandbox provider command", False)
-        return 0
-
-    command = sys.argv[1]
-    try:
-        if command == "capabilities":
-            return capabilities()
-        if command == "open":
-            return open_sandbox()
-        if command == "close":
-            return close_sandbox()
-        if command == "cleanup-group":
-            return cleanup_group()
-        if command == "exec":
-            write_json({"error": provider_error("unsupported", "local-worktree does not support exec", False)})
-            return 0
-
-        write_json({"error": provider_error("unknown_command", f"unknown sandbox provider command `{command}`", False)})
-        return 0
-    except Exception as error:  # noqa: BLE001 - provider errors should become JSON when possible.
-        print(f"local-worktree provider error: {error}", file=sys.stderr)
-        write_error("provider_failure", str(error), False)
-        return 0
+    if len(sys.argv) != 2 or sys.argv[1] != "serve":
+        print("usage: local-worktree serve", file=sys.stderr)
+        return 2
+    return serve()
 
 
-def capabilities() -> int:
-    read_request()
-    write_json({"capabilities": Capabilities(exec=False).to_dict()})
+def serve() -> int:
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            envelope = json.loads(raw)
+            request_id = str(envelope.get("id", ""))
+            method = str(envelope.get("method", ""))
+            params = envelope.get("params", {})
+            result = handle_rpc_method(request_id, method, params)
+            if result == "__shutdown__":
+                write_json_line({"id": request_id, "result": {}})
+                return 0
+            write_json_line({"id": request_id, "result": result if result is not None else {}})
+        except ProviderRpcError as error:
+            write_json_line({"id": error.request_id, "error": provider_error(error.code, error.message, error.retryable)})
+        except Exception as error:  # noqa: BLE001 - providers should stay alive after request failures.
+            request_id = ""
+            try:
+                request_id = str(json.loads(raw).get("id", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"local-worktree provider serve error: {error}", file=sys.stderr)
+            write_json_line({"id": request_id, "error": provider_error("provider_failure", str(error), False)})
     return 0
 
 
-def open_sandbox() -> int:
-    request = OpenSandboxRequest.from_dict(read_request())
+def handle_rpc_method(request_id: str, method: str, params: dict[str, Any]) -> Any:
+    if method == "capabilities":
+        return Capabilities(exec=True).to_dict()
+    if method == "open":
+        result = open_sandbox(OpenSandboxRequest.from_dict(params), exec_capability=True)
+        if isinstance(result, dict):
+            raise ProviderRpcError(request_id, result["code"], result["message"], bool(result.get("retryable", False)))
+        return result.to_dict()
+    if method == "close":
+        close_session(SandboxSession.from_dict(params.get("session", {})))
+        return {}
+    if method == "cleanup_group":
+        request = CleanupSandboxGroupRequest.from_dict(params)
+        return {"cleaned_count": cleanup_group_state(request.sandbox_group_id)}
+    if method == "create_temp_dir":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        root = session_worktree_path(session)
+        path = Path(tempfile.mkdtemp(prefix=str(params.get("prefix", "smol-wf-")), dir=root))
+        return {"path": str(path)}
+    if method == "create_dir_all":
+        path = resolve_session_path(SandboxSession.from_dict(params.get("session", {})), str(params["path"]))
+        path.mkdir(parents=True, exist_ok=True)
+        return {}
+    if method == "write_file":
+        path = resolve_session_path(SandboxSession.from_dict(params.get("session", {})), str(params["path"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(str(params.get("content_base64", ""))))
+        return {}
+    if method == "read_file":
+        path = resolve_session_path(SandboxSession.from_dict(params.get("session", {})), str(params["path"]))
+        return {"content_base64": base64.b64encode(path.read_bytes()).decode("ascii")}
+    if method == "remove":
+        path = resolve_session_path(SandboxSession.from_dict(params.get("session", {})), str(params["path"]))
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return {}
+    if method == "exec":
+        return exec_rpc(request_id, params)
+    if method == "spawn":
+        return spawn_rpc(request_id, params)
+    if method == "shutdown":
+        terminate_all_spawned()
+        return "__shutdown__"
+    raise ProviderRpcError(request_id, "unknown_method", f"unknown method `{method}`", False)
+
+
+def open_sandbox(request: OpenSandboxRequest, *, exec_capability: bool) -> SandboxSession | dict[str, Any]:
     if request.profile.provider != PROVIDER:
-        write_json({"error": provider_error(
+        return provider_error(
             "bad_profile",
             f"local-worktree can only open provider `{PROVIDER}`, got `{request.profile.provider}`",
             False,
-        )})
-        return 0
+        )
 
     repo_path = Path(git_stdout(request.workspace_sync.host_path, "rev-parse", "--show-toplevel").strip())
     head = git_stdout(repo_path, "rev-parse", "HEAD").strip()
@@ -250,27 +294,25 @@ def open_sandbox() -> int:
     state_json = state.to_json()
     state_path.write_text(state_json, encoding="utf-8")
 
-    session = SandboxSession(
+    return SandboxSession(
         id=session_id,
         cwd=str(cwd),
-        capabilities=Capabilities(exec=False),
+        capabilities=Capabilities(exec=exec_capability),
         provider_state_json=state_json,
     )
-    write_json({"session": session.to_dict()})
-    return 0
 
 
-def close_sandbox() -> int:
-    request = CloseSandboxRequest.from_dict(read_request())
-    if request.session.provider_state_json:
-        close_state(WorktreeProviderState.from_json(request.session.provider_state_json))
-    write_json({})
-    return 0
+def close_session(session: SandboxSession) -> None:
+    with SPAWNED_LOCK:
+        processes = SPAWNED.pop(session.id, [])
+    for process in processes:
+        terminate_process(process)
+    if session.provider_state_json:
+        close_state(WorktreeProviderState.from_json(session.provider_state_json))
 
 
-def cleanup_group() -> int:
-    request = CleanupSandboxGroupRequest.from_dict(read_request())
-    group_dir = provider_root() / sanitize_path_component(request.sandbox_group_id)
+def cleanup_group_state(sandbox_group_id: str) -> int:
+    group_dir = provider_root() / sanitize_path_component(sandbox_group_id)
     sessions_dir = group_dir / "sessions"
     cleaned_count = 0
 
@@ -284,8 +326,99 @@ def cleanup_group() -> int:
                 print(f"failed to clean {state_path}: {error}", file=sys.stderr)
 
     shutil.rmtree(group_dir, ignore_errors=True)
-    write_json({"cleaned_count": cleaned_count})
-    return 0
+    return cleaned_count
+
+
+def exec_rpc(request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    session = SandboxSession.from_dict(params.get("session", {}))
+    argv = [str(arg) for arg in params.get("argv", [])]
+    if not argv:
+        raise ProviderRpcError(request_id, "bad_request", "exec argv must not be empty", False)
+    stdin = base64.b64decode(str(params.get("stdin_base64", ""))) if params.get("stdin_base64") is not None else None
+    cwd = resolve_session_path(session, optional_str(params.get("cwd")) or session.cwd or ".")
+    env = {**os.environ, **{str(k): str(v) for k, v in params.get("env", {}).items()}}
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    write_json_line({"id": request_id, "event": {"type": "started", "process_id": str(process.pid)}})
+
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    def read_stream(stream: Any, event_type: str, chunks: list[bytes]) -> None:
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                write_json_line({
+                    "id": request_id,
+                    "event": {
+                        "type": event_type,
+                        "data_base64": base64.b64encode(chunk).decode("ascii"),
+                    },
+                })
+        finally:
+            stream.close()
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, "stdout", stdout_chunks))
+    stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, "stderr", stderr_chunks))
+    stdout_thread.start()
+    stderr_thread.start()
+    if stdin is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin)
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+    exit_code = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    write_json_line({"id": request_id, "event": {"type": "exited", "exit_code": exit_code}})
+    stdout = b"".join(stdout_chunks)
+    stderr = b"".join(stderr_chunks)
+    return {
+        "exit_code": exit_code,
+        "stdout_base64": base64.b64encode(stdout).decode("ascii"),
+        "stderr_base64": base64.b64encode(stderr).decode("ascii"),
+    }
+
+
+def spawn_rpc(request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    session = SandboxSession.from_dict(params.get("session", {}))
+    argv = [str(arg) for arg in params.get("argv", [])]
+    if not argv:
+        raise ProviderRpcError("", "bad_request", "spawn argv must not be empty", False)
+    stdin = base64.b64decode(str(params.get("stdin_base64", ""))) if params.get("stdin_base64") is not None else None
+    cwd = resolve_session_path(session, optional_str(params.get("cwd")) or session.cwd or ".")
+    env = {**os.environ, **{str(k): str(v) for k, v in params.get("env", {}).items()}}
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    if stdin is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin)
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+    write_json_line({"id": request_id, "event": {"type": "started", "process_id": str(process.pid)}})
+    with SPAWNED_LOCK:
+        SPAWNED.setdefault(session.id, []).append(process)
+    threading.Thread(target=reap_spawned_process, args=(session.id, process), daemon=True).start()
+    return {"process_id": str(process.pid)}
 
 
 def close_state(state: WorktreeProviderState) -> None:
@@ -307,6 +440,22 @@ def effective_cwd(worktree_path: Path, cwd: str | None) -> Path:
     return worktree_path / requested
 
 
+def resolve_session_path(session: SandboxSession, path: str) -> Path:
+    requested = Path(path)
+    if requested.is_absolute():
+        return requested
+    base = Path(session.cwd or session_worktree_path(session))
+    return base / requested
+
+
+def session_worktree_path(session: SandboxSession) -> Path:
+    if session.provider_state_json:
+        return WorktreeProviderState.from_json(session.provider_state_json).worktree_path
+    if session.cwd:
+        return Path(session.cwd)
+    raise RuntimeError("session does not contain cwd or provider state")
+
+
 def provider_root() -> Path:
     configured = os.environ.get(ROOT_ENV)
     if configured:
@@ -314,21 +463,24 @@ def provider_root() -> Path:
     return Path(os.environ.get("TMPDIR", "/tmp")) / "smol-workflow-sandbox" / PROVIDER
 
 
-def read_request() -> dict[str, Any]:
-    raw = sys.stdin.read()
-    return json.loads(raw or "{}")
-
-
-def write_json(value: Any) -> None:
-    json.dump(value, sys.stdout, separators=(",", ":"))
-
-
-def write_error(code: str, message: str, retryable: bool) -> None:
-    write_json({"error": provider_error(code, message, retryable)})
+def write_json_line(value: Any) -> None:
+    with WRITE_LOCK:
+        json.dump(value, sys.stdout, separators=(",", ":"))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def provider_error(code: str, message: str, retryable: bool) -> dict[str, Any]:
     return ProviderError(code=code, message=message, retryable=retryable).to_dict()
+
+
+class ProviderRpcError(Exception):
+    def __init__(self, request_id: str, code: str, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.code = code
+        self.message = message
+        self.retryable = retryable
 
 
 def optional_str(value: Any) -> str | None:
@@ -352,6 +504,35 @@ def git_check(cwd: Path, *args: str) -> None:
 
 def git_best_effort(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
+
+
+def terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+
+
+def reap_spawned_process(session_id: str, process: subprocess.Popen[bytes]) -> None:
+    process.wait()
+    with SPAWNED_LOCK:
+        processes = SPAWNED.get(session_id)
+        if processes is not None and process in processes:
+            processes.remove(process)
+            if not processes:
+                SPAWNED.pop(session_id, None)
+
+
+def terminate_all_spawned() -> None:
+    with SPAWNED_LOCK:
+        all_processes = [process for processes in SPAWNED.values() for process in processes]
+        SPAWNED.clear()
+    for process in all_processes:
+        terminate_process(process)
 
 
 def unique_suffix() -> str:

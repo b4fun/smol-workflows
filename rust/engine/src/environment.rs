@@ -5,12 +5,14 @@
 //! in [`local`].
 
 mod local;
+mod sandbox;
 
 use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 pub use local::LocalExecutionEnvironment;
+pub use sandbox::SandboxExecutionEnvironment;
 
 /// UTF-8 path in the selected execution environment.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

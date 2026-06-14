@@ -1,9 +1,9 @@
 use super::common::*;
 use super::types::*;
+use crate::environment::EnvironmentPath;
 use anyhow::bail;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
@@ -53,25 +53,33 @@ async fn run_pi(
     } else {
         input.prompt.clone()
     };
-    let temp = temp_dir("smol-wf-pi-")?;
-    let extension_path = has_schema.then(|| temp.path().join("structured-output-extension.ts"));
-    let prompt_path = temp.path().join("prompt.md");
+    let temp = input.environment.create_temp_dir("smol-wf-pi-").await?;
+    let extension_path =
+        has_schema.then(|| join_environment_path(&temp, "structured-output-extension.ts"));
+    let prompt_path = join_environment_path(&temp, "prompt.md");
 
     if let Some(path) = &extension_path {
-        fs::write(
-            path,
-            build_structured_output_extension(option_schema(&input.options).unwrap()),
-        )?;
+        input
+            .environment
+            .write_file(
+                path,
+                build_structured_output_extension(option_schema(&input.options).unwrap())
+                    .as_bytes(),
+            )
+            .await?;
     }
-    fs::write(&prompt_path, &prompt)?;
+    input
+        .environment
+        .write_file(&prompt_path, prompt.as_bytes())
+        .await?;
 
-    let prompt_arg = format!("@{}", prompt_path.to_string_lossy());
+    let prompt_arg = format!("@{}", prompt_path.0);
 
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());
     args.extend(options.args.clone());
     if let Some(path) = &extension_path {
-        args.extend(["--extension".into(), path.to_string_lossy().into_owned()]);
+        args.extend(["--extension".into(), path.0.clone()]);
     }
     args.extend(["--print".into(), "--mode".into(), "json".into()]);
     if let Some(model) = option_str(&input.options, "model") {
@@ -83,26 +91,42 @@ async fn run_pi(
     args.push(prompt_arg);
 
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
-    let (stdout, stderr) = run_command(
-        "Pi",
+    let (stdout, stderr) = run_command(RunCommandRequest {
+        provider: "Pi",
         command,
-        &args,
-        None,
+        args: &args,
+        stdin: None,
         cwd,
-        &options.env,
-        options.timeout_ms,
-    )
+        env: &options.env,
+        timeout_ms: options.timeout_ms,
+        environment: input.environment.as_ref(),
+    })
     .await?;
     let events = parse_json_lines(&stdout);
     let output = if has_schema {
         extract_structured_tool_output(&events)?
     } else {
-        let candidate = extract_output(&events).ok_or_else(|| {
-            let message = extract_error_message(&events)
-                .or_else(|| (!stderr.trim().is_empty()).then(|| stderr.trim().to_string()))
-                .unwrap_or_else(|| "Pi provider did not return assistant output".to_string());
-            anyhow::anyhow!(message)
-        })?;
+        let candidate = extract_output(&events)
+            .or_else(|| extract_last_tool_result_text(&events))
+            .ok_or_else(|| {
+                let message = extract_error_message(&events)
+                    .or_else(|| (!stderr.trim().is_empty()).then(|| stderr.trim().to_string()))
+                    .unwrap_or_else(|| {
+                        let event_types = events
+                            .iter()
+                            .filter_map(|event| event.get("type").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let last_event = events
+                            .last()
+                            .map(|event| truncate(&event.to_string(), 1000))
+                            .unwrap_or_else(|| "<none>".to_string());
+                        format!(
+                            "Pi provider did not return assistant output; event_types=[{event_types}] last_event={last_event}"
+                        )
+                    });
+                anyhow::anyhow!(message)
+            })?;
         Value::String(candidate.trim_end().to_string())
     };
     let session_id = extract_session_id(&events)
@@ -116,9 +140,13 @@ async fn run_pi(
         usage: extract_usage(&events),
         isolation: None,
         raw: Some(to_json_value(
-            json!({ "events": events, "stderr": stderr, "extensionPath": extension_path.map(|p| p.to_string_lossy().into_owned()) }),
+            json!({ "events": events, "stderr": stderr, "extensionPath": extension_path.map(|p| p.0) }),
         )),
     })
+}
+
+fn join_environment_path(base: &EnvironmentPath, child: &str) -> EnvironmentPath {
+    EnvironmentPath(format!("{}/{}", base.as_str().trim_end_matches('/'), child))
 }
 
 fn with_structured_output_tool_instruction(prompt: &str) -> String {
@@ -464,24 +492,43 @@ fn extract_output_from_event(event: &Value) -> Option<String> {
         Some("message_end" | "turn_end") => record
             .get("message")
             .and_then(extract_assistant_message_text),
-        Some("agent_end") => record
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|messages| messages.iter().rev().find(|m| is_assistant_message(m)))
-            .and_then(extract_assistant_message_text),
+        Some("agent_end") => {
+            record
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| {
+                    messages
+                        .iter()
+                        .rev()
+                        .find_map(extract_assistant_message_text)
+                })
+        }
         Some("message_update") => record
             .get("message")
-            .and_then(extract_assistant_message_text),
+            .and_then(extract_assistant_message_text)
+            .or_else(|| {
+                record
+                    .get("assistantMessageEvent")
+                    .and_then(extract_assistant_message_event_text)
+            }),
         _ => None,
     }
 }
 
-fn is_assistant_message(value: &Value) -> bool {
-    value
-        .as_object()
-        .and_then(|record| record.get("role"))
-        .and_then(Value::as_str)
-        == Some("assistant")
+fn extract_assistant_message_event_text(event: &Value) -> Option<String> {
+    let record = event.as_object()?;
+    match record.get("type").and_then(Value::as_str) {
+        Some("text_end") => record
+            .get("content")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        Some("text_delta") => record
+            .get("partial")
+            .and_then(extract_assistant_message_text),
+        _ => record
+            .get("partial")
+            .and_then(extract_assistant_message_text),
+    }
 }
 
 fn extract_assistant_message_text(message: &Value) -> Option<String> {
@@ -512,6 +559,25 @@ fn extract_text(value: &Value) -> Option<String> {
             .and_then(extract_text),
         _ => None,
     }
+}
+
+fn extract_last_tool_result_text(events: &[Value]) -> Option<String> {
+    events.iter().rev().find_map(|event| {
+        let record = event.as_object()?;
+        if record.get("type").and_then(Value::as_str) != Some("tool_execution_end") {
+            return None;
+        }
+        record
+            .get("result")
+            .and_then(|result| {
+                result
+                    .get("content")
+                    .or_else(|| result.get("message"))
+                    .or_else(|| result.get("text"))
+                    .and_then(extract_text)
+            })
+            .or_else(|| record.get("message").and_then(extract_text))
+    })
 }
 
 fn extract_error_message(events: &[Value]) -> Option<String> {

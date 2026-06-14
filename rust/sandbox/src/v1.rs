@@ -1,4 +1,4 @@
-//! Sandbox provider JSON protocol v1 types.
+//! Sandbox provider JSONL protocol v1 types.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,26 +9,32 @@ use std::path::PathBuf;
 pub const PROTOCOL_VERSION: &str = "sandbox.v1";
 
 /// Root schema holder used to generate the combined JSON Schema for protocol v1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxProviderV1Schema {
-    pub capabilities_request: CapabilitiesRequest,
-    pub capabilities_response: CapabilitiesResponse,
+    pub request_envelope: crate::jsonl::JsonlRequestEnvelope<serde_json::Value>,
+    pub response_envelope: crate::jsonl::JsonlResponseEnvelope,
     pub open_request: OpenSandboxRequest,
-    pub open_response: OpenSandboxResponse,
-    pub close_request: CloseSandboxRequest,
-    pub close_response: CloseSandboxResponse,
+    pub sandbox_session: SandboxSession,
     pub cleanup_group_request: CleanupSandboxGroupRequest,
-    pub cleanup_group_response: CleanupSandboxGroupResponse,
-    pub exec_request: ExecRequest,
-    pub exec_response: ExecResponse,
+    pub create_temp_dir_request: crate::jsonl::CreateTempDirRequest,
+    pub create_temp_dir_result: crate::jsonl::CreateTempDirResult,
+    pub session_path_request: crate::jsonl::SessionPathRequest,
+    pub write_file_request: crate::jsonl::WriteFileRequest,
+    pub read_file_result: crate::jsonl::ReadFileResult,
+    pub exec_request: crate::jsonl::SandboxExecRequest,
+    pub exec_result: crate::jsonl::SandboxExecResult,
+    pub exec_event: crate::jsonl::SandboxExecEvent,
+    pub spawn_request: crate::jsonl::SandboxSpawnRequest,
+    pub spawn_result: crate::jsonl::SandboxSpawnResult,
+    pub provider_error: ProviderError,
 }
 
-/// Opaque metadata attached to each plugin request.
+/// Opaque metadata attached to sandbox lifecycle requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Metadata {
     /// Protocol version, for example [`PROTOCOL_VERSION`].
     pub protocol_version: String,
-    /// Opaque runtime-generated ID for correlating one plugin call with runtime logs.
+    /// Opaque runtime-generated ID for correlating a logical operation with logs.
     pub request_id: String,
     /// Opaque runtime-generated group ID for sandbox resources owned by one run.
     pub sandbox_group_id: String,
@@ -61,57 +67,25 @@ pub struct ProfileRef {
 /// Local workspace path supplied by the workflow runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceSync {
-    /// Local path on the machine running the workflow runner/provider plugin.
+    /// Local path on the machine running the workflow runner/provider process.
     pub host_path: PathBuf,
 }
 
-/// Request for `capabilities`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CapabilitiesRequest {
-    pub metadata: Metadata,
-}
-
-/// Response from `capabilities`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CapabilitiesResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Capabilities>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderError>,
-}
-
-/// Optional provider behavior. Lifecycle commands are required and are not reported here.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Capabilities {
-    /// Whether the provider supports the future optional `exec` command.
-    #[serde(default)]
-    pub exec: bool,
-}
-
-/// Request for `open`.
+/// Request params for the JSONL `open` method.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OpenSandboxRequest {
     pub metadata: Metadata,
     pub profile: ProfileRef,
     pub workspace_sync: WorkspaceSync,
-    /// Optional sandbox-internal cwd override. This is not a host path.
+    /// Optional sandbox-internal cwd override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-}
-
-/// Response from `open`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct OpenSandboxResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<SandboxSession>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderError>,
 }
 
 /// Provider session returned by `open` and passed back to later calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxSession {
-    /// Runtime/provider-facing session ID returned by the plugin.
+    /// Runtime/provider-facing session ID returned by the provider.
     pub id: String,
     /// Provider-native session ID, if different.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,71 +101,19 @@ pub struct SandboxSession {
     pub provider_state_json: Option<String>,
 }
 
-/// Request for `close`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CloseSandboxRequest {
-    pub metadata: Metadata,
-    pub session: SandboxSession,
-}
-
-/// Response from `close`.
+/// Provider behavior flags.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CloseSandboxResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderError>,
+pub struct Capabilities {
+    /// Whether the provider supports `exec` for sessions it opens.
+    #[serde(default)]
+    pub exec: bool,
 }
 
-/// Request for `cleanup-group`.
+/// Request params for `cleanup_group`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CleanupSandboxGroupRequest {
     pub metadata: Metadata,
     pub sandbox_group_id: String,
-}
-
-/// Response from `cleanup-group`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CleanupSandboxGroupResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleaned_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderError>,
-}
-
-/// Request for future optional `exec`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ExecRequest {
-    pub metadata: Metadata,
-    pub session: SandboxSession,
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdin_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-}
-
-/// Successful output from future optional `exec`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ExecOutput {
-    pub exit_code: i32,
-    #[serde(default)]
-    pub stdout_text: String,
-    #[serde(default)]
-    pub stderr_text: String,
-    #[serde(default)]
-    pub duration_ms: u64,
-}
-
-/// Response from future optional `exec`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ExecResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<ExecOutput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderError>,
 }
 
 /// Provider-declared operation error.

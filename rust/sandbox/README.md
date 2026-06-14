@@ -8,6 +8,8 @@ Protocol v1 is plain JSONL over stdin/stdout. Field names are `snake_case` and m
 
 The protocol is intentionally local-first: the workflow runner discovers a provider executable from `PATH`, launches it on the same machine with `serve`, sends JSON request objects on stdin, and reads JSON response/event objects from stdout. Diagnostics go to stderr.
 
+Current clients use serialized request handling per provider process: the client sends one request, reads any events for that request, reads its final response, then sends the next request. Providers do not need to support multiple concurrent in-flight requests or interleaved events from different request IDs. Request IDs remain required for correlation, diagnostics, and future compatibility with multiplexed clients.
+
 Provider executable naming:
 
 ```txt
@@ -85,7 +87,7 @@ Each lifecycle request includes metadata with the protocol version:
 }
 ```
 
-The checked-in JSON Schema for v1 is at [`schema/sandbox.v1.schema.json`](schema/sandbox.v1.schema.json). Example payloads are under [`tests/fixtures`](tests/fixtures). These fixtures may lag behind the long-lived `serve` protocol while the crate transitions away from the previous one-shot prototype.
+The checked-in JSON Schema for v1 is at [`schema/sandbox.v1.schema.json`](schema/sandbox.v1.schema.json). Example JSONL envelope payloads are under [`tests/fixtures`](tests/fixtures).
 
 ## Provider sketch
 

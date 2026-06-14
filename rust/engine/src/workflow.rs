@@ -2,6 +2,9 @@ use crate::agent_providers::{
     create_agent_provider, AgentProvider, AgentProviderContext, AgentProviderResult,
     AgentProviderRunInput, AgentRunIsolation, AgentUsage, AgentUsageCost,
 };
+use crate::environment::{
+    AgentExecutionEnvironment, LocalExecutionEnvironment, SandboxExecutionEnvironment,
+};
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
     WorkflowBudgetSnapshot, WorkflowJSRuntime, WorkflowModuleInput, WorkflowModuleOutput,
@@ -13,8 +16,7 @@ use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smol_workflow_sandbox::{
-    CloseSandboxRequest, Metadata as SandboxMetadata, OpenSandboxRequest, ProfileRef,
-    SandboxProviderPlugin, WorkspaceSync,
+    Metadata as SandboxMetadata, OpenSandboxRequest, ProfileRef, WorkspaceSync,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -1117,6 +1119,7 @@ impl RunState {
             input: AgentProviderRunInput {
                 prompt,
                 options,
+                environment: Arc::new(LocalExecutionEnvironment::new(context.cwd.clone())?),
                 context,
             },
         })
@@ -1507,6 +1510,8 @@ async fn run_agent_with_worktree_isolation(
     let isolation_info = isolation.info();
     let mut isolated_input = input;
     isolated_input.context.cwd = Some(isolation.cwd.clone());
+    isolated_input.environment =
+        Arc::new(LocalExecutionEnvironment::new(Some(isolation.cwd.clone()))?);
     let mut result = run_agent_with_schema_validation(provider, isolated_input).await;
     if let Ok(result) = &mut result {
         result.isolation = Some(isolation_info);
@@ -1522,13 +1527,14 @@ async fn run_agent_with_sandbox_isolation(
     input: AgentProviderRunInput,
     request: SandboxIsolationRequest,
 ) -> anyhow::Result<AgentProviderResult> {
-    let plugin = sandbox_provider_plugin(&request)?;
+    let program = sandbox_provider_program(&request);
     let sandbox_group_id = format!("sbxgrp_{}", ulid::Ulid::new());
     let cwd = input.context.cwd.clone().ok_or_else(|| {
         anyhow!("agent sandbox isolation requires the workflow cwd to be available")
     })?;
-    let session = plugin
-        .open(&OpenSandboxRequest {
+    let sandbox_env = SandboxExecutionEnvironment::open(
+        program,
+        OpenSandboxRequest {
             metadata: SandboxMetadata::new(
                 format!("req_{}", ulid::Ulid::new()),
                 sandbox_group_id.clone(),
@@ -1539,17 +1545,20 @@ async fn run_agent_with_sandbox_isolation(
             },
             workspace_sync: WorkspaceSync { host_path: cwd },
             cwd: request.cwd.clone(),
-        })
-        .await
-        .with_context(|| {
-            format!(
-                "failed to open sandbox profile `{}` with provider `{}`",
-                request.profile, request.provider
-            )
-        })?;
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to open sandbox profile `{}` with provider `{}`",
+            request.profile, request.provider
+        )
+    })?;
 
+    let session = sandbox_env.session().clone();
     let mut isolated_input = input;
-    isolated_input.context.cwd = session.cwd.as_ref().map(PathBuf::from);
+    isolated_input.context.cwd = sandbox_env.cwd().map(|path| PathBuf::from(path.as_str()));
+    isolated_input.environment = Arc::new(sandbox_env.clone());
     let isolation_info = AgentRunIsolation {
         kind: "sandbox".to_string(),
         branch: None,
@@ -1565,13 +1574,7 @@ async fn run_agent_with_sandbox_isolation(
         result.isolation = Some(isolation_info);
     }
 
-    if let Err(error) = plugin
-        .close(&CloseSandboxRequest {
-            metadata: SandboxMetadata::new(format!("req_{}", ulid::Ulid::new()), sandbox_group_id),
-            session,
-        })
-        .await
-    {
+    if let Err(error) = sandbox_env.close().await {
         log::warn!("failed to close sandbox-isolated agent session: {error:#}");
     }
 
@@ -1657,13 +1660,8 @@ fn validate_sandbox_provider_name(provider: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sandbox_provider_plugin(
-    request: &SandboxIsolationRequest,
-) -> anyhow::Result<SandboxProviderPlugin> {
-    Ok(SandboxProviderPlugin::new(format!(
-        "smol-sandbox-{}",
-        request.provider
-    )))
+fn sandbox_provider_program(request: &SandboxIsolationRequest) -> String {
+    format!("smol-sandbox-{}", request.provider)
 }
 
 struct WorktreeIsolation {

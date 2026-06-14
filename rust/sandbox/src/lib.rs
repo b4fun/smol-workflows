@@ -4,8 +4,8 @@
 //! provider executable on the same machine, writes one JSON request to stdin,
 //! reads one JSON response from stdout, and treats stderr as diagnostics.
 
-pub mod plugin;
+pub mod jsonl;
 pub mod v1;
 
-pub use plugin::{PluginClientError, SandboxProviderPlugin};
+pub use jsonl::*;
 pub use v1::*;

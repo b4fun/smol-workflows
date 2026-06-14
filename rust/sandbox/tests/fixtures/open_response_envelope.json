@@ -1,0 +1,10 @@
+{
+  "id": "req_1",
+  "result": {
+    "id": "session_1",
+    "cwd": "/sandbox/workspace",
+    "capabilities": {
+      "exec": true
+    }
+  }
+}

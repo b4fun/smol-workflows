@@ -18,21 +18,33 @@ fn read_fixture<T: DeserializeOwned>(name: &str) -> T {
 
 #[test]
 fn fixture_json_deserializes() {
-    let _: CapabilitiesRequest = read_fixture("capabilities_request.json");
-    let _: CapabilitiesResponse = read_fixture("capabilities_response.json");
-    let _: OpenSandboxRequest = read_fixture("open_request.json");
-    let _: OpenSandboxResponse = read_fixture("open_response.json");
-    let _: CloseSandboxRequest = read_fixture("close_request.json");
-    let _: CloseSandboxResponse = read_fixture("close_response.json");
-    let _: CleanupSandboxGroupRequest = read_fixture("cleanup_group_request.json");
-    let _: CleanupSandboxGroupResponse = read_fixture("cleanup_group_response.json");
-    let _: ExecRequest = read_fixture("exec_request.json");
-    let _: ExecResponse = read_fixture("exec_response.json");
+    let open_request: JsonlRequestEnvelope<OpenSandboxRequest> =
+        read_fixture("open_request_envelope.json");
+    assert_eq!(open_request.method, "open");
+    assert_eq!(open_request.params.profile.provider, "local-worktree");
 
-    // Provider-declared failures can omit the success payload.
-    let capabilities_error: CapabilitiesResponse = read_fixture("error_response.json");
+    let open_response: JsonlResponseEnvelope = read_fixture("open_response_envelope.json");
+    let session: SandboxSession = serde_json::from_value(open_response.result.unwrap()).unwrap();
+    assert_eq!(session.id, "session_1");
+
+    let exec_request: JsonlRequestEnvelope<SandboxExecRequest> =
+        read_fixture("exec_request_envelope.json");
+    assert_eq!(exec_request.method, "exec");
+    assert_eq!(exec_request.params.stdin_base64.as_deref(), Some("AAEC"));
+
+    let exec_event: JsonlResponseEnvelope = read_fixture("exec_event_envelope.json");
+    let event: SandboxExecEvent = serde_json::from_value(exec_event.event.unwrap()).unwrap();
+    assert_eq!(event.r#type, "stdout");
+    assert_eq!(event.data_base64.as_deref(), Some("aGVsbG8K"));
+
+    let exec_response: JsonlResponseEnvelope = read_fixture("exec_response_envelope.json");
+    let output: SandboxExecResult = serde_json::from_value(exec_response.result.unwrap()).unwrap();
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout_base64, "b2sK");
+
+    let error_response: JsonlResponseEnvelope = read_fixture("error_response_envelope.json");
     assert_eq!(
-        capabilities_error
+        error_response
             .error
             .as_ref()
             .map(|error| error.code.as_str()),

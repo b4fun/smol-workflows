@@ -10,5 +10,6 @@ pkgs.mkShell {
     clippy
     vhs
     ffmpeg
+    tmux
   ];
 }

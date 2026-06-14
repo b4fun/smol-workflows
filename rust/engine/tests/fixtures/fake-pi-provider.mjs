@@ -72,6 +72,29 @@ if (structured) {
       isError: false,
     }))
   }
+} else if (prompt.includes('message-update-only')) {
+  console.log(JSON.stringify({
+    type: 'message_update',
+    assistantMessageEvent: {
+      type: 'text_end',
+      content: output,
+      partial: { role: 'assistant', content: [{ type: 'text', text: output }] },
+    },
+  }))
+} else if (prompt.includes('agent-end-message-without-role')) {
+  console.log(JSON.stringify({
+    type: 'agent_end',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: prompt }] },
+      { api: 'openai-responses', content: [{ type: 'thinking', thinking: '...' }, { type: 'text', text: output }] },
+    ],
+  }))
+} else if (prompt.includes('tool-result-only')) {
+  console.log(JSON.stringify({
+    type: 'tool_execution_end',
+    result: { content: [{ type: 'text', text: output }] },
+  }))
+  console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'user', content: prompt }] }))
 } else {
   console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: output }], usage } }))
   console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: output }], usage }] }))

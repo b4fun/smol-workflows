@@ -1,6 +1,6 @@
 use super::types::{AgentUsage, AgentUsageCost};
 use crate::environment::{
-    AgentExecutionEnvironment, ExecRequest, LocalExecutionEnvironment, NullExecEventSink,
+    AgentExecutionEnvironment, EnvironmentPath, ExecRequest, NullExecEventSink,
 };
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
@@ -8,66 +8,82 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
-pub async fn run_command(
-    provider: &str,
-    command: &str,
-    args: &[String],
-    stdin: Option<&str>,
-    cwd: Option<&Path>,
-    env: &HashMap<String, String>,
-    timeout_ms: Option<u64>,
-) -> anyhow::Result<(String, String)> {
+pub struct RunCommandRequest<'a> {
+    pub provider: &'a str,
+    pub command: &'a str,
+    pub args: &'a [String],
+    pub stdin: Option<&'a str>,
+    pub cwd: Option<&'a Path>,
+    pub env: &'a HashMap<String, String>,
+    pub timeout_ms: Option<u64>,
+    pub environment: &'a dyn AgentExecutionEnvironment,
+}
+
+pub async fn run_command(request: RunCommandRequest<'_>) -> anyhow::Result<(String, String)> {
     log::debug!(
-        "running {provider} provider CLI: {} cwd={:?} stdin={} timeout_ms={:?}",
-        format_command_invocation(command, args),
-        cwd,
-        stdin.map(|value| value.len()).unwrap_or(0),
-        timeout_ms
+        "running {} provider CLI: {} cwd={:?} stdin={} timeout_ms={:?}",
+        request.provider,
+        format_command_invocation(request.command, request.args),
+        request.cwd,
+        request.stdin.map(|value| value.len()).unwrap_or(0),
+        request.timeout_ms
     );
-    let environment = LocalExecutionEnvironment::new(cwd.map(|path| path.to_path_buf()))?;
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(command.to_string());
-    argv.extend(args.iter().cloned());
-    let request = ExecRequest {
+    let mut argv = Vec::with_capacity(request.args.len() + 1);
+    argv.push(request.command.to_string());
+    argv.extend(request.args.iter().cloned());
+    let exec_request = ExecRequest {
         argv,
-        cwd: None,
-        env: env
+        cwd: request.cwd.map(path_to_environment_path).transpose()?,
+        env: request
+            .env
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>(),
-        stdin: stdin.map(|value| value.as_bytes().to_vec()),
+        stdin: request.stdin.map(|value| value.as_bytes().to_vec()),
     };
     let mut sink = NullExecEventSink;
 
-    let output = if let Some(timeout_ms) = timeout_ms {
+    let output = if let Some(timeout_ms) = request.timeout_ms {
         match tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            environment.exec(request, &mut sink),
+            request.environment.exec(exec_request, &mut sink),
         )
         .await
         {
             Ok(output) => output?,
-            Err(_) => bail!("{provider} provider timed out after {timeout_ms}ms"),
+            Err(_) => bail!(
+                "{} provider timed out after {timeout_ms}ms",
+                request.provider
+            ),
         }
     } else {
-        environment.exec(request, &mut sink).await?
+        request.environment.exec(exec_request, &mut sink).await?
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if output.exit_code == 0 {
         log::debug!(
-            "{provider} provider CLI completed stdout={} stderr={}",
+            "{} provider CLI completed stdout={} stderr={}",
+            request.provider,
             stdout.len(),
             stderr.len()
         );
         Ok((stdout, stderr))
     } else {
         bail!(
-            "{provider} provider exited with {}{}",
+            "{} provider exited with {}{}",
+            request.provider,
             status_text(Some(output.exit_code)),
             format_command_failure(&stdout, &stderr)
         )
     }
+}
+
+fn path_to_environment_path(path: &Path) -> anyhow::Result<EnvironmentPath> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| anyhow!("provider command cwd must be valid UTF-8: {path:?}"))?;
+    Ok(EnvironmentPath(value.to_string()))
 }
 
 fn format_command_invocation(command: &str, args: &[String]) -> String {
@@ -417,11 +433,4 @@ pub fn extract_model(value: &Value) -> Option<String> {
         }
         _ => None,
     }
-}
-
-pub fn temp_dir(prefix: &str) -> anyhow::Result<tempfile::TempDir> {
-    tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir()
-        .map_err(|e| anyhow!(e))
 }

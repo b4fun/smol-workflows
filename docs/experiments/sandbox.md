@@ -375,6 +375,7 @@ Common rules:
 - The provider writes one JSON message per line to `stdout`.
 - Human-readable logs must go to `stderr`.
 - The process should continue serving requests until it receives a shutdown request or stdin closes.
+- Current clients use serialized request handling per provider process: the runtime sends one request, reads any events for that request, reads its final response, then sends the next request. Providers do not need to support multiple concurrent in-flight requests or interleaved events from different request IDs.
 - Non-zero provider process exit means transport/protocol failure.
 - Provider-declared operation failures should be returned as JSON-RPC-style error messages while the provider process remains alive when possible.
 

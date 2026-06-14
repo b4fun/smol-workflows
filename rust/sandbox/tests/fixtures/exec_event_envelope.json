@@ -1,0 +1,7 @@
+{
+  "id": "req_2",
+  "event": {
+    "type": "stdout",
+    "data_base64": "aGVsbG8K"
+  }
+}

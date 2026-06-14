@@ -397,6 +397,8 @@ smol-sandbox-<provider> serve
 
 The provider process speaks stdio JSONL RPC: one JSON request/response/event object per line. This long-lived process owns sandbox lifecycle, filesystem operations, foreground `exec`, background `spawn`, streaming process events, and cleanup for one or more sandbox sessions.
 
+The current client/provider interaction is **serialized per provider process**: the runtime sends one request, reads any events for that request, reads its final response, and only then sends the next request on that connection. Providers do not need to support multiple concurrent in-flight requests or interleaved events from different request IDs. Request IDs are still required for correlation, diagnostics, and future compatibility with a possible multiplexed protocol.
+
 The sandbox provider protocol should expose methods corresponding to this environment capability:
 
 ```txt
