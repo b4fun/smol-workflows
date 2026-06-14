@@ -1,39 +1,79 @@
 # smol-workflow-sandbox
 
-Types, JSON Schema, and a local binary plugin client for smol-workflows sandboxes.
+Types, JSON Schema, and a stdio JSONL RPC client for smol-workflows sandbox providers.
 
 ## JSON protocol v1
 
-Protocol v1 is plain JSON over stdin/stdout. Field names are `snake_case` and match the Rust serde types.
+Protocol v1 is plain JSONL over stdin/stdout. Field names are `snake_case` and match the Rust serde types.
 
-The protocol is intentionally local-first: the workflow runner invokes a provider executable on the same machine and sends one JSON request on stdin. The plugin writes one JSON response to stdout and diagnostics to stderr.
+The protocol is intentionally local-first: the workflow runner discovers a provider executable from `PATH`, launches it on the same machine with `serve`, sends JSON request objects on stdin, and reads JSON response/event objects from stdout. Diagnostics go to stderr.
 
-Required subcommands:
+Provider executable naming:
+
+```txt
+smol-sandbox-<provider>
+```
+
+Launch shape:
+
+```sh
+smol-sandbox-local-worktree serve
+```
+
+The old one-shot command model is not the target protocol. Providers should implement the long-lived `serve` protocol instead of separate `open`, `close`, or `exec` subcommands.
+
+## Message envelopes
+
+Request:
+
+```json
+{"id":"req_1","method":"open","params":{}}
+```
+
+Success response:
+
+```json
+{"id":"req_1","result":{}}
+```
+
+Provider-declared error:
+
+```json
+{"id":"req_1","error":{"code":"bad_profile","message":"unknown profile","retryable":false}}
+```
+
+Streaming/progress event:
+
+```json
+{"id":"req_2","event":{"type":"stdout","data_base64":"aGVsbG8K"}}
+```
+
+## Methods
+
+Expected methods align with the environment capability documented in `docs/harness-capabilities/environment.md`:
 
 ```txt
 capabilities
 open
 close
-cleanup-group
-```
-
-Future/optional subcommands:
-
-```txt
+cleanup_group
+create_temp_dir
+create_dir_all
+write_file
+read_file
+remove
 exec
+spawn
+shutdown
 ```
 
-Common rules:
+The provider owns profile lookup and sandbox implementation details. The runtime passes the provider-local profile name and local workspace path during `open`; it does not pass a profile directory.
 
-- The plugin receives the subcommand as `argv[1]`.
-- The plugin reads exactly one JSON request from stdin.
-- The plugin writes exactly one JSON response to stdout.
-- Human-readable diagnostics go to stderr.
-- Exit code `0` means the plugin produced a response.
-- Non-zero exit code means plugin/protocol failure.
-- Provider-declared operation failures should be returned as JSON `{ "error": ... }` with exit code `0` when possible.
+Byte-oriented JSONL fields use base64. Command stdin/stdout/stderr and file contents should be represented as `stdin_base64`, `stdout_base64`, `stderr_base64`, event `data_base64`, and file `content_base64`. Large binary payloads should prefer `write_file`/`read_file` over command stdout/stderr streams when possible.
 
-Each request includes metadata with the protocol version:
+## Versioning
+
+Each lifecycle request includes metadata with the protocol version:
 
 ```json
 {
@@ -45,85 +85,29 @@ Each request includes metadata with the protocol version:
 }
 ```
 
-The checked-in JSON Schema for v1 is at [`schema/sandbox.v1.schema.json`](schema/sandbox.v1.schema.json). Example request/response payloads are under [`tests/fixtures`](tests/fixtures).
+The checked-in JSON Schema for v1 is at [`schema/sandbox.v1.schema.json`](schema/sandbox.v1.schema.json). Example payloads are under [`tests/fixtures`](tests/fixtures). These fixtures may lag behind the long-lived `serve` protocol while the crate transitions away from the previous one-shot prototype.
 
-## Response shape
+## Provider sketch
 
-Responses use optional success payloads plus optional provider errors.
+A provider process can be implemented in any language that can read/write JSON Lines.
 
-Success example:
+Pseudo-code:
 
-```json
-{
-  "session": {
-    "id": "sbx_01",
-    "cwd": "/workspace",
-    "capabilities": {
-      "exec": false
-    }
-  }
-}
-```
-
-Provider-declared failure example:
-
-```json
-{
-  "error": {
-    "code": "bad_profile",
-    "message": "unknown sandbox profile",
-    "retryable": false
-  }
-}
-```
-
-## Bash provider sketch
-
-```sh
-#!/usr/bin/env sh
-set -eu
-
-cmd="$1"
-input="$(cat)"
-
-case "$cmd" in
-  capabilities)
-    printf '%s\n' '{"capabilities":{"exec":false}}'
-    ;;
-  open)
-    printf '%s\n' '{"session":{"id":"sbx_example","cwd":"/workspace","capabilities":{"exec":false}}}'
-    ;;
-  close)
-    printf '%s\n' '{}'
-    ;;
-  cleanup-group)
-    printf '%s\n' '{"cleaned_count":0}'
-    ;;
-  *)
-    printf '%s\n' '{"error":{"code":"unknown_command","message":"unknown command","retryable":false}}'
-    ;;
-esac
+```py
+for line in stdin:
+    request = json.loads(line)
+    if request["method"] == "capabilities":
+        respond(request["id"], {"capabilities": {"exec": True}})
+    elif request["method"] == "shutdown":
+        respond(request["id"], {})
+        break
+    else:
+        respond_error(request["id"], "unsupported", "method is not implemented")
 ```
 
 ## Rust client
 
-The plugin client returns extracted success payloads:
-
-```rust
-use smol_workflow_sandbox::{CapabilitiesRequest, Metadata, SandboxProviderPlugin};
-
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let plugin = SandboxProviderPlugin::new("smol-sandbox-example");
-let capabilities = plugin
-    .capabilities(&CapabilitiesRequest {
-        metadata: Metadata::new("req_01", "sbxgrp_01"),
-    })
-    .await?;
-# Ok(())
-# }
-```
-
-If a provider returns `{ "error": ... }`, the client returns `PluginClientError::Provider`. If a success response omits the required success payload, the client returns `PluginClientError::Protocol`.
+The Rust client should expose extracted success payloads rather than raw envelopes. Provider errors should become `SandboxProviderClientError::Provider`, while malformed protocol messages should become protocol errors.
 
 ## Updating the schema
 

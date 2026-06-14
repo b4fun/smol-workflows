@@ -346,7 +346,7 @@ Secrets, env vars, resources, network policy, image/template, sandbox workspace 
 
 The runtime should not tell the provider whether to use VCS sync, archive sync, warm snapshots, or uncommitted-delta sync. Those choices belong to the provider-local profile. The runtime only provides the local host workspace path as source material; the provider plugin decides whether and how to use it.
 
-### Binary plugin protocol
+### Sandbox provider protocol
 
 The runtime discovers sandbox provider plugins from `PATH` using a fixed executable naming convention:
 
@@ -354,187 +354,104 @@ The runtime discovers sandbox provider plugins from `PATH` using a fixed executa
 smol-sandbox-<provider>
 ```
 
-For example, `profile: "local-worktree/repo"` selects provider `local-worktree`, so the runtime invokes:
+For example, `profile: "local-worktree/repo"` selects provider `local-worktree`, so the runtime launches:
 
 ```txt
-smol-sandbox-local-worktree
+smol-sandbox-local-worktree serve
 ```
 
 The provider name must be a safe command-name component. The initial convention is lowercase ASCII letters, digits, and hyphens, starting and ending with an alphanumeric character. The runtime must reject provider names that include path separators, whitespace, shell metacharacters, uppercase letters, underscores, or leading/trailing hyphens.
 
-Conceptual command shape:
+The old one-shot subcommand model is removed from the design. Sandbox providers should expose one local long-lived process with stdio JSONL RPC:
 
 ```bash
-smol-sandbox-<provider> capabilities  < request.json > response.json
-smol-sandbox-<provider> open          < request.json > response.json
-smol-sandbox-<provider> close         < request.json > response.json
-smol-sandbox-<provider> cleanup-group < request.json > response.json
-smol-sandbox-<provider> exec          < request.json > response.json # future/optional
+smol-sandbox-<provider> serve
 ```
-
-Initial transport can be JSON encoded according to the schema below. The schema is written in protobuf-like notation so it can later move to protobuf or another binary encoding without changing the conceptual contract.
 
 Common rules:
 
-- The plugin is launched locally by the workflow runner for each operation.
-- The plugin reads exactly one request message from `stdin`.
-- The plugin writes exactly one response message to `stdout`.
+- The provider process is launched locally by the workflow runner.
+- The provider reads one JSON message per line from `stdin`.
+- The provider writes one JSON message per line to `stdout`.
 - Human-readable logs must go to `stderr`.
-- Exit code `0` means the response was produced successfully.
-- Non-zero exit code means plugin/protocol failure. If possible, the plugin should still write an error response to `stdout`.
-- The runtime owns lifecycle bookkeeping and calls `close` for run-owned sandboxes during cleanup.
-- `cleanup-group` is required and intended for janitor recovery when the runtime has lost individual session handles but still knows the sandbox group id.
-- The stdin/stdout command protocol is intended for lifecycle operations and simple future commands. Long-running interactive execution, streaming output, and cancellation may require a streaming protocol or provider-specific attachment mechanism later.
+- The process should continue serving requests until it receives a shutdown request or stdin closes.
+- Non-zero provider process exit means transport/protocol failure.
+- Provider-declared operation failures should be returned as JSON-RPC-style error messages while the provider process remains alive when possible.
 
-### Protobuf-like interface sketch
+Request envelope:
 
-```proto
-syntax = "proto3";
-
-package smol_workflows.sandbox.v1;
-
-message Metadata {
-  string protocol_version = 1; // e.g. "sandbox.v1"
-
-  // Opaque runtime-generated id for correlating one plugin call with runtime logs.
-  string request_id = 2;
-
-  // Opaque runtime-generated sandbox group id.
-  // All sandbox resources owned by the same workflow run should normally share
-  // this value so the provider/runtime janitor can clean them up as a group.
-  // This is not an auth principal and providers should not infer workflow
-  // semantics from it.
-  string sandbox_group_id = 3;
-
-  // Optional non-sensitive provider tags. Avoid workflow names, prompts, phases,
-  // user input, or other values that may leak workflow details.
-  map<string, string> tags = 4;
+```json
+{
+  "id": "req_1",
+  "method": "open",
+  "params": {}
 }
-
-message ProfileRef {
-  // Provider name selected by the runtime. This is often implied by the plugin
-  // executable name, but including it makes traces and validation clearer.
-  string provider = 1;
-
-  // Profile name local to the provider. If versioning/fingerprinting is needed,
-  // make it part of the name, e.g. "node-22-repo@v3".
-  string name = 2;
-}
-
-message WorkspaceSync {
-  // Local workspace path on the machine running the workflow runner/provider
-  // plugin. This path is for local plugin use and should not be assumed to be
-  // accessible from a remote service. The provider-local profile decides
-  // whether and how to sync it into the sandbox workspace.
-  string host_path = 1;
-}
-
-message OpenSandboxRequest {
-  Metadata metadata = 1;
-  ProfileRef profile = 2;
-  WorkspaceSync workspace_sync = 3;
-
-  // Optional effective working directory inside the sandbox. This is a
-  // sandbox-internal path, not a host path. If omitted, the provider profile
-  // supplies the default.
-  string cwd = 4;
-}
-
-message OpenSandboxResponse {
-  SandboxSession session = 1;
-  Error error = 2;
-}
-
-message SandboxSession {
-  // Runtime/provider-facing session id returned by the plugin.
-  string id = 1;
-
-  // Provider-native id, if different.
-  string provider_session_id = 2;
-
-  string cwd = 3;
-
-  Capabilities capabilities = 4;
-
-  // Opaque provider state needed for later close/exec calls. The runtime stores
-  // and passes this back unchanged. It should be treated as sensitive and not
-  // logged unless the provider documents it as safe.
-  string provider_state_json = 5;
-}
-
-message CloseSandboxRequest {
-  Metadata metadata = 1;
-  SandboxSession session = 2;
-}
-
-message CloseSandboxResponse {
-  Error error = 1;
-}
-
-message CleanupSandboxGroupRequest {
-  Metadata metadata = 1;
-  string sandbox_group_id = 2;
-}
-
-message CleanupSandboxGroupResponse {
-  uint32 cleaned_count = 1;
-  Error error = 2;
-}
-
-message CapabilitiesRequest {
-  Metadata metadata = 1;
-}
-
-message CapabilitiesResponse {
-  Capabilities capabilities = 1;
-  Error error = 2;
-}
-
-message Capabilities {
-  // Whether the provider supports the future optional `exec` command for sessions it opens.
-  bool exec = 1;
-}
-
-message ExecRequest {
-  Metadata metadata = 1;
-  SandboxSession session = 2;
-  string command = 3;
-  repeated string args = 4;
-  string cwd = 5;
-  string stdin_text = 6;
-  uint64 timeout_ms = 7;
-}
-
-message ExecResponse {
-  int32 exit_code = 1;
-  string stdout_text = 2;
-  string stderr_text = 3;
-  uint64 duration_ms = 4;
-  Error error = 5;
-}
-
-message Error {
-  string code = 1;
-  string message = 2;
-  bool retryable = 3;
-}
-
 ```
+
+Success response:
+
+```json
+{
+  "id": "req_1",
+  "result": {}
+}
+```
+
+Error response:
+
+```json
+{
+  "id": "req_1",
+  "error": {
+    "code": "bad_profile",
+    "message": "unknown sandbox profile",
+    "retryable": false
+  }
+}
+```
+
+Streaming/progress event messages use the same request ID. Byte-oriented event payloads use base64:
+
+```json
+{
+  "id": "req_2",
+  "event": {
+    "type": "stdout",
+    "data_base64": "aGVsbG8K"
+  }
+}
+```
+
+Initial methods should align with the execution-environment capability in [`../harness-capabilities/environment.md`](../harness-capabilities/environment.md):
+
+- `capabilities`
+- `open`
+- `close`
+- `cleanup_group`
+- `create_temp_dir`
+- `create_dir_all`
+- `write_file`
+- `read_file`
+- `remove`
+- `exec`
+- `spawn`
+- `shutdown`
+
+Lifecycle and filesystem/process operations are part of the same provider protocol. A separate lifecycle-only sandbox provider protocol is no longer planned.
+
+JSONL messages cannot carry raw bytes directly. Sandbox provider JSONL RPC should use base64 fields for byte-oriented data: `stdin_base64`, `stdout_base64`, `stderr_base64`, event `data_base64`, and file `content_base64`. Large binary inputs/outputs should use `write_file`/`read_file` rather than command stdout/stderr streams when possible.
 
 Notes:
 
 - Workflow `isolation.profile` uses `<provider>/<profile>`. The runtime parses this into `ProfileRef.provider` and `ProfileRef.name`.
 - `<ProfileRef.provider, ProfileRef.name>` is the stable runtime-to-provider profile reference.
 - Provider-local profile details do not need to be sent over the protocol. The provider loads them from its own configuration and decides where to look them up.
-- `WorkspaceSync` is supplied by the workflow runner. It carries the local host workspace path only; it does not describe the sandbox workspace itself.
-- `WorkspaceSync.host_path` is for the local plugin process. Providers should avoid sending local absolute paths to remote services unless required, and runtime traces should redact or normalize host paths when necessary.
+- `WorkspaceSync` is supplied by the workflow runner during `open`. It carries the local host workspace path only; it does not describe the sandbox workspace itself.
+- `WorkspaceSync.host_path` is for the local provider process. Providers should avoid sending local absolute paths to remote services unless required, and runtime traces should redact or normalize host paths when necessary.
 - The provider profile owns repo identity, upstream remotes, warm snapshot strategy, sandbox workspace directory, sync mode, whether uncommitted deltas are included, and any provider-specific patch/upload behavior.
 - For a VCS-aware provider, the profile may restore a warm repo snapshot, make local committed state available through a branch/ref, then apply local uncommitted deltas as a provider-prepared patch. The runtime does not prepare those patch inputs.
 - `cwd` is an optional sandbox-internal working directory after applying runtime defaults and optional SDK `cwd` override.
-- `Capabilities` is intentionally small. `open`, `close`, and `cleanup-group` are required provider commands; capabilities only reports optional behavior such as future `exec` support.
-- `SandboxSession.provider_state_json` is opaque provider state for subsequent plugin calls. The runtime should store and pass it back unchanged.
-- The runtime should persist a redacted copy of the open request and response for traceability.
-- `exec` is included to show the intended future shape. It can be unsupported initially.
+- The runtime should persist redacted request/response metadata for traceability.
 
 ## Agent execution integration
 
