@@ -961,6 +961,90 @@ fn runs_worktree_isolated_agent_in_fresh_git_worktree() {
 }
 
 #[test]
+#[cfg(unix)]
+fn runs_sandbox_isolated_agent_with_local_worktree_provider() {
+    let repo = tempfile::tempdir().expect("temp repo");
+    git(repo.path(), &["init", "--initial-branch=main"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(repo.path(), &["config", "user.name", "Test User"]);
+    copy_asset(
+        "sandbox-isolated-agent.workflow.js",
+        &repo.path().join("workflow.mjs"),
+    );
+    fs::write(repo.path().join("tracked.txt"), "tracked").expect("tracked file");
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "initial"]);
+
+    let provider_script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sandbox-providers/local-worktree");
+    std::env::set_var(
+        "SMOL_WORKFLOW_SANDBOX_LOCAL_WORKTREE_PROVIDER",
+        provider_script,
+    );
+
+    let provider = Arc::new(CwdProbeProvider::new());
+    let result = run_with_provider(repo.path().join("workflow.mjs"), provider.clone())
+        .expect("workflow should run with sandbox isolation");
+
+    let sandbox_cwd = provider.cwd().expect("provider cwd should be captured");
+    assert_ne!(sandbox_cwd, repo.path());
+    assert!(!repo.path().join("agent-created.txt").exists());
+    assert!(
+        !sandbox_cwd.exists(),
+        "sandbox worktree should be cleaned up after the agent run"
+    );
+    assert_eq!(
+        result.output.result["cwd"],
+        json!(sandbox_cwd.to_string_lossy())
+    );
+    let isolation = result.agent_runs[0]
+        .isolation
+        .as_ref()
+        .expect("agent run should include isolation info");
+    assert_eq!(isolation.kind, "sandbox");
+    assert_eq!(isolation.provider.as_deref(), Some("local-worktree"));
+    assert_eq!(isolation.profile.as_deref(), Some("local-worktree"));
+    assert_eq!(
+        isolation.cwd.as_deref(),
+        Some(sandbox_cwd.to_string_lossy().as_ref())
+    );
+    let session_id = isolation
+        .session_id
+        .as_deref()
+        .expect("sandbox isolation should record session id");
+    assert!(session_id.starts_with("local_worktree_"));
+
+    let worktree_list = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git worktree list should run");
+    assert!(worktree_list.status.success());
+    assert!(
+        !String::from_utf8_lossy(&worktree_list.stdout)
+            .contains(sandbox_cwd.to_string_lossy().as_ref()),
+        "sandbox worktree should not remain registered after cleanup"
+    );
+
+    let sandbox_branch = format!("smol-wf-sandbox-{session_id}");
+    let branch_output = Command::new("git")
+        .args(["branch", "--list", &sandbox_branch])
+        .current_dir(repo.path())
+        .output()
+        .expect("git branch should run");
+    assert!(branch_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .is_empty(),
+        "sandbox branch should be deleted during cleanup"
+    );
+}
+
+#[test]
 fn worktree_isolation_requires_git_repository() {
     let workspace = tempfile::tempdir().expect("temp workspace");
     copy_asset(

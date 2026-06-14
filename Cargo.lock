@@ -1887,6 +1887,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smol-workflow-sandbox",
  "tempfile",
  "time",
  "tokio",
