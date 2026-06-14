@@ -1,8 +1,10 @@
 /// <reference path="./workflow-extra-virtual.d.ts" />
+/// <reference path="./workflow-sandbox-virtual.d.ts" />
 
 import type { FromSchema } from "json-schema-to-ts";
 import type { JSONSchema } from "./json-schema.js";
 import type { PipelineFn } from "./pipeline.js";
+import type { AgentIsolation, SandboxFn } from "./sandbox.js";
 
 export type {
   JSONArray,
@@ -14,6 +16,13 @@ export type {
   JSONValue,
 } from "./json-schema.js";
 export type { PipelineFn, PipelineStage } from "./pipeline.js";
+export type {
+  AgentIsolation,
+  SandboxFn,
+  SandboxHandle,
+  SandboxIsolation,
+  SandboxOpenOptions,
+} from "./sandbox.js";
 export type { WorkflowToolInput } from "./tool.js";
 
 /** A value that may be returned synchronously or asynchronously. */
@@ -140,7 +149,7 @@ export type DynamicWorkflowAgentRunOptions<Schema extends JSONSchema = JSONSchem
 
 /** Options for a single agent run supported by this SDK. */
 export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> =
-  DynamicWorkflowAgentRunOptions<Schema> & {
+  Omit<DynamicWorkflowAgentRunOptions<Schema>, "isolation"> & {
     /**
      * Optional agent provider override for this call.
      *
@@ -149,6 +158,14 @@ export type AgentRunOptions<Schema extends JSONSchema = JSONSchema> =
      * `opencode`, or `pi`, and may also register custom provider names.
      */
     provider?: string;
+    /**
+     * Execution isolation for this agent step.
+     *
+     * - `"worktree"`: request a fresh local git worktree for this call.
+     * - `{ type: "sandbox", profile }`: request a one-step sandbox from a named profile.
+     * - `SandboxHandle`: run in an advanced reusable sandbox session.
+     */
+    isolation?: AgentIsolation;
   };
 
 /** An AI capability exposed to workflow scripts. */
@@ -179,6 +196,7 @@ export type WorkflowExtra = {
 /** smol-workflows runtime namespace exposed to workflow scripts. */
 export type WorkflowRuntimeNamespace = {
   extra: WorkflowExtra;
+  sandbox: SandboxFn;
 };
 
 /** Explicit workflow capabilities passed as the second argument to a workflow. */
@@ -192,6 +210,7 @@ export type WorkflowContext = {
   log: WorkflowLogFn;
   phase: PhaseFn;
   extra: WorkflowExtra;
+  sandbox: SandboxFn;
 };
 
 /** The default export shape expected from a workflow script. */

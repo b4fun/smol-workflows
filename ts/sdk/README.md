@@ -161,6 +161,56 @@ if (result) {
 export default result;
 ```
 
+## Sandbox isolation
+
+An agent step may request sandbox isolation by referencing a sandbox profile configured in the workflow runner/project/user settings:
+
+```ts
+const result = await agent("Inspect the repository and summarize findings", {
+  isolation: {
+    type: "sandbox",
+    profile: "node-repo",
+  },
+});
+
+export default result;
+```
+
+A sandbox-internal working directory override may be provided:
+
+```ts
+const result = await agent("Debug the API package", {
+  isolation: {
+    type: "sandbox",
+    profile: "node-repo",
+    cwd: "/workspace/packages/api",
+  },
+});
+```
+
+Detailed sandbox provisioning is intentionally outside the SDK call. Profiles/settings own provider selection, templates/images, environment variables, secrets, resource limits, network policy, workspace sync behavior, and lifecycle policy.
+
+Advanced workflows that need multiple steps to share one sandbox can use the host-provided virtual module `workflow:sandbox`:
+
+```ts
+import sandbox from "workflow:sandbox";
+
+const result = await sandbox.with("node-repo", async (box) => {
+  await agent("Inspect the repository", { isolation: box });
+  return await agent("Summarize the findings", { isolation: box });
+});
+
+export default result;
+```
+
+Named imports are also available:
+
+```ts
+import { open, withSandbox } from "workflow:sandbox";
+```
+
+`workflow:sandbox` is provided by the workflow runtime. The SDK package provides types and a stub module that throws if used outside the workflow runtime.
+
 ## Workflow tool input
 
 External Workflow tool invocations can be typed with `WorkflowToolInput`:
@@ -189,6 +239,7 @@ The runner injects these globals:
 - `log(...values)` — write workflow logs
 - `phase(name)` — mark workflow phase
 - `SW.extra.sleep(ms)` / `ctx.extra.sleep(ms)` / `import { sleep } from "workflow:extra"` — pause workflow execution
+- `SW.sandbox` / `ctx.sandbox` / `import sandbox from "workflow:sandbox"` — advanced sandbox lifecycle helpers
 
 ## Scripts
 

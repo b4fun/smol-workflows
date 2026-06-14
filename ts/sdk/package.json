@@ -19,6 +19,10 @@
     "./workflow-extra": {
       "types": "./dist/workflow-extra.d.ts",
       "import": "./dist/workflow-extra.js"
+    },
+    "./workflow-sandbox": {
+      "types": "./dist/workflow-sandbox.d.ts",
+      "import": "./dist/workflow-sandbox.js"
     }
   },
   "files": [
@@ -30,7 +34,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && rm -f dist/workflow-extra-virtual.js dist/workflow-extra-virtual.js.map dist/workflow-extra-virtual.d.ts.map && cp src/workflow-extra-virtual.d.ts dist/workflow-extra-virtual.d.ts && tmp=$(mktemp) && printf '/// <reference path=\"./workflow-extra-virtual.d.ts\" />\\n' > $tmp && cat dist/index.d.ts >> $tmp && mv $tmp dist/index.d.ts",
+    "build": "tsc -p tsconfig.json && rm -f dist/workflow-extra-virtual.js dist/workflow-extra-virtual.js.map dist/workflow-extra-virtual.d.ts.map dist/workflow-sandbox-virtual.js dist/workflow-sandbox-virtual.js.map dist/workflow-sandbox-virtual.d.ts.map && cp src/workflow-extra-virtual.d.ts dist/workflow-extra-virtual.d.ts && cp src/workflow-sandbox-virtual.d.ts dist/workflow-sandbox-virtual.d.ts && tmp=$(mktemp) && printf '/// <reference path=\"./workflow-extra-virtual.d.ts\" />\\n/// <reference path=\"./workflow-sandbox-virtual.d.ts\" />\\n' > $tmp && cat dist/index.d.ts >> $tmp && mv $tmp dist/index.d.ts",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
