@@ -531,6 +531,18 @@ For a sandboxed agent call, the runtime must connect the selected `AgentProvider
 
 This document only defines the SDK intent and sandbox provider lifecycle boundary. The exact agent-provider integration is runtime/provider-specific and should be defined separately before implementation.
 
+## Future output/export behavior
+
+Getting files back from the sandbox is deferred from this initial SDK design.
+
+For now, the expectation is that sandbox/provider profiles can define provider-specific ways to publish sandbox results remotely and return references to the runtime. This may include:
+
+- code changes published as a branch, pull request, patch, or provider artifact,
+- generated artifacts such as reports, screenshots, logs, coverage output, or binaries,
+- provider-specific URLs or artifact IDs that the runtime can record in traces and expose to workflow output.
+
+The initial SDK should not expose file-sync-back options on `agent(...)` calls. A future design can add explicit sync-back or artifact export APIs once the runtime/provider behavior is better understood.
+
 ## Future command execution
 
 The same handle should support non-agent commands later:
