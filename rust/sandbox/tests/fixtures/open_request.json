@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "protocol_version": "sandbox.v1",
+    "request_id": "req_01",
+    "sandbox_group_id": "sbxgrp_01"
+  },
+  "profile": {
+    "provider": "example",
+    "name": "node-repo"
+  },
+  "workspace_sync": {
+    "host_path": "/tmp/repo"
+  },
+  "cwd": "/workspace"
+}

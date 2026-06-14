@@ -1,0 +1,11 @@
+{
+  "session": {
+    "id": "sbx_01",
+    "provider_session_id": "provider_sbx_01",
+    "cwd": "/workspace",
+    "capabilities": {
+      "exec": false
+    },
+    "provider_state_json": "{\"opaque\":true}"
+  }
+}

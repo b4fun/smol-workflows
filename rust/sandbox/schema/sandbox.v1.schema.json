@@ -1,0 +1,451 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SandboxProviderV1Schema",
+  "description": "Root schema holder used to generate the combined JSON Schema for protocol v1.",
+  "type": "object",
+  "required": [
+    "capabilities_request",
+    "capabilities_response",
+    "cleanup_group_request",
+    "cleanup_group_response",
+    "close_request",
+    "close_response",
+    "exec_request",
+    "exec_response",
+    "open_request",
+    "open_response"
+  ],
+  "properties": {
+    "capabilities_request": {
+      "$ref": "#/definitions/CapabilitiesRequest"
+    },
+    "capabilities_response": {
+      "$ref": "#/definitions/CapabilitiesResponse"
+    },
+    "cleanup_group_request": {
+      "$ref": "#/definitions/CleanupSandboxGroupRequest"
+    },
+    "cleanup_group_response": {
+      "$ref": "#/definitions/CleanupSandboxGroupResponse"
+    },
+    "close_request": {
+      "$ref": "#/definitions/CloseSandboxRequest"
+    },
+    "close_response": {
+      "$ref": "#/definitions/CloseSandboxResponse"
+    },
+    "exec_request": {
+      "$ref": "#/definitions/ExecRequest"
+    },
+    "exec_response": {
+      "$ref": "#/definitions/ExecResponse"
+    },
+    "open_request": {
+      "$ref": "#/definitions/OpenSandboxRequest"
+    },
+    "open_response": {
+      "$ref": "#/definitions/OpenSandboxResponse"
+    }
+  },
+  "definitions": {
+    "Capabilities": {
+      "description": "Optional provider behavior. Lifecycle commands are required and are not reported here.",
+      "type": "object",
+      "properties": {
+        "exec": {
+          "description": "Whether the provider supports the future optional `exec` command.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "CapabilitiesRequest": {
+      "description": "Request for `capabilities`.",
+      "type": "object",
+      "required": [
+        "metadata"
+      ],
+      "properties": {
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        }
+      }
+    },
+    "CapabilitiesResponse": {
+      "description": "Response from `capabilities`.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Capabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CleanupSandboxGroupRequest": {
+      "description": "Request for `cleanup-group`.",
+      "type": "object",
+      "required": [
+        "metadata",
+        "sandbox_group_id"
+      ],
+      "properties": {
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "sandbox_group_id": {
+          "type": "string"
+        }
+      }
+    },
+    "CleanupSandboxGroupResponse": {
+      "description": "Response from `cleanup-group`.",
+      "type": "object",
+      "properties": {
+        "cleaned_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CloseSandboxRequest": {
+      "description": "Request for `close`.",
+      "type": "object",
+      "required": [
+        "metadata",
+        "session"
+      ],
+      "properties": {
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        }
+      }
+    },
+    "CloseSandboxResponse": {
+      "description": "Response from `close`.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ExecOutput": {
+      "description": "Successful output from future optional `exec`.",
+      "type": "object",
+      "required": [
+        "exit_code"
+      ],
+      "properties": {
+        "duration_ms": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "stderr_text": {
+          "default": "",
+          "type": "string"
+        },
+        "stdout_text": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ExecRequest": {
+      "description": "Request for future optional `exec`.",
+      "type": "object",
+      "required": [
+        "command",
+        "metadata",
+        "session"
+      ],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        },
+        "stdin_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ExecResponse": {
+      "description": "Response from future optional `exec`.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExecOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Metadata": {
+      "description": "Opaque metadata attached to each plugin request.",
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "request_id",
+        "sandbox_group_id"
+      ],
+      "properties": {
+        "protocol_version": {
+          "description": "Protocol version, for example [`PROTOCOL_VERSION`].",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Opaque runtime-generated ID for correlating one plugin call with runtime logs.",
+          "type": "string"
+        },
+        "sandbox_group_id": {
+          "description": "Opaque runtime-generated group ID for sandbox resources owned by one run.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional non-sensitive provider tags.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "OpenSandboxRequest": {
+      "description": "Request for `open`.",
+      "type": "object",
+      "required": [
+        "metadata",
+        "profile",
+        "workspace_sync"
+      ],
+      "properties": {
+        "cwd": {
+          "description": "Optional sandbox-internal cwd override. This is not a host path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "profile": {
+          "$ref": "#/definitions/ProfileRef"
+        },
+        "workspace_sync": {
+          "$ref": "#/definitions/WorkspaceSync"
+        }
+      }
+    },
+    "OpenSandboxResponse": {
+      "description": "Response from `open`.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SandboxSession"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ProfileRef": {
+      "description": "Provider-local profile reference selected by the workflow runtime.",
+      "type": "object",
+      "required": [
+        "name",
+        "provider"
+      ],
+      "properties": {
+        "name": {
+          "description": "Profile name local to the provider.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Provider name selected by the runtime.",
+          "type": "string"
+        }
+      }
+    },
+    "ProviderError": {
+      "description": "Provider-declared operation error.",
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "SandboxSession": {
+      "description": "Provider session returned by `open` and passed back to later calls.",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities for this session.",
+          "default": {
+            "exec": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Capabilities"
+            }
+          ]
+        },
+        "cwd": {
+          "description": "Effective sandbox cwd, if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Runtime/provider-facing session ID returned by the plugin.",
+          "type": "string"
+        },
+        "provider_session_id": {
+          "description": "Provider-native session ID, if different.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_state_json": {
+          "description": "Opaque provider state for later calls. Treat as sensitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "WorkspaceSync": {
+      "description": "Local workspace path supplied by the workflow runner.",
+      "type": "object",
+      "required": [
+        "host_path"
+      ],
+      "properties": {
+        "host_path": {
+          "description": "Local path on the machine running the workflow runner/provider plugin.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "protocol_version": "sandbox.v1",
+    "request_id": "req_04",
+    "sandbox_group_id": "sbxgrp_01"
+  },
+  "session": {
+    "id": "sbx_01",
+    "cwd": "/workspace",
+    "capabilities": {
+      "exec": true
+    }
+  },
+  "command": "npm",
+  "args": ["test"],
+  "cwd": "/workspace",
+  "stdin_text": "",
+  "timeout_ms": 60000
+}

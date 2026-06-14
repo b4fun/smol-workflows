@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "protocol_version": "sandbox.v1",
+    "request_id": "req_02",
+    "sandbox_group_id": "sbxgrp_01"
+  },
+  "session": {
+    "id": "sbx_01",
+    "provider_session_id": "provider_sbx_01",
+    "cwd": "/workspace",
+    "capabilities": {
+      "exec": false
+    },
+    "provider_state_json": "{\"opaque\":true}"
+  }
+}
