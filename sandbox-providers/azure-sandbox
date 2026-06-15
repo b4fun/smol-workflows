@@ -1,0 +1,1660 @@
+#!/usr/bin/env python3
+"""Azure Container Apps dynamic sessions sandbox provider.
+
+This provider intentionally uses only Python's standard library. It talks to the
+Azure Container Apps Sandbox data-plane REST API directly and obtains tokens via
+`az account get-access-token`.
+
+Provider configuration is profile-based JSON loaded from:
+
+  $CONFIG_BASE/sandbox-providers/azure-sandbox/config.json
+
+The config path can be overridden with `--config /path/to/config.json` for CLI
+subcommands, or `AZURE_SANDBOX_CONFIG_PATH=/path/to/config.json` for any mode.
+
+The provider receives the profile name from `azure-sandbox/<profile>` and looks
+up `profiles[profile]` in that file. Example:
+
+  {
+    "profiles": {
+      "default": {
+        "azure": {
+          "region": "eastus2",
+          "subscription_id": "...",
+          "resource_group": "...",
+          "sandbox_group": "..."
+        },
+        "snapshot_id": "...",
+        "oci_image": {
+          "image": "ghcr.io/example/smol-agent:latest",
+          "entrypoint": ["/bin/sh"],
+          "cmd": ["-lc", "sleep infinity"]
+        },
+        "cwd": "/workspace",
+        "sync_workspace": true,
+        "value_providers": {
+          "example_api_auth": {
+            "command": ["sh", "-c", "printf 'Bearer example-token'"]
+          }
+        },
+        "egress_policy": {
+          "defaultAction": "Deny",
+          "trafficInspection": "Full",
+          "rules": [{
+            "name": "example-api-auth",
+            "match": {"host": "api.example.com", "path": "/v1/*", "methods": ["GET", "POST"]},
+            "action": {"type": "Transform", "headers": [{"operation": "Set", "name": "Authorization", "value": "${value_providers.example_api_auth}"}]}
+          }]
+        }
+      }
+    }
+  }
+
+Set exactly one sandbox source in a real profile: `snapshot_id`, `disk_id`,
+`preset`, or `oci_image`. `oci_image` is shown above only as an alternative to
+`snapshot_id`; do not configure both in the same profile.
+
+Auth tokens are retrieved from Azure CLI with `az account get-access-token`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field, fields
+import argparse
+import base64
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+import uuid
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
+
+PROVIDER = "azure-sandbox"
+DATA_PLANE_SCOPE = "https://dynamicsessions.io/.default"
+DATA_PLANE_API_VERSION = "2026-02-01-preview"
+WRITE_CHUNK_SIZE = 4 * 1024 * 1024
+TOKEN_CACHE: dict[str, str] = {}
+CONFIG_PATH_OVERRIDE: Path | None = None
+
+
+@dataclass(frozen=True)
+class Metadata:
+    protocol_version: str
+    request_id: str
+    sandbox_group_id: str
+    tags: dict[str, str]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Metadata:
+        return cls(
+            protocol_version=str(data.get("protocol_version", "sandbox.v1")),
+            request_id=str(data.get("request_id", "")),
+            sandbox_group_id=str(data.get("sandbox_group_id", "default")),
+            tags={str(k): str(v) for k, v in data.get("tags", {}).items()},
+        )
+
+
+@dataclass(frozen=True)
+class ProfileRef:
+    provider: str
+    name: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProfileRef:
+        return cls(provider=str(data.get("provider", "")), name=str(data.get("name", "")))
+
+
+@dataclass(frozen=True)
+class WorkspaceSync:
+    host_path: Path
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorkspaceSync:
+        return cls(host_path=Path(str(data["host_path"])))
+
+
+@dataclass(frozen=True)
+class SandboxSession:
+    id: str
+    cwd: str | None = None
+    capabilities: dict[str, Any] | None = None
+    provider_session_id: str | None = None
+    provider_state_json: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "id": self.id,
+            "capabilities": self.capabilities or {"exec": True},
+        }
+        if self.provider_session_id is not None:
+            data["provider_session_id"] = self.provider_session_id
+        if self.cwd is not None:
+            data["cwd"] = self.cwd
+        if self.provider_state_json is not None:
+            data["provider_state_json"] = self.provider_state_json
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SandboxSession:
+        return cls(
+            id=str(data["id"]),
+            cwd=optional_str(data.get("cwd")),
+            capabilities=data.get("capabilities") if isinstance(data.get("capabilities"), dict) else {"exec": True},
+            provider_session_id=optional_str(data.get("provider_session_id")),
+            provider_state_json=optional_str(data.get("provider_state_json")),
+        )
+
+
+@dataclass(frozen=True)
+class OpenSandboxRequest:
+    metadata: Metadata
+    profile: ProfileRef
+    workspace_sync: WorkspaceSync
+    cwd: str | None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OpenSandboxRequest:
+        return cls(
+            metadata=Metadata.from_dict(data.get("metadata", {})),
+            profile=ProfileRef.from_dict(data.get("profile", {})),
+            workspace_sync=WorkspaceSync.from_dict(data["workspace_sync"]),
+            cwd=optional_str(data.get("cwd")),
+        )
+
+
+@dataclass(frozen=True)
+class CleanupSandboxGroupRequest:
+    metadata: Metadata
+    sandbox_group_id: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CleanupSandboxGroupRequest:
+        return cls(
+            metadata=Metadata.from_dict(data.get("metadata", {})),
+            sandbox_group_id=str(data.get("sandbox_group_id", "default")),
+        )
+
+
+@dataclass(frozen=True)
+class ProviderState:
+    endpoint: str
+    subscription_id: str
+    resource_group: str
+    sandbox_group: str
+    sandbox_id: str
+    cwd: str
+    api_version: str = DATA_PLANE_API_VERSION
+    http_timeout_seconds: int = 120
+    created_disk_image_id: str | None = None
+    keep_on_close: bool = False
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, value: str) -> ProviderState:
+        data = json.loads(value)
+        return cls(
+            endpoint=str(data["endpoint"]),
+            subscription_id=str(data["subscription_id"]),
+            resource_group=str(data["resource_group"]),
+            sandbox_group=str(data["sandbox_group"]),
+            sandbox_id=str(data["sandbox_id"]),
+            cwd=str(data.get("cwd") or "/workspace"),
+            api_version=str(data.get("api_version") or DATA_PLANE_API_VERSION),
+            http_timeout_seconds=int(data.get("http_timeout_seconds") or 120),
+            created_disk_image_id=optional_str(data.get("created_disk_image_id")),
+            keep_on_close=bool(data.get("keep_on_close", False)),
+        )
+
+
+def config_field(doc: str, default: Any = None) -> Any:
+    return field(default=default, metadata={"doc": doc})
+
+
+def required_config_field(doc: str) -> Any:
+    return field(metadata={"doc": doc})
+
+
+@dataclass(frozen=True)
+class EgressHeader:
+    """Header transform for an egress rule action; mirrors the Azure Sandbox Python SDK model."""
+
+    operation: str = config_field("Header operation: `Set`, `Insert`, or `Remove`.", "Set")
+    name: str = config_field("Header name.", "")
+    value: str | None = config_field("Header value. Omitted for `Remove` operations.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressHeader:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_literal(kwargs, "operation", {"Set", "Insert", "Remove"}, field_name)
+        require_optional_strings(kwargs, {"name", "value"}, field_name)
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"operation": self.operation, "name": self.name}
+        if self.value is not None:
+            data["value"] = self.value
+        return data
+
+
+@dataclass(frozen=True)
+class EgressRuleMatch:
+    """Match conditions for an egress rule; mirrors the Azure Sandbox Python SDK model."""
+
+    host: str = config_field("Host to match.", "")
+    path: str | None = config_field("Optional path glob to match.")
+    methods: list[str] | None = config_field("Optional HTTP methods to match.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressRuleMatch:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_strings(kwargs, {"host", "path"}, field_name)
+        if kwargs.get("methods") is not None:
+            kwargs["methods"] = require_list_of_strings(kwargs["methods"], f"{field_name}.methods")
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"host": self.host}
+        if self.path is not None:
+            data["path"] = self.path
+        if self.methods is not None:
+            data["methods"] = self.methods
+        return data
+
+
+@dataclass(frozen=True)
+class EgressRuleAction:
+    """Action for an egress rule; mirrors the Azure Sandbox Python SDK model."""
+
+    type: str = config_field("Action type: `Allow`, `Deny`, `Transform`, or `Rewrite`.", "Allow")
+    host: str | None = config_field("Rewrite target host.")
+    path: str | None = config_field("Rewrite target path.")
+    scheme: str | None = config_field("Rewrite target scheme.")
+    headers: list[EgressHeader] | None = config_field("Headers to transform for Transform/Rewrite actions.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressRuleAction:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_literal(kwargs, "type", {"Allow", "Deny", "Transform", "Rewrite"}, field_name)
+        require_optional_strings(kwargs, {"host", "path", "scheme"}, field_name)
+        if kwargs.get("headers") is not None:
+            headers = require_list_of_objects(kwargs["headers"], f"{field_name}.headers")
+            kwargs["headers"] = [
+                EgressHeader.from_dict(item, field_name=f"{field_name}.headers[{index}]")
+                for index, item in enumerate(headers)
+            ]
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"type": self.type}
+        if self.host is not None:
+            data["host"] = self.host
+        if self.path is not None:
+            data["path"] = self.path
+        if self.scheme is not None:
+            data["scheme"] = self.scheme
+        if self.headers is not None:
+            data["headers"] = [header.to_dict() for header in self.headers]
+        return data
+
+
+@dataclass(frozen=True)
+class EgressRule:
+    """Advanced egress rule; mirrors the Azure Sandbox Python SDK model."""
+
+    name: str | None = config_field("Optional rule name.")
+    match: EgressRuleMatch | None = config_field("Optional match conditions.")
+    action: EgressRuleAction | None = config_field("Optional rule action.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressRule:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_strings(kwargs, {"name"}, field_name)
+        if kwargs.get("match") is not None:
+            kwargs["match"] = EgressRuleMatch.from_dict(
+                require_object(kwargs["match"], f"{field_name}.match"), field_name=f"{field_name}.match"
+            )
+        if kwargs.get("action") is not None:
+            kwargs["action"] = EgressRuleAction.from_dict(
+                require_object(kwargs["action"], f"{field_name}.action"), field_name=f"{field_name}.action"
+            )
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        if self.name is not None:
+            data["name"] = self.name
+        if self.match is not None:
+            data["match"] = self.match.to_dict()
+        if self.action is not None:
+            data["action"] = self.action.to_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class EgressHostRule:
+    """Simple host-pattern egress rule; mirrors the Azure Sandbox Python SDK model."""
+
+    pattern: str = config_field("Host pattern to match, e.g. `*.github.com`.", "")
+    action: str = config_field("Rule action: `Allow` or `Deny`.", "Allow")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressHostRule:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_strings(kwargs, {"pattern"}, field_name)
+        require_optional_literal(kwargs, "action", {"Allow", "Deny"}, field_name)
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pattern": self.pattern, "action": self.action}
+
+
+@dataclass(frozen=True)
+class EgressPolicy:
+    """Egress policy model; mirrors the Azure Sandbox Python SDK model."""
+
+    default_action: str = config_field("Default egress action: `Allow` or `Deny`.", "Allow")
+    host_rules: list[EgressHostRule] | None = config_field("Simple host-pattern allow/deny rules.")
+    rules: list[EgressRule] | None = config_field("Advanced egress rules.")
+    traffic_inspection: str | None = config_field("Traffic inspection mode: `Legacy`, `Full`, `Partial`, or `None`.")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> EgressPolicy:
+        require_known_fields(data, cls, field_name, aliases={"defaultAction", "hostRules", "trafficInspection"})
+        kwargs: dict[str, Any] = {}
+        if "defaultAction" in data:
+            kwargs["default_action"] = data["defaultAction"]
+        if "default_action" in data:
+            kwargs["default_action"] = data["default_action"]
+        if "hostRules" in data:
+            kwargs["host_rules"] = data["hostRules"]
+        if "host_rules" in data:
+            kwargs["host_rules"] = data["host_rules"]
+        if "trafficInspection" in data:
+            kwargs["traffic_inspection"] = data["trafficInspection"]
+        if "traffic_inspection" in data:
+            kwargs["traffic_inspection"] = data["traffic_inspection"]
+        if "rules" in data:
+            kwargs["rules"] = data["rules"]
+        require_optional_literal(kwargs, "default_action", {"Allow", "Deny"}, field_name)
+        require_optional_literal(kwargs, "traffic_inspection", {"Legacy", "Full", "Partial", "None"}, field_name)
+        if kwargs.get("host_rules") is not None:
+            host_rules = require_list_of_objects(kwargs["host_rules"], f"{field_name}.hostRules")
+            kwargs["host_rules"] = [
+                EgressHostRule.from_dict(item, field_name=f"{field_name}.hostRules[{index}]")
+                for index, item in enumerate(host_rules)
+            ]
+        if kwargs.get("rules") is not None:
+            rules = require_list_of_objects(kwargs["rules"], f"{field_name}.rules")
+            kwargs["rules"] = [
+                EgressRule.from_dict(item, field_name=f"{field_name}.rules[{index}]")
+                for index, item in enumerate(rules)
+            ]
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"defaultAction": self.default_action}
+        if self.host_rules:
+            data["hostRules"] = [rule.to_dict() for rule in self.host_rules]
+        if self.rules:
+            data["rules"] = [rule.to_dict() for rule in self.rules]
+        if self.traffic_inspection is not None:
+            data["trafficInspection"] = self.traffic_inspection
+        return data
+
+
+@dataclass(frozen=True)
+class ValueProvider:
+    """Reusable value provider for profile placeholders."""
+
+    command: list[str] = required_config_field(
+        "Command argv to run on the host; stripped stdout is substituted as the final provider value. Example: [\"sh\", \"-c\", \"printf 'Bearer example-token'\"]."
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> ValueProvider:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        if "command" not in kwargs:
+            raise ValueError(f"{field_name}.command is required")
+        kwargs["command"] = require_list_of_strings(kwargs["command"], f"{field_name}.command")
+        if not kwargs["command"]:
+            raise ValueError(f"{field_name}.command must not be empty")
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
+class AzureSandboxResource:
+    """Azure resource coordinates for a sandbox group."""
+
+    endpoint: str | None = config_field(
+        "Full Azure Sandbox data-plane endpoint. If omitted, `region` builds `https://management.<region>.azuredevcompute.io`. Example: \"https://management.eastus2.azuredevcompute.io\"."
+    )
+    region: str | None = config_field("Azure region used when `endpoint` is omitted. Example: \"eastus2\".")
+    subscription_id: str | None = config_field("Azure subscription ID. Example: \"00000000-0000-0000-0000-000000000000\".")
+    resource_group: str | None = config_field("Azure resource group containing the sandbox group. Example: \"my-resource-group\".")
+    sandbox_group: str | None = config_field("Azure Sandbox group name. Example: \"my-sandbox-group\".")
+    api_version: str | None = config_field("Data-plane API version. Defaults to 2026-02-01-preview. Example: \"2026-02-01-preview\".")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> AzureSandboxResource:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_optional_strings(
+            kwargs,
+            {"endpoint", "region", "subscription_id", "resource_group", "sandbox_group", "api_version"},
+            field_name,
+        )
+        return cls(**kwargs)
+
+
+@dataclass(frozen=True)
+class OciImageSource:
+    """OCI/container image source used to build a temporary Azure Sandbox disk image."""
+
+    image: str = required_config_field("OCI/container image reference. Example: \"ghcr.io/example/smol-agent:latest\".")
+    name: str | None = config_field("Optional label name for the temporary disk image. Example: \"smol-agent\".")
+    entrypoint: list[str] | None = config_field("Optional disk image entrypoint. Example: [\"/bin/sh\"].")
+    cmd: list[str] | None = config_field("Optional disk image command. Example: [\"-lc\", \"sleep infinity\"].")
+    managed_identity_resource_id: str | None = config_field("Optional managed identity resource ID for private registry pulls. Example: \"/subscriptions/.../resourceGroups/.../providers/Microsoft.ManagedIdentity/userAssignedIdentities/...\".")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, field_name: str) -> OciImageSource:
+        require_known_fields(data, cls, field_name)
+        kwargs = dict(data)
+        require_string(kwargs, "image", field_name)
+        require_optional_strings(kwargs, {"name", "managed_identity_resource_id"}, field_name)
+        if kwargs.get("entrypoint") is not None:
+            kwargs["entrypoint"] = require_list_of_strings(kwargs["entrypoint"], f"{field_name}.entrypoint")
+        if kwargs.get("cmd") is not None:
+            kwargs["cmd"] = require_list_of_strings(kwargs["cmd"], f"{field_name}.cmd")
+        return cls(**kwargs)
+
+
+@dataclass(frozen=True)
+class AzureProfileConfig:
+    """Configuration for one profile under `profiles.<name>` in config.json."""
+
+    azure: AzureSandboxResource | None = config_field("Azure subscription/resource group/sandbox group coordinates. Example: {\"region\": \"eastus2\", \"subscription_id\": \"...\", \"resource_group\": \"my-rg\", \"sandbox_group\": \"my-sg\"}.")
+    snapshot_id: str | None = config_field("Restore a sandbox from this snapshot ID. Example: \"00000000-0000-0000-0000-000000000000\".")
+    disk_id: str | None = config_field("Create from this disk image ID. Example: \"disk-image-id\".")
+    oci_image: OciImageSource | None = config_field("Build a temporary disk image from this OCI/container image, then create the sandbox from it. Example: {\"image\": \"ghcr.io/example/smol-agent:latest\"}.")
+    preset: str | None = config_field("Create from this preset sandbox type. Example: \"python\".")
+    disk: str | None = config_field("Public disk image name when no snapshot/disk_id/preset/oci_image is set. Example: \"ubuntu\".")
+    cpu: str | None = config_field("CPU allocation. Example: \"1000m\".")
+    memory: str | None = config_field("Memory allocation. Example: \"2048Mi\".")
+    auto_suspend_seconds: int | None = config_field("Auto-suspend interval for newly created sandboxes. Example: 300.")
+    cwd: str | None = config_field("Default working directory returned to smol-workflows. Example: \"/workspace\".")
+    sync_workspace: bool | None = config_field("Whether to upload the workflow workspace on open. Example: false.")
+    keep_on_close: bool | None = config_field("Debug/inspection escape hatch: leave the sandbox and any temporary disk image alive when the workflow closes the session. Example: true.")
+    workspace_skip_dirs: list[str] | None = config_field("Directory names skipped during workspace upload. Example: [\".git\", \"node_modules\", \"target\"].")
+    workspace_max_file_size: int | None = config_field("Max bytes per uploaded workspace file. Example: 4194304.")
+    labels: dict[str, str] | None = config_field("Extra labels applied to newly created sandboxes. Example: {\"team\": \"workflow\"}.")
+    environment: dict[str, str] | None = config_field("Environment variables applied at sandbox creation. Example: {\"FOO\": \"bar\"}.")
+    connections: list[str] | None = config_field("Azure Sandbox connection names applied at creation. Example: [\"my-connection\"].")
+    value_providers: dict[str, ValueProvider] | None = config_field(
+        "Reusable value providers referenced by egress policy strings as `${value_providers.<name>}`. Example: {\"example_api_auth\": {\"command\": [\"sh\", \"-c\", \"printf 'Bearer example-token'\"]}}."
+    )
+    egress_policy: EgressPolicy | None = config_field(
+        "Base Azure Sandbox egress policy (`defaultAction`, `trafficInspection`, `hostRules`, `rules`), using the Azure Sandbox Python SDK model shape. Header values may reference providers with `${value_providers.<name>}`. Example: {\"defaultAction\": \"Allow\", \"trafficInspection\": \"Partial\"}."
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, profile_name: str, path: Path) -> AzureProfileConfig:
+        allowed = {field.name for field in fields(cls)}
+        unknown = sorted(str(key) for key in data.keys() if key not in allowed)
+        if unknown:
+            raise ValueError(f"profile `{profile_name}` in {path} has unknown field(s): {', '.join(unknown)}")
+        kwargs = dict(data)
+        field_prefix = f"profile `{profile_name}`"
+        require_optional_strings(
+            kwargs,
+            {
+                "snapshot_id",
+                "disk_id",
+                "preset",
+                "disk",
+                "cpu",
+                "memory",
+                "cwd",
+            },
+            field_prefix,
+        )
+        require_optional_ints(
+            kwargs,
+            {
+                "auto_suspend_seconds",
+                "workspace_max_file_size",
+            },
+            field_prefix,
+        )
+        require_optional_bools(kwargs, {"sync_workspace", "keep_on_close"}, field_prefix)
+        if kwargs.get("oci_image") is not None:
+            kwargs["oci_image"] = OciImageSource.from_dict(
+                require_object(kwargs["oci_image"], f"{field_prefix}.oci_image"),
+                field_name=f"{field_prefix}.oci_image",
+            )
+        if kwargs.get("azure") is not None:
+            kwargs["azure"] = AzureSandboxResource.from_dict(
+                require_object(kwargs["azure"], f"{field_prefix}.azure"),
+                field_name=f"{field_prefix}.azure",
+            )
+        if kwargs.get("workspace_skip_dirs") is not None:
+            kwargs["workspace_skip_dirs"] = require_list_of_strings(
+                kwargs["workspace_skip_dirs"], f"{field_prefix}.workspace_skip_dirs"
+            )
+        if kwargs.get("connections") is not None:
+            kwargs["connections"] = require_list_of_strings(kwargs["connections"], f"{field_prefix}.connections")
+        if kwargs.get("labels") is not None:
+            kwargs["labels"] = require_dict_of_strings(kwargs["labels"], f"{field_prefix}.labels")
+        if kwargs.get("environment") is not None:
+            kwargs["environment"] = require_dict_of_strings(kwargs["environment"], f"{field_prefix}.environment")
+        if kwargs.get("value_providers") is not None:
+            raw_value_providers = require_object(kwargs["value_providers"], f"{field_prefix}.value_providers")
+            kwargs["value_providers"] = {
+                str(name): ValueProvider.from_dict(
+                    require_object(value_provider, f"{field_prefix}.value_providers.{name}"),
+                    field_name=f"{field_prefix}.value_providers.{name}",
+                )
+                for name, value_provider in raw_value_providers.items()
+            }
+        if kwargs.get("egress_policy") is not None:
+            kwargs["egress_policy"] = EgressPolicy.from_dict(
+                require_object(kwargs["egress_policy"], f"{field_prefix}.egress_policy"),
+                field_name=f"{field_prefix}.egress_policy",
+            )
+        return cls(**kwargs)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if self.value_providers is not None:
+            data["value_providers"] = {name: value_provider.to_dict() for name, value_provider in self.value_providers.items()}
+        if self.egress_policy is not None:
+            data["egress_policy"] = self.egress_policy.to_dict()
+        return {key: value for key, value in data.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class AzureProfile:
+    name: str
+    config: AzureProfileConfig
+
+    @classmethod
+    def load(cls, profile_name: str) -> AzureProfile:
+        path = profile_config_path()
+        if path.exists():
+            config = read_profile_config(path)
+            raw_profiles = config.get("profiles")
+            if not isinstance(raw_profiles, dict):
+                raise ValueError(f"config {path} must contain a `profiles` object")
+            raw_profile = raw_profiles.get(profile_name)
+            if raw_profile is None:
+                available = ", ".join(sorted(str(name) for name in raw_profiles.keys()))
+                raise ValueError(
+                    f"profile `{profile_name}` not found in {path}; available profiles: {available or '(none)'}"
+                )
+            if not isinstance(raw_profile, dict):
+                raise ValueError(f"profile `{profile_name}` in {path} must be a JSON object")
+            return cls(profile_name, AzureProfileConfig.from_dict(raw_profile, profile_name=profile_name, path=path))
+
+        raise FileNotFoundError(
+            f"Azure sandbox config not found at {path}. Set CONFIG_BASE, pass --config, or create the profile config."
+        )
+
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog=Path(sys.argv[0]).name,
+        description="Azure Sandbox provider for smol-workflows.",
+    )
+    config_parent = argparse.ArgumentParser(add_help=False)
+    config_parent.add_argument(
+        "--config",
+        help="path to azure-sandbox config.json; overrides AZURE_SANDBOX_CONFIG_PATH and CONFIG_BASE",
+    )
+
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("serve", parents=[config_parent], help="run the stdio JSONL sandbox provider")
+
+    list_parser = subcommands.add_parser("list-profiles", parents=[config_parent], help="list configured Azure sandbox profiles")
+    list_parser.add_argument("--json", action="store_true", help="emit JSON instead of one profile per line")
+
+    describe_parser = subcommands.add_parser("describe-profile", help="describe supported profile config fields")
+    describe_parser.add_argument("--json", action="store_true", help="emit field docs as JSON")
+
+    create_parser = subcommands.add_parser("create-profile", parents=[config_parent], help="create or update an Azure sandbox profile")
+    create_parser.add_argument("name", help="profile name used in azure-sandbox/<name>")
+    create_parser.add_argument("--force", action="store_true", help="overwrite an existing profile")
+    create_parser.add_argument("--endpoint", help="full Azure Sandbox data-plane endpoint")
+    create_parser.add_argument("--region", help="Azure region; used to build the endpoint if --endpoint is omitted")
+    create_parser.add_argument("--subscription-id", help="Azure subscription ID")
+    create_parser.add_argument("--resource-group", help="Azure resource group")
+    create_parser.add_argument("--sandbox-group", help="Azure sandbox group")
+    create_parser.add_argument("--api-version", help="Azure Sandbox API version")
+    source = create_parser.add_mutually_exclusive_group()
+    source.add_argument("--snapshot-id", help="snapshot ID to restore")
+    source.add_argument("--disk-id", help="disk image ID to use")
+    source.add_argument("--oci-image", help="OCI/container image to build into a temporary disk image")
+    source.add_argument("--preset", help="preset sandbox type to use")
+    create_parser.add_argument("--disk", help="public disk image name", default=None)
+    create_parser.add_argument("--oci-entrypoint-json", help="JSON array entrypoint for --oci-image")
+    create_parser.add_argument("--oci-cmd-json", help="JSON array command for --oci-image")
+    create_parser.add_argument("--oci-managed-identity-resource-id", help="managed identity resource ID for private OCI image pulls")
+    create_parser.add_argument("--cpu", help="CPU allocation, e.g. 1000m")
+    create_parser.add_argument("--memory", help="memory allocation, e.g. 2048Mi")
+    create_parser.add_argument("--auto-suspend-seconds", type=int, help="auto-suspend interval")
+    create_parser.add_argument("--cwd", help="default sandbox working directory")
+    sync = create_parser.add_mutually_exclusive_group()
+    sync.add_argument("--sync-workspace", dest="sync_workspace", action="store_true", help="upload the workflow workspace on open")
+    sync.add_argument("--no-sync-workspace", dest="sync_workspace", action="store_false", help="do not upload the workflow workspace on open")
+    create_parser.set_defaults(sync_workspace=None)
+    create_parser.add_argument("--workspace-max-file-size", type=int, help="maximum file size to upload during workspace sync")
+    create_parser.add_argument(
+        "--workspace-skip-dir",
+        action="append",
+        dest="workspace_skip_dirs",
+        help="directory name to skip during workspace sync; may be repeated",
+    )
+    create_parser.add_argument("--labels-json", help="JSON object of labels to add to created sandboxes")
+    create_parser.add_argument("--environment-json", help="JSON object of environment variables for created sandboxes")
+    create_parser.add_argument("--connections-json", help="JSON array of Azure sandbox connections")
+    create_parser.add_argument("--egress-policy-json", help="JSON object for POST /egresspolicy after creation")
+    create_parser.add_argument(
+        "--value-provider-json",
+        action="append",
+        dest="value_providers_json",
+        metavar="NAME=JSON",
+        help="define a reusable value provider; JSON is a ValueProvider object and may be repeated",
+    )
+
+    args = parser.parse_args()
+    global CONFIG_PATH_OVERRIDE
+    if getattr(args, "config", None):
+        CONFIG_PATH_OVERRIDE = Path(args.config)
+    if args.command == "serve":
+        return serve()
+    if args.command == "list-profiles":
+        return list_profiles(json_output=args.json)
+    if args.command == "describe-profile":
+        return describe_profile(json_output=args.json)
+    if args.command == "create-profile":
+        return create_profile(args)
+    parser.error(f"unknown command {args.command}")
+    return 2
+
+
+def describe_profile(*, json_output: bool) -> int:
+    docs = {
+        "AzureProfileConfig": describe_dataclass(AzureProfileConfig),
+        "AzureSandboxResource": describe_dataclass(AzureSandboxResource),
+        "OciImageSource": describe_dataclass(OciImageSource),
+        "ValueProvider": describe_dataclass(ValueProvider),
+        "EgressPolicy": describe_dataclass(EgressPolicy),
+        "EgressHostRule": describe_dataclass(EgressHostRule),
+        "EgressRule": describe_dataclass(EgressRule),
+        "EgressRuleMatch": describe_dataclass(EgressRuleMatch),
+        "EgressRuleAction": describe_dataclass(EgressRuleAction),
+        "EgressHeader": describe_dataclass(EgressHeader),
+    }
+    if json_output:
+        print(json.dumps(docs, indent=2, sort_keys=True))
+    else:
+        for model_name, model_docs in docs.items():
+            print(model_name)
+            for field_name, doc in model_docs.items():
+                print(f"  {field_name}: {doc}")
+            print()
+    return 0
+
+
+def describe_dataclass(model: type) -> dict[str, str]:
+    return {model_field.name: str(model_field.metadata.get("doc", "")) for model_field in fields(model)}
+
+
+def list_profiles(*, json_output: bool) -> int:
+    path = profile_config_path()
+    config = read_profile_config(path)
+    profiles = config.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError(f"config {path} must contain a `profiles` object")
+    names = sorted(str(name) for name in profiles.keys())
+    if json_output:
+        print(json.dumps({"config_path": str(path), "profiles": names}, indent=2))
+    else:
+        for name in names:
+            print(name)
+    return 0
+
+
+def create_profile(args: argparse.Namespace) -> int:
+    path = profile_config_path()
+    config = read_profile_config(path)
+    profiles = config.setdefault("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError(f"config {path} must contain a `profiles` object")
+    if args.name in profiles and not args.force:
+        raise SystemExit(f"profile `{args.name}` already exists in {path}; pass --force to overwrite")
+
+    azure = AzureSandboxResource(
+        endpoint=args.endpoint,
+        region=args.region,
+        subscription_id=args.subscription_id,
+        resource_group=args.resource_group,
+        sandbox_group=args.sandbox_group,
+        api_version=args.api_version,
+    )
+    oci_image = None
+    if args.oci_image:
+        oci_image = OciImageSource(
+            image=args.oci_image,
+            entrypoint=parse_json_string_array_arg(args.oci_entrypoint_json, "--oci-entrypoint-json"),
+            cmd=parse_json_string_array_arg(args.oci_cmd_json, "--oci-cmd-json"),
+            managed_identity_resource_id=args.oci_managed_identity_resource_id,
+        )
+    profile = AzureProfileConfig(
+        azure=azure,
+        snapshot_id=args.snapshot_id,
+        disk_id=args.disk_id,
+        oci_image=oci_image,
+        preset=args.preset,
+        disk=args.disk,
+        cpu=args.cpu,
+        memory=args.memory,
+        auto_suspend_seconds=args.auto_suspend_seconds,
+        cwd=args.cwd,
+        sync_workspace=args.sync_workspace,
+        workspace_skip_dirs=args.workspace_skip_dirs,
+        workspace_max_file_size=args.workspace_max_file_size,
+        labels=parse_json_object_arg(args.labels_json, "--labels-json"),
+        environment=parse_json_string_object_arg(args.environment_json, "--environment-json"),
+        connections=parse_json_string_array_arg(args.connections_json, "--connections-json"),
+        value_providers=parse_value_providers_arg(args.value_providers_json),
+        egress_policy=parse_egress_policy_arg(args.egress_policy_json),
+    )
+    profile_dict = profile.to_dict()
+
+    azure_dict = profile_dict.get("azure", {})
+    missing = [key for key in ("subscription_id", "resource_group", "sandbox_group") if not azure_dict.get(key)]
+    if not azure.endpoint and not azure.region:
+        missing.append("endpoint or region")
+    if missing:
+        raise SystemExit("missing required profile setting(s): " + ", ".join(missing))
+
+    profiles[args.name] = profile_dict
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2, sort_keys=True)
+        file.write("\n")
+    print(f"wrote profile `{args.name}` to {path}")
+    return 0
+
+
+def read_profile_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"profiles": {}}
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"Azure sandbox config must be a JSON object: {path}")
+    if "profiles" not in data:
+        data = {"profiles": data}
+    return data
+
+
+def require_known_fields(data: dict[str, Any], model: type, field_name: str, aliases: set[str] | None = None) -> None:
+    allowed = {field.name for field in fields(model)} | (aliases or set())
+    unknown = sorted(str(key) for key in data.keys() if key not in allowed)
+    if unknown:
+        raise ValueError(f"{field_name} has unknown field(s): {', '.join(unknown)}")
+
+
+def require_object(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return value
+
+
+def require_list_of_objects(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a JSON array")
+    if not all(isinstance(item, dict) for item in value):
+        raise ValueError(f"{field_name} entries must be JSON objects")
+    return value
+
+
+def require_string(data: dict[str, Any], key: str, field_prefix: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_prefix}.{key} must be a non-empty string")
+
+
+def require_optional_strings(data: dict[str, Any], keys: set[str], field_prefix: str) -> None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field_prefix}.{key} must be a string")
+
+
+def require_optional_ints(data: dict[str, Any], keys: set[str], field_prefix: str) -> None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+            raise ValueError(f"{field_prefix}.{key} must be an integer")
+
+
+def require_optional_floats(data: dict[str, Any], keys: set[str], field_prefix: str) -> None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+            raise ValueError(f"{field_prefix}.{key} must be a number")
+
+
+def require_optional_bools(data: dict[str, Any], keys: set[str], field_prefix: str) -> None:
+    for key in keys:
+        value = data.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"{field_prefix}.{key} must be a boolean")
+
+
+def require_optional_literal(data: dict[str, Any], key: str, allowed: set[str], field_prefix: str) -> None:
+    value = data.get(key)
+    if value is not None and value not in allowed:
+        allowed_values = ", ".join(f"`{item}`" for item in sorted(allowed))
+        raise ValueError(f"{field_prefix}.{key} must be one of {allowed_values}")
+
+
+def require_list_of_strings(value: Any, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a JSON array")
+    if not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} entries must be strings")
+    return value
+
+
+def require_dict_of_strings(value: Any, field_name: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    if not all(isinstance(key, str) and isinstance(val, str) for key, val in value.items()):
+        raise ValueError(f"{field_name} keys and values must be strings")
+    return value
+
+
+def parse_egress_policy_arg(value: str | None) -> EgressPolicy | None:
+    parsed = parse_json_object_arg(value, "--egress-policy-json")
+    if parsed is None:
+        return None
+    try:
+        return EgressPolicy.from_dict(parsed, field_name="--egress-policy-json")
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+
+def parse_value_providers_arg(values: list[str] | None) -> dict[str, ValueProvider] | None:
+    if not values:
+        return None
+    value_providers: dict[str, ValueProvider] = {}
+    for index, value in enumerate(values):
+        if "=" not in value:
+            raise SystemExit("--value-provider-json must be NAME=JSON")
+        name, raw_json = value.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise SystemExit("--value-provider-json provider name must not be empty")
+        parsed = parse_json_object_arg(raw_json, "--value-provider-json")
+        assert parsed is not None
+        try:
+            value_providers[name] = ValueProvider.from_dict(parsed, field_name=f"--value-provider-json[{index}]")
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+    return value_providers
+
+
+def parse_json_object_arg(value: str | None, flag: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{flag} must be a JSON object")
+    return parsed
+
+
+def parse_json_string_object_arg(value: str | None, flag: str) -> dict[str, str] | None:
+    parsed = parse_json_object_arg(value, flag)
+    if parsed is None:
+        return None
+    try:
+        return require_dict_of_strings(parsed, flag)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+
+def parse_json_string_array_arg(value: str | None, flag: str) -> list[str] | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    try:
+        return require_list_of_strings(parsed, flag)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
+
+def serve() -> int:
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        request_id = ""
+        try:
+            envelope = json.loads(raw)
+            request_id = str(envelope.get("id", ""))
+            method = str(envelope.get("method", ""))
+            params = envelope.get("params", {})
+            result = handle_rpc_method(request_id, method, params)
+            if result == "__shutdown__":
+                write_json_line({"id": request_id, "result": {}})
+                return 0
+            write_json_line({"id": request_id, "result": result if result is not None else {}})
+        except ProviderRpcError as error:
+            write_json_line({"id": error.request_id or request_id, "error": provider_error(error.code, error.message, error.retryable)})
+        except Exception as error:  # noqa: BLE001
+            print(f"azure-sandbox provider error: {error}", file=sys.stderr)
+            write_json_line({"id": request_id, "error": provider_error("provider_failure", str(error), False)})
+    return 0
+
+
+def handle_rpc_method(request_id: str, method: str, params: dict[str, Any]) -> Any:
+    if method == "capabilities":
+        return {"exec": True}
+    if method == "open":
+        return open_sandbox(request_id, OpenSandboxRequest.from_dict(params)).to_dict()
+    if method == "close":
+        close_session(SandboxSession.from_dict(params.get("session", {})))
+        return {}
+    if method == "cleanup_group":
+        # Azure does not support group labels consistently enough for a safe broad delete here.
+        # Per-session close is the authoritative cleanup path for this prototype.
+        CleanupSandboxGroupRequest.from_dict(params)
+        return {"cleaned_count": 0}
+    if method == "create_temp_dir":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        prefix = shlex.quote(str(params.get("prefix", "smol-wf-")))
+        output = exec_command(session, f"mktemp -d /tmp/{prefix}.XXXXXX")
+        if output["exit_code"] != 0:
+            raise ProviderRpcError(request_id, "exec_failed", output["stderr"].decode("utf-8", "replace"), False)
+        return {"path": output["stdout"].decode("utf-8", "replace").strip()}
+    if method == "create_dir_all":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        path = resolve_session_path(session, str(params["path"]))
+        output = exec_command(session, f"mkdir -p {shlex.quote(path)}")
+        if output["exit_code"] != 0:
+            raise ProviderRpcError(request_id, "exec_failed", output["stderr"].decode("utf-8", "replace"), False)
+        return {}
+    if method == "write_file":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        path = resolve_session_path(session, str(params["path"]))
+        content = base64.b64decode(str(params.get("content_base64", "")))
+        client_from_session(session).write_file(path, content, create_dirs=True)
+        return {}
+    if method == "read_file":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        path = resolve_session_path(session, str(params["path"]))
+        content = client_from_session(session).read_file(path)
+        return {"content_base64": base64.b64encode(content).decode("ascii")}
+    if method == "remove":
+        session = SandboxSession.from_dict(params.get("session", {}))
+        path = resolve_session_path(session, str(params["path"]))
+        try:
+            client_from_session(session).delete_file(path, recursive=True)
+        except AzureHttpError as error:
+            if error.status != 404:
+                raise
+        return {}
+    if method == "exec":
+        return exec_rpc(request_id, params)
+    if method == "spawn":
+        return spawn_rpc(request_id, params)
+    if method == "shutdown":
+        return "__shutdown__"
+    raise ProviderRpcError(request_id, "unknown_method", f"unknown method `{method}`", False)
+
+
+def open_sandbox(request_id: str, request: OpenSandboxRequest) -> SandboxSession:
+    if request.profile.provider != PROVIDER:
+        raise ProviderRpcError(
+            request_id,
+            "bad_profile",
+            f"azure-sandbox can only open provider `{PROVIDER}`, got `{request.profile.provider}`",
+            False,
+        )
+    profile = AzureProfile.load(request.profile.name)
+    profile_config = profile.config
+    config = AzureConfig.from_profile(profile_config)
+    client = AzureSandboxRestClient(config)
+    created_disk_image_id: str | None = None
+    try:
+        create_body, created_disk_image_id = build_create_body(client, request, profile)
+        sandbox = client.create_sandbox(create_body)
+        sandbox_id = str(sandbox.get("id") or "")
+        if not sandbox_id:
+            raise RuntimeError(f"create sandbox response did not include id: {sandbox}")
+        client.wait_for_running(sandbox_id)
+    except Exception:
+        if created_disk_image_id:
+            try:
+                client.delete_disk_image(created_disk_image_id)
+            except Exception as cleanup_error:  # noqa: BLE001
+                print(f"azure-sandbox failed to clean up temporary disk image {created_disk_image_id}: {cleanup_error}", file=sys.stderr)
+        raise
+    egress_policy = build_egress_policy(profile_config)
+    if egress_policy is not None:
+        client_for_sandbox = AzureSandboxRestClient(
+            AzureConfig(
+                endpoint=config.endpoint,
+                subscription_id=config.subscription_id,
+                resource_group=config.resource_group,
+                sandbox_group=config.sandbox_group,
+                sandbox_id=sandbox_id,
+                api_version=config.api_version,
+                http_timeout_seconds=config.http_timeout_seconds,
+            )
+        )
+        client_for_sandbox.set_egress_policy(egress_policy)
+    cwd = request.cwd or profile_config.cwd or "/workspace"
+    state = ProviderState(
+        endpoint=config.endpoint,
+        subscription_id=config.subscription_id,
+        resource_group=config.resource_group,
+        sandbox_group=config.sandbox_group,
+        sandbox_id=sandbox_id,
+        cwd=cwd,
+        api_version=config.api_version,
+        http_timeout_seconds=config.http_timeout_seconds,
+        created_disk_image_id=created_disk_image_id,
+        keep_on_close=bool(profile_config.keep_on_close),
+    )
+    session = SandboxSession(
+        id=sandbox_id,
+        provider_session_id=sandbox_id,
+        cwd=cwd,
+        capabilities={"exec": True},
+        provider_state_json=state.to_json(),
+    )
+    ensure_sandbox_cwd(session, cwd)
+    sync_workspace = profile_config.sync_workspace if profile_config.sync_workspace is not None else True
+    if sync_workspace:
+        skip_dirs = profile_config.workspace_skip_dirs or [".git", "node_modules", "target"]
+        sync_workspace_files(
+            client,
+            request.workspace_sync.host_path,
+            cwd,
+            skip_dirs=set(skip_dirs),
+            max_file_size=profile_config.workspace_max_file_size or WRITE_CHUNK_SIZE,
+        )
+    return session
+
+
+VALUE_PROVIDER_REF_RE = re.compile(r"\$\{value_providers\.([A-Za-z0-9_.-]+)\}")
+
+
+def build_egress_policy(profile: AzureProfileConfig) -> dict[str, Any] | None:
+    if profile.egress_policy is None:
+        return None
+    policy = profile.egress_policy.to_dict()
+    value_providers = profile.value_providers or {}
+    resolved_value_providers: dict[str, str] = {}
+    return resolve_value_provider_refs(policy, value_providers, resolved_value_providers)
+
+
+def resolve_value_provider_refs(value: Any, value_providers: dict[str, ValueProvider], resolved_value_providers: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {key: resolve_value_provider_refs(item, value_providers, resolved_value_providers) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_value_provider_refs(item, value_providers, resolved_value_providers) for item in value]
+    if isinstance(value, str):
+        return VALUE_PROVIDER_REF_RE.sub(lambda match: resolve_value_provider(match.group(1), value_providers, resolved_value_providers), value)
+    return value
+
+
+def resolve_value_provider(name: str, value_providers: dict[str, ValueProvider], resolved_value_providers: dict[str, str]) -> str:
+    if name in resolved_value_providers:
+        return resolved_value_providers[name]
+    value_provider = value_providers.get(name)
+    if value_provider is None:
+        available = ", ".join(sorted(value_providers.keys()))
+        raise ValueError(f"egress policy references unknown value provider `{name}`; available value providers: {available or '(none)'}")
+    value = run_value_provider(name, value_provider)
+    resolved_value_providers[name] = value
+    return value
+
+
+def run_value_provider(name: str, value_provider: ValueProvider) -> str:
+    return run_value_provider_command(name, value_provider.command)
+
+
+def run_value_provider_command(name: str, command: list[str]) -> str:
+    result = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"value provider `{name}` command failed exit_code={result.returncode}: {result.stderr.strip()}"
+        )
+    value = result.stdout.strip()
+    if not value:
+        raise RuntimeError(f"value provider `{name}` command returned empty stdout")
+    return value
+
+
+def create_temporary_disk_image(client: AzureSandboxRestClient, source: OciImageSource) -> str:
+    disk_image = client.create_disk_image(source)
+    disk_image_id = str(disk_image.get("id") or "")
+    if not disk_image_id:
+        raise RuntimeError(f"create disk image response did not include id: {disk_image}")
+    client.wait_for_disk_image_ready(
+        disk_image_id,
+        timeout_seconds=600,
+        poll_interval_seconds=5,
+    )
+    return disk_image_id
+
+
+def build_create_body(client: AzureSandboxRestClient, request: OpenSandboxRequest, profile: AzureProfile) -> tuple[dict[str, Any], str | None]:
+    profile_config = profile.config
+    snapshot_id = profile_config.snapshot_id
+    disk_id = profile_config.disk_id
+    oci_image = profile_config.oci_image
+    preset = profile_config.preset
+    disk = profile_config.disk or "ubuntu"
+    explicit = [
+        name
+        for name, value in (
+            ("snapshot_id", snapshot_id),
+            ("disk_id", disk_id),
+            ("oci_image", oci_image),
+            ("preset", preset),
+        )
+        if value
+    ]
+    if len(explicit) > 1:
+        raise ValueError(f"only one sandbox source may be configured, got {explicit}")
+
+    created_disk_image_id = None
+    body: dict[str, Any] = {}
+    if preset:
+        body["presetSandboxType"] = preset
+    elif snapshot_id:
+        body["sourcesRef"] = {"snapshot": {"id": snapshot_id}}
+    elif disk_id:
+        body["sourcesRef"] = {"diskImage": {"id": disk_id}}
+    elif oci_image:
+        created_disk_image_id = create_temporary_disk_image(client, oci_image)
+        body["sourcesRef"] = {"diskImage": {"id": created_disk_image_id}}
+    else:
+        body["sourcesRef"] = {"diskImage": {"name": disk, "isPublic": True}}
+
+    if not snapshot_id and not preset:
+        body["resources"] = {
+            "cpu": profile_config.cpu or "1000m",
+            "memory": profile_config.memory or "2048Mi",
+        }
+    if not snapshot_id:
+        body["lifecycle"] = {
+            "autoSuspendPolicy": {
+                "enabled": True,
+                "interval": profile_config.auto_suspend_seconds or 300,
+                "mode": "Memory",
+            }
+        }
+        body["labels"] = {
+            "smol-workflows": "true",
+            "sandbox-group-id": sanitize_label(request.metadata.sandbox_group_id),
+        }
+        extra_labels = profile_config.labels
+        if extra_labels is not None:
+            if not isinstance(extra_labels, dict):
+                raise ValueError("labels must be a JSON object")
+            body["labels"].update({str(k): str(v) for k, v in extra_labels.items()})
+        sandbox_env = profile_config.environment
+        if sandbox_env is not None:
+            if not isinstance(sandbox_env, dict):
+                raise ValueError("environment must be a JSON object")
+            body["environment"] = {str(k): str(v) for k, v in sandbox_env.items()}
+        connections = profile_config.connections
+        if connections is not None:
+            if not isinstance(connections, list):
+                raise ValueError("connections must be a JSON array")
+            body["connections"] = [str(value) for value in connections]
+    return body, created_disk_image_id
+
+
+def ensure_sandbox_cwd(session: SandboxSession, cwd: str) -> None:
+    if cwd == "/":
+        return
+    output = exec_command(session, f"mkdir -p {shlex.quote(cwd)}")
+    if output["exit_code"] != 0:
+        stderr = output["stderr"].decode("utf-8", "replace")
+        raise RuntimeError(f"failed to create sandbox cwd {cwd}: {stderr}")
+
+
+def sync_workspace_files(
+    client: AzureSandboxRestClient,
+    host_path: Path,
+    cwd: str,
+    *,
+    skip_dirs: set[str],
+    max_file_size: int,
+) -> None:
+    if not host_path.exists() or not host_path.is_dir():
+        return
+    for root, dirs, files in os.walk(host_path):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        root_path = Path(root)
+        rel_root = root_path.relative_to(host_path)
+        for name in files:
+            source = root_path / name
+            if source.is_symlink() or not source.is_file():
+                continue
+            rel = rel_root / name
+            target = path_join(cwd, rel.as_posix())
+            if source.stat().st_size > max_file_size:
+                print(f"azure-sandbox skipping large workspace file: {source}", file=sys.stderr)
+                continue
+            client.write_file(target, source.read_bytes(), create_dirs=True)
+
+
+def close_session(session: SandboxSession) -> None:
+    state = ProviderState.from_json(session.provider_state_json) if session.provider_state_json else None
+    client = client_from_session(session)
+    if state and state.keep_on_close:
+        print(
+            "azure-sandbox keep_on_close=true; leaving "
+            f"sandbox_id={state.sandbox_id} disk_image_id={state.created_disk_image_id or '(none)'} alive",
+            file=sys.stderr,
+        )
+        return
+    client.delete_sandbox()
+    if state and state.created_disk_image_id:
+        client.delete_disk_image(state.created_disk_image_id)
+
+
+def exec_rpc(request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    session = SandboxSession.from_dict(params.get("session", {}))
+    argv = [str(arg) for arg in params.get("argv", [])]
+    if not argv:
+        raise ProviderRpcError(request_id, "bad_request", "exec argv must not be empty", False)
+    stdin = base64.b64decode(str(params.get("stdin_base64", ""))) if params.get("stdin_base64") is not None else None
+    cwd = resolve_session_path(session, optional_str(params.get("cwd")) or session.cwd or "/")
+    command = shell_env_prefix(params.get("env", {})) + shlex.join(argv)
+    if stdin is not None:
+        tmp_path = f"/tmp/smol-stdin-{uuid.uuid4().hex}"
+        client_from_session(session).write_file(tmp_path, stdin, create_dirs=True)
+        command = f"{command} < {shlex.quote(tmp_path)}; rc=$?; rm -f {shlex.quote(tmp_path)}; exit $rc"
+    write_json_line({"id": request_id, "event": {"type": "started"}})
+    output = exec_command(session, command, cwd)
+    if output["stdout"]:
+        write_json_line({"id": request_id, "event": {"type": "stdout", "data_base64": base64.b64encode(output["stdout"]).decode("ascii")}})
+    if output["stderr"]:
+        write_json_line({"id": request_id, "event": {"type": "stderr", "data_base64": base64.b64encode(output["stderr"]).decode("ascii")}})
+    write_json_line({"id": request_id, "event": {"type": "exited", "exit_code": output["exit_code"]}})
+    return {
+        "exit_code": output["exit_code"],
+        "stdout_base64": base64.b64encode(output["stdout"]).decode("ascii"),
+        "stderr_base64": base64.b64encode(output["stderr"]).decode("ascii"),
+    }
+
+
+def spawn_rpc(request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    session = SandboxSession.from_dict(params.get("session", {}))
+    argv = [str(arg) for arg in params.get("argv", [])]
+    if not argv:
+        raise ProviderRpcError(request_id, "bad_request", "spawn argv must not be empty", False)
+    cwd = resolve_session_path(session, optional_str(params.get("cwd")) or session.cwd or "/")
+    command = f"cd {shlex.quote(cwd)} && nohup {shell_env_prefix(params.get('env', {}))}{shlex.join(argv)} >/dev/null 2>&1 < /dev/null & echo $!"
+    output = exec_command(session, command)
+    if output["exit_code"] != 0:
+        raise ProviderRpcError(request_id, "exec_failed", output["stderr"].decode("utf-8", "replace"), False)
+    process_id = output["stdout"].decode("utf-8", "replace").strip().splitlines()[-1:]
+    process_id_value = process_id[0] if process_id else None
+    write_json_line({"id": request_id, "event": {"type": "started", "process_id": process_id_value}})
+    return {"process_id": process_id_value}
+
+
+def exec_command(session: SandboxSession, command: str, cwd: str | None = None) -> dict[str, Any]:
+    client = client_from_session(session)
+    body: dict[str, Any] = {"command": command}
+    if cwd:
+        body["workingDirectory"] = cwd
+    result = client.post(f"{client.sbx_path}/executeShellCommand", body)
+    stdout = str(result.get("stdout", "")).encode("utf-8", "surrogatepass")
+    stderr = str(result.get("stderr", "")).encode("utf-8", "surrogatepass")
+    return {"exit_code": int(result.get("exitCode", 0)), "stdout": stdout, "stderr": stderr}
+
+
+def client_from_session(session: SandboxSession) -> AzureSandboxRestClient:
+    if not session.provider_state_json:
+        raise RuntimeError("azure sandbox session missing provider_state_json")
+    return AzureSandboxRestClient(AzureConfig.from_state(ProviderState.from_json(session.provider_state_json)))
+
+
+@dataclass(frozen=True)
+class AzureConfig:
+    endpoint: str
+    subscription_id: str
+    resource_group: str
+    sandbox_group: str
+    sandbox_id: str | None = None
+    api_version: str = DATA_PLANE_API_VERSION
+    create_timeout_seconds: int = 300
+    poll_interval_seconds: float = 3
+    http_timeout_seconds: int = 120
+
+    @classmethod
+    def from_profile(cls, profile: AzureProfileConfig) -> AzureConfig:
+        azure = profile.azure or missing_profile_key("azure")
+        endpoint = azure.endpoint
+        if not endpoint:
+            region = azure.region
+            if not region:
+                raise RuntimeError("profile.azure must set `endpoint` or `region`")
+            endpoint = f"https://management.{region}.azuredevcompute.io"
+        return cls(
+            endpoint=endpoint.rstrip("/"),
+            subscription_id=azure.subscription_id or missing_profile_key("azure.subscription_id"),
+            resource_group=azure.resource_group or missing_profile_key("azure.resource_group"),
+            sandbox_group=azure.sandbox_group or missing_profile_key("azure.sandbox_group"),
+            api_version=azure.api_version or DATA_PLANE_API_VERSION,
+            create_timeout_seconds=300,
+            poll_interval_seconds=3,
+            http_timeout_seconds=120,
+        )
+
+    @classmethod
+    def from_state(cls, state: ProviderState) -> AzureConfig:
+        return cls(
+            endpoint=state.endpoint,
+            subscription_id=state.subscription_id,
+            resource_group=state.resource_group,
+            sandbox_group=state.sandbox_group,
+            sandbox_id=state.sandbox_id,
+            api_version=state.api_version,
+            http_timeout_seconds=state.http_timeout_seconds,
+        )
+
+
+class AzureSandboxRestClient:
+    def __init__(self, config: AzureConfig) -> None:
+        self.config = config
+
+    @property
+    def group_path(self) -> str:
+        return (
+            f"/subscriptions/{quote(self.config.subscription_id, safe='')}"
+            f"/resourceGroups/{quote(self.config.resource_group, safe='')}"
+            f"/sandboxGroups/{quote(self.config.sandbox_group, safe='')}"
+        )
+
+    @property
+    def sbx_path(self) -> str:
+        if not self.config.sandbox_id:
+            raise RuntimeError("sandbox_id required")
+        return f"{self.group_path}/sandboxes/{quote(self.config.sandbox_id, safe='')}"
+
+    def create_sandbox(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self.put(f"{self.group_path}/sandboxes", body)
+
+    def get_sandbox(self, sandbox_id: str) -> dict[str, Any]:
+        return self.get(f"{self.group_path}/sandboxes/{quote(sandbox_id, safe='')}")
+
+    def create_disk_image(self, source: OciImageSource) -> dict[str, Any]:
+        body: dict[str, Any] = {"image": {"base": source.image}}
+        if source.entrypoint:
+            body["image"]["entrypoint"] = source.entrypoint
+        if source.cmd:
+            body["image"]["cmd"] = source.cmd
+        if source.name:
+            body["labels"] = {"name": source.name}
+        if source.managed_identity_resource_id:
+            body["managedIdentityResourceId"] = source.managed_identity_resource_id
+        return self.put(f"{self.group_path}/diskimages", body)
+
+    def get_disk_image(self, disk_image_id: str) -> dict[str, Any]:
+        return self.get(f"{self.group_path}/diskimages/{quote(disk_image_id, safe='')}")
+
+    def wait_for_disk_image_ready(
+        self,
+        disk_image_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            disk_image = self.get_disk_image(disk_image_id)
+            status = disk_image.get("status") if isinstance(disk_image.get("status"), dict) else {}
+            state = str(status.get("state") or "").lower()
+            if state in {"ready", "succeeded"}:
+                return disk_image
+            if state == "failed":
+                raise RuntimeError(f"disk image {disk_image_id} build failed: {status.get('message')}")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"disk image {disk_image_id} did not become Ready; last state={status.get('state')}")
+            time.sleep(poll_interval_seconds)
+
+    def delete_disk_image(self, disk_image_id: str) -> None:
+        self.delete(f"{self.group_path}/diskimages/{quote(disk_image_id, safe='')}", allowed=(200, 202, 204, 404))
+
+    def wait_for_running(self, sandbox_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.create_timeout_seconds
+        interval = self.config.poll_interval_seconds
+        while True:
+            sandbox = self.get_sandbox(sandbox_id)
+            state = str(sandbox.get("state", "")).lower()
+            if state == "running":
+                return sandbox
+            if state in {"failed", "deleting"}:
+                raise RuntimeError(f"sandbox {sandbox_id} entered terminal state {sandbox.get('state')}")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"sandbox {sandbox_id} did not reach Running state; last state={sandbox.get('state')}")
+            time.sleep(interval)
+
+    def delete_sandbox(self) -> None:
+        try:
+            self.delete(self.sbx_path, allowed=(200, 202, 204, 404))
+        except AzureHttpError as error:
+            if error.status != 404:
+                raise
+
+    def set_egress_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        return self.post(f"{self.sbx_path}/egresspolicy", policy)
+
+    def write_file(self, path: str, content: bytes, *, create_dirs: bool) -> None:
+        self.request(
+            "PUT",
+            f"{self.sbx_path}/files",
+            query={"path": path, "createDirs": str(create_dirs).lower()},
+            body=content,
+            headers={"Content-Type": "application/octet-stream"},
+            expect_json=False,
+            allowed=(200, 201, 204),
+        )
+
+    def read_file(self, path: str) -> bytes:
+        return self.request("GET", f"{self.sbx_path}/files", query={"path": path}, expect_json=False)
+
+    def delete_file(self, path: str, *, recursive: bool) -> None:
+        self.delete(f"{self.sbx_path}/files", query={"path": path, "recursive": str(recursive).lower()}, allowed=(200, 204, 404))
+
+    def get(self, path: str, query: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request("GET", path, query=query)
+
+    def put(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self.request("PUT", path, body=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+
+    def post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        encoded = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if body is not None else None
+        return self.request("POST", path, body=encoded, headers=headers)
+
+    def delete(self, path: str, query: dict[str, Any] | None = None, allowed: tuple[int, ...] = (200, 202, 204)) -> None:
+        self.request("DELETE", path, query=query, expect_json=False, allowed=allowed)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, Any] | None = None,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        expect_json: bool = True,
+        allowed: tuple[int, ...] = (200, 201, 202, 204),
+    ) -> Any:
+        query_params = {"api-version": self.config.api_version}
+        if query:
+            query_params.update({k: str(v) for k, v in query.items()})
+        url = f"{self.config.endpoint}{path}?{urlencode(query_params)}"
+        all_headers = {
+            "Authorization": f"Bearer {get_access_token()}",
+            "User-Agent": "smol-workflows-azure-sandbox/0",
+            **(headers or {}),
+        }
+        req = Request(url, data=body, headers=all_headers, method=method)
+        try:
+            with urlopen(req, timeout=self.config.http_timeout_seconds) as response:
+                status = response.status
+                data = response.read()
+        except HTTPError as error:
+            data = error.read()
+            raise AzureHttpError(error.code, data.decode("utf-8", "replace")) from error
+        except URLError as error:
+            raise RuntimeError(f"Azure sandbox HTTP {method} {path} failed: {error}") from error
+        if status not in allowed:
+            raise AzureHttpError(status, data.decode("utf-8", "replace"))
+        if not expect_json:
+            return data
+        if not data:
+            return {}
+        return json.loads(data.decode("utf-8"))
+
+
+class AzureHttpError(RuntimeError):
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"Azure sandbox HTTP {status}: {body}")
+        self.status = status
+        self.body = body
+
+
+class ProviderRpcError(Exception):
+    def __init__(self, request_id: str, code: str, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+
+
+def get_access_token(scope: str = DATA_PLANE_SCOPE) -> str:
+    cached = TOKEN_CACHE.get(scope)
+    if cached:
+        return cached
+    result = subprocess.run(
+        ["az", "account", "get-access-token", "--scope", scope, "--query", "accessToken", "-o", "tsv"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to obtain Azure access token via az: {result.stderr.strip()}")
+    token = result.stdout.strip()
+    if not token:
+        raise RuntimeError("az returned an empty Azure access token")
+    TOKEN_CACHE[scope] = token
+    return token
+
+
+def profile_config_path() -> Path:
+    if CONFIG_PATH_OVERRIDE is not None:
+        return CONFIG_PATH_OVERRIDE
+    config_path = os.environ.get("AZURE_SANDBOX_CONFIG_PATH")
+    if config_path:
+        return Path(config_path)
+    config_base = os.environ.get("CONFIG_BASE")
+    if config_base:
+        base = Path(config_base)
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config:
+            base = Path(xdg_config) / "smol-workflows"
+        elif sys.platform == "darwin" and os.environ.get("HOME"):
+            base = Path(os.environ["HOME"]) / "Library" / "Application Support" / "smol-workflows"
+        elif os.environ.get("HOME"):
+            base = Path(os.environ["HOME"]) / ".config" / "smol-workflows"
+        else:
+            base = Path(".")
+    return base / "sandbox-providers" / PROVIDER / "config.json"
+
+
+def shell_env_prefix(env: Any) -> str:
+    if not isinstance(env, dict) or not env:
+        return ""
+    return "env " + " ".join(
+        f"{shlex.quote(str(key))}={shlex.quote(str(value))}" for key, value in env.items()
+    ) + " "
+
+
+def resolve_session_path(session: SandboxSession, path: str) -> str:
+    if path.startswith("/"):
+        return path
+    return path_join(session.cwd or "/workspace", path)
+
+
+def path_join(base: str, child: str) -> str:
+    return f"{base.rstrip('/')}/{child.lstrip('/')}"
+
+
+def missing_profile_key(name: str) -> str:
+    raise RuntimeError(f"Azure sandbox profile must set `{name}`")
+
+
+def optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def sanitize_label(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in value)[:63] or "default"
+
+
+def provider_error(code: str, message: str, retryable: bool) -> dict[str, Any]:
+    return {"code": code, "message": message, "retryable": retryable}
+
+
+def write_json_line(value: Any) -> None:
+    json.dump(value, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

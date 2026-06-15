@@ -5,6 +5,9 @@
 # events log
 *.jsonl
 
+# local state
+.tmp/
+
 # direnv
 .direnv/
 .envrc.local

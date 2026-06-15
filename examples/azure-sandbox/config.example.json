@@ -1,0 +1,48 @@
+{
+  "profiles": {
+    "default": {
+      "azure": {
+        "region": "eastus2",
+        "subscription_id": "00000000-0000-0000-0000-000000000000",
+        "resource_group": "my-resource-group",
+        "sandbox_group": "my-sandbox-group"
+      },
+      "snapshot_id": "00000000-0000-0000-0000-000000000000",
+      "cwd": "/workspace",
+      "sync_workspace": false,
+      "value_providers": {
+        "example_api_auth": {
+          "command": [
+            "sh",
+            "-c",
+            "printf 'Bearer example-token'"
+          ]
+        }
+      },
+      "egress_policy": {
+        "defaultAction": "Allow",
+        "trafficInspection": "Partial",
+        "rules": [
+          {
+            "name": "example-api-auth",
+            "match": {
+              "host": "api.example.com",
+              "path": "/v1/*",
+              "methods": ["GET", "POST"]
+            },
+            "action": {
+              "type": "Transform",
+              "headers": [
+                {
+                  "operation": "Set",
+                  "name": "Authorization",
+                  "value": "${value_providers.example_api_auth}"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
