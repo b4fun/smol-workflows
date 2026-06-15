@@ -503,7 +503,7 @@ class AzureProfileConfig:
     cwd: str | None = config_field("Default working directory returned to smol-workflows. Example: \"/workspace\".")
     sync_workspace: bool | None = config_field("Whether to upload the workflow workspace on open. Example: false.")
     keep_on_close: bool | None = config_field("Debug/inspection escape hatch: leave the sandbox and any temporary disk image alive when the workflow closes the session. Example: true.")
-    workspace_skip_dirs: list[str] | None = config_field("Directory names skipped during workspace upload. Example: [\".git\", \"node_modules\", \"target\"].")
+    workspace_git_remote: str | None = config_field("Git remote name used by workspace sync. Example: \"origin\".")
     workspace_max_file_size: int | None = config_field("Max bytes per uploaded workspace file. Example: 4194304.")
     labels: dict[str, str] | None = config_field("Extra labels applied to newly created sandboxes. Example: {\"team\": \"workflow\"}.")
     environment: dict[str, str] | None = config_field("Environment variables applied at sandbox creation. Example: {\"FOO\": \"bar\"}.")
@@ -533,6 +533,7 @@ class AzureProfileConfig:
                 "cpu",
                 "memory",
                 "cwd",
+                "workspace_git_remote",
             },
             field_prefix,
         )
@@ -554,10 +555,6 @@ class AzureProfileConfig:
             kwargs["azure"] = AzureSandboxResource.from_dict(
                 require_object(kwargs["azure"], f"{field_prefix}.azure"),
                 field_name=f"{field_prefix}.azure",
-            )
-        if kwargs.get("workspace_skip_dirs") is not None:
-            kwargs["workspace_skip_dirs"] = require_list_of_strings(
-                kwargs["workspace_skip_dirs"], f"{field_prefix}.workspace_skip_dirs"
             )
         if kwargs.get("connections") is not None:
             kwargs["connections"] = require_list_of_strings(kwargs["connections"], f"{field_prefix}.connections")
@@ -665,13 +662,8 @@ def main() -> int:
     sync.add_argument("--sync-workspace", dest="sync_workspace", action="store_true", help="upload the workflow workspace on open")
     sync.add_argument("--no-sync-workspace", dest="sync_workspace", action="store_false", help="do not upload the workflow workspace on open")
     create_parser.set_defaults(sync_workspace=None)
-    create_parser.add_argument("--workspace-max-file-size", type=int, help="maximum file size to upload during workspace sync")
-    create_parser.add_argument(
-        "--workspace-skip-dir",
-        action="append",
-        dest="workspace_skip_dirs",
-        help="directory name to skip during workspace sync; may be repeated",
-    )
+    create_parser.add_argument("--workspace-git-remote", help="git remote name for workspace sync")
+    create_parser.add_argument("--workspace-max-file-size", type=int, help="maximum untracked file size to upload during workspace sync")
     create_parser.add_argument("--labels-json", help="JSON object of labels to add to created sandboxes")
     create_parser.add_argument("--environment-json", help="JSON object of environment variables for created sandboxes")
     create_parser.add_argument("--connections-json", help="JSON array of Azure sandbox connections")
@@ -780,7 +772,7 @@ def create_profile(args: argparse.Namespace) -> int:
         auto_suspend_seconds=args.auto_suspend_seconds,
         cwd=args.cwd,
         sync_workspace=args.sync_workspace,
-        workspace_skip_dirs=args.workspace_skip_dirs,
+        workspace_git_remote=args.workspace_git_remote,
         workspace_max_file_size=args.workspace_max_file_size,
         labels=parse_json_object_arg(args.labels_json, "--labels-json"),
         environment=parse_json_string_object_arg(args.environment_json, "--environment-json"),
@@ -1062,52 +1054,76 @@ def open_sandbox(request_id: str, request: OpenSandboxRequest) -> SandboxSession
             except Exception as cleanup_error:  # noqa: BLE001
                 print(f"azure-sandbox failed to clean up temporary disk image {created_disk_image_id}: {cleanup_error}", file=sys.stderr)
         raise
-    egress_policy = build_egress_policy(profile_config)
-    if egress_policy is not None:
-        client_for_sandbox = AzureSandboxRestClient(
-            AzureConfig(
-                endpoint=config.endpoint,
-                subscription_id=config.subscription_id,
-                resource_group=config.resource_group,
-                sandbox_group=config.sandbox_group,
-                sandbox_id=sandbox_id,
-                api_version=config.api_version,
-                http_timeout_seconds=config.http_timeout_seconds,
+    try:
+        egress_policy = build_egress_policy(profile_config)
+        if egress_policy is not None:
+            client_for_sandbox = AzureSandboxRestClient(
+                AzureConfig(
+                    endpoint=config.endpoint,
+                    subscription_id=config.subscription_id,
+                    resource_group=config.resource_group,
+                    sandbox_group=config.sandbox_group,
+                    sandbox_id=sandbox_id,
+                    api_version=config.api_version,
+                    http_timeout_seconds=config.http_timeout_seconds,
+                )
             )
+            client_for_sandbox.set_egress_policy(egress_policy)
+        cwd = request.cwd or profile_config.cwd or "/workspace"
+        state = ProviderState(
+            endpoint=config.endpoint,
+            subscription_id=config.subscription_id,
+            resource_group=config.resource_group,
+            sandbox_group=config.sandbox_group,
+            sandbox_id=sandbox_id,
+            cwd=cwd,
+            api_version=config.api_version,
+            http_timeout_seconds=config.http_timeout_seconds,
+            created_disk_image_id=created_disk_image_id,
+            keep_on_close=bool(profile_config.keep_on_close),
         )
-        client_for_sandbox.set_egress_policy(egress_policy)
-    cwd = request.cwd or profile_config.cwd or "/workspace"
-    state = ProviderState(
-        endpoint=config.endpoint,
-        subscription_id=config.subscription_id,
-        resource_group=config.resource_group,
-        sandbox_group=config.sandbox_group,
-        sandbox_id=sandbox_id,
-        cwd=cwd,
-        api_version=config.api_version,
-        http_timeout_seconds=config.http_timeout_seconds,
-        created_disk_image_id=created_disk_image_id,
-        keep_on_close=bool(profile_config.keep_on_close),
-    )
-    session = SandboxSession(
-        id=sandbox_id,
-        provider_session_id=sandbox_id,
-        cwd=cwd,
-        capabilities={"exec": True},
-        provider_state_json=state.to_json(),
-    )
-    ensure_sandbox_cwd(session, cwd)
-    sync_workspace = profile_config.sync_workspace if profile_config.sync_workspace is not None else True
-    if sync_workspace:
-        skip_dirs = profile_config.workspace_skip_dirs or [".git", "node_modules", "target"]
-        sync_workspace_files(
-            client,
-            request.workspace_sync.host_path,
-            cwd,
-            skip_dirs=set(skip_dirs),
-            max_file_size=profile_config.workspace_max_file_size or WRITE_CHUNK_SIZE,
+        session = SandboxSession(
+            id=sandbox_id,
+            provider_session_id=sandbox_id,
+            cwd=cwd,
+            capabilities={"exec": True},
+            provider_state_json=state.to_json(),
         )
-    return session
+        ensure_sandbox_cwd(session, cwd)
+        sync_workspace = profile_config.sync_workspace if profile_config.sync_workspace is not None else True
+        if sync_workspace:
+            sync_workspace_git(
+                client,
+                session,
+                request.workspace_sync.host_path,
+                cwd,
+                remote_name=profile_config.workspace_git_remote or "origin",
+                max_file_size=profile_config.workspace_max_file_size or WRITE_CHUNK_SIZE,
+            )
+        return session
+    except Exception:
+        if profile_config.keep_on_close:
+            print(
+                "azure-sandbox open failed with keep_on_close=true; leaving "
+                f"sandbox_id={sandbox_id} disk_image_id={created_disk_image_id or '(none)'} alive",
+                file=sys.stderr,
+            )
+        else:
+            cleanup_open_failure(client, sandbox_id, created_disk_image_id)
+        raise
+
+
+def cleanup_open_failure(client: AzureSandboxRestClient, sandbox_id: str | None, disk_image_id: str | None) -> None:
+    if sandbox_id:
+        try:
+            client.delete_sandbox_by_id(sandbox_id)
+        except Exception as cleanup_error:  # noqa: BLE001
+            print(f"azure-sandbox failed to clean up sandbox {sandbox_id}: {cleanup_error}", file=sys.stderr)
+    if disk_image_id:
+        try:
+            client.delete_disk_image(disk_image_id)
+        except Exception as cleanup_error:  # noqa: BLE001
+            print(f"azure-sandbox failed to clean up temporary disk image {disk_image_id}: {cleanup_error}", file=sys.stderr)
 
 
 VALUE_PROVIDER_REF_RE = re.compile(r"\$\{value_providers\.([A-Za-z0-9_.-]+)\}")
@@ -1256,31 +1272,82 @@ def ensure_sandbox_cwd(session: SandboxSession, cwd: str) -> None:
         raise RuntimeError(f"failed to create sandbox cwd {cwd}: {stderr}")
 
 
-def sync_workspace_files(
+def run_host_command(argv: list[str]) -> str:
+    return run_host_command_bytes(argv).decode("utf-8", "replace")
+
+
+def run_host_command_bytes(argv: list[str]) -> bytes:
+    result = subprocess.run(argv, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace")
+        raise RuntimeError(f"host command failed exit_code={result.returncode} argv={argv!r}: {stderr}")
+    return result.stdout
+
+
+def sync_workspace_git(
     client: AzureSandboxRestClient,
+    session: SandboxSession,
     host_path: Path,
     cwd: str,
     *,
-    skip_dirs: set[str],
+    remote_name: str,
     max_file_size: int,
 ) -> None:
-    if not host_path.exists() or not host_path.is_dir():
-        return
-    for root, dirs, files in os.walk(host_path):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        root_path = Path(root)
-        rel_root = root_path.relative_to(host_path)
-        for name in files:
-            source = root_path / name
-            if source.is_symlink() or not source.is_file():
-                continue
-            rel = rel_root / name
-            target = path_join(cwd, rel.as_posix())
-            if source.stat().st_size > max_file_size:
-                print(f"azure-sandbox skipping large workspace file: {source}", file=sys.stderr)
-                continue
-            client.write_file(target, source.read_bytes(), create_dirs=True)
+    repo_root = Path(run_host_command(["git", "-C", str(host_path), "rev-parse", "--show-toplevel"]).strip())
+    if host_path.resolve() != repo_root.resolve():
+        raise RuntimeError(
+            "git workspace sync currently requires the workflow cwd to be the git repository root "
+            f"(cwd={host_path}, repo_root={repo_root})"
+        )
+    commit = run_host_command(["git", "-C", str(repo_root), "rev-parse", "HEAD"]).strip()
+    remote_url = run_host_command(["git", "-C", str(repo_root), "remote", "get-url", remote_name]).strip()
+    command = " && ".join(
+        [
+            f"mkdir -p {shlex.quote(cwd)}",
+            f"if [ ! -d {shlex.quote(path_join(cwd, '.git'))} ]; then git -C {shlex.quote(cwd)} init; fi",
+            f"git -C {shlex.quote(cwd)} remote remove {shlex.quote(remote_name)} >/dev/null 2>&1 || true",
+            f"git -C {shlex.quote(cwd)} remote add {shlex.quote(remote_name)} {shlex.quote(remote_url)}",
+            f"git -C {shlex.quote(cwd)} fetch --depth=1 {shlex.quote(remote_name)} {shlex.quote(commit)} || git -C {shlex.quote(cwd)} fetch {shlex.quote(remote_name)} {shlex.quote(commit)}",
+            f"git -C {shlex.quote(cwd)} checkout --detach {shlex.quote(commit)}",
+            f"git -C {shlex.quote(cwd)} reset --hard {shlex.quote(commit)}",
+            f"git -C {shlex.quote(cwd)} clean -fdx",
+        ]
+    )
+    output = exec_command(session, command)
+    if output["exit_code"] != 0:
+        raise RuntimeError(
+            "failed to prepare sandbox git workspace: "
+            + output["stderr"].decode("utf-8", "replace")
+        )
 
+    sandbox_client = client_from_session(session)
+    patch = run_host_command_bytes(["git", "-C", str(repo_root), "diff", "--binary", "HEAD"])
+    if patch:
+        patch_path = f"/tmp/smol-workspace-delta-{uuid.uuid4().hex}.patch"
+        sandbox_client.write_file(patch_path, patch, create_dirs=True)
+        output = exec_command(
+            session,
+            f"git -C {shlex.quote(cwd)} apply --binary --whitespace=nowarn {shlex.quote(patch_path)}; "
+            f"rc=$?; rm -f {shlex.quote(patch_path)}; exit $rc",
+        )
+        if output["exit_code"] != 0:
+            raise RuntimeError(
+                "failed to apply sandbox git workspace patch: "
+                + output["stderr"].decode("utf-8", "replace")
+            )
+
+    untracked = run_host_command_bytes(
+        ["git", "-C", str(repo_root), "ls-files", "--others", "--exclude-standard", "-z"]
+    )
+    for raw_rel in [entry for entry in untracked.split(b"\0") if entry]:
+        rel = raw_rel.decode("utf-8")
+        source = repo_root / rel
+        if source.is_symlink() or not source.is_file():
+            continue
+        if source.stat().st_size > max_file_size:
+            print(f"azure-sandbox skipping large untracked workspace file: {source}", file=sys.stderr)
+            continue
+        sandbox_client.write_file(path_join(cwd, rel), source.read_bytes(), create_dirs=True)
 
 def close_session(session: SandboxSession) -> None:
     state = ProviderState.from_json(session.provider_state_json) if session.provider_state_json else None
@@ -1478,8 +1545,13 @@ class AzureSandboxRestClient:
             time.sleep(interval)
 
     def delete_sandbox(self) -> None:
+        if not self.config.sandbox_id:
+            raise RuntimeError("sandbox_id required")
+        self.delete_sandbox_by_id(self.config.sandbox_id)
+
+    def delete_sandbox_by_id(self, sandbox_id: str) -> None:
         try:
-            self.delete(self.sbx_path, allowed=(200, 202, 204, 404))
+            self.delete(f"{self.group_path}/sandboxes/{quote(sandbox_id, safe='')}", allowed=(200, 202, 204, 404))
         except AzureHttpError as error:
             if error.status != 404:
                 raise
