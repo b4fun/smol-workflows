@@ -1,0 +1,64 @@
+name: Agent tools container image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'containers/agent-tools/**'
+      - '.github/workflows/agent-tools-image.yml'
+  pull_request:
+    paths:
+      - 'containers/agent-tools/**'
+      - '.github/workflows/agent-tools-image.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build agent tools image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set image metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}/agent-tools"
+          image="$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')"
+          short_sha="${GITHUB_SHA::12}"
+          {
+            echo "image=$image"
+            echo "short_sha=$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}" \
+            --tag "${{ steps.meta.outputs.image }}:latest" \
+            containers/agent-tools
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}"
+          docker push "${{ steps.meta.outputs.image }}:latest"
