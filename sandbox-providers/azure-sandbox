@@ -82,6 +82,8 @@ DATA_PLANE_API_VERSION = "2026-02-01-preview"
 WRITE_CHUNK_SIZE = 4 * 1024 * 1024
 TOKEN_CACHE: dict[str, str] = {}
 CONFIG_PATH_OVERRIDE: Path | None = None
+REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+KEEP_ON_CLOSE_ENV = "AZURE_SANDBOX_ALLOW_KEEP_ON_CLOSE"
 
 
 @dataclass(frozen=True)
@@ -502,8 +504,8 @@ class AzureProfileConfig:
     auto_suspend_seconds: int | None = config_field("Auto-suspend interval for newly created sandboxes. Example: 300.")
     cwd: str | None = config_field("Default working directory returned to smol-workflows. Example: \"/workspace\".")
     sync_workspace: bool | None = config_field("Whether to upload the workflow workspace on open. Example: false.")
-    keep_on_close: bool | None = config_field("Debug/inspection escape hatch: leave the sandbox and any temporary disk image alive when the workflow closes the session. Example: true.")
-    workspace_git_remote: str | None = config_field("Git remote name used by workspace sync. Example: \"origin\".")
+    keep_on_close: bool | None = config_field("Debug/inspection escape hatch: leave the sandbox and any temporary disk image alive when the workflow closes the session. Requires AZURE_SANDBOX_ALLOW_KEEP_ON_CLOSE=1. Example: true.")
+    workspace_git_remote: str | None = config_field("Git remote name used by workspace sync. Must match ^[A-Za-z0-9][A-Za-z0-9_.-]*$. Example: \"origin\".")
     workspace_max_file_size: int | None = config_field("Max bytes per uploaded workspace file. Example: 4194304.")
     labels: dict[str, str] | None = config_field("Extra labels applied to newly created sandboxes. Example: {\"team\": \"workflow\"}.")
     environment: dict[str, str] | None = config_field("Environment variables applied at sandbox creation. Example: {\"FOO\": \"bar\"}.")
@@ -546,6 +548,8 @@ class AzureProfileConfig:
             field_prefix,
         )
         require_optional_bools(kwargs, {"sync_workspace", "keep_on_close"}, field_prefix)
+        if kwargs.get("workspace_git_remote") is not None:
+            validate_git_remote_name(kwargs["workspace_git_remote"], f"{field_prefix}.workspace_git_remote")
         if kwargs.get("oci_image") is not None:
             kwargs["oci_image"] = OciImageSource.from_dict(
                 require_object(kwargs["oci_image"], f"{field_prefix}.oci_image"),
@@ -817,6 +821,11 @@ def require_known_fields(data: dict[str, Any], model: type, field_name: str, ali
         raise ValueError(f"{field_name} has unknown field(s): {', '.join(unknown)}")
 
 
+def validate_git_remote_name(value: str, field_name: str) -> None:
+    if not REMOTE_NAME_RE.fullmatch(value):
+        raise ValueError(f"{field_name} must match {REMOTE_NAME_RE.pattern}")
+
+
 def require_object(value: Any, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object")
@@ -1037,6 +1046,8 @@ def open_sandbox(request_id: str, request: OpenSandboxRequest) -> SandboxSession
         )
     profile = AzureProfile.load(request.profile.name)
     profile_config = profile.config
+    if profile_config.keep_on_close and os.environ.get(KEEP_ON_CLOSE_ENV) != "1":
+        raise ValueError(f"keep_on_close requires {KEEP_ON_CLOSE_ENV}=1")
     config = AzureConfig.from_profile(profile_config)
     client = AzureSandboxRestClient(config)
     created_disk_image_id: str | None = None
@@ -1308,6 +1319,7 @@ def sync_workspace_git(
     remote_name: str,
     max_file_size: int,
 ) -> None:
+    validate_git_remote_name(remote_name, "workspace_git_remote")
     commit = run_host_command(["git", "-C", str(repo_root), "rev-parse", "HEAD"]).strip()
     remote_url = run_host_command(["git", "-C", str(repo_root), "remote", "get-url", remote_name]).strip()
     command = " && ".join(
@@ -1361,7 +1373,7 @@ def sync_workspace_git(
 def close_session(session: SandboxSession) -> None:
     state = ProviderState.from_json(session.provider_state_json) if session.provider_state_json else None
     client = client_from_session(session)
-    if state and state.keep_on_close:
+    if state and state.keep_on_close and os.environ.get(KEEP_ON_CLOSE_ENV) == "1":
         print(
             "azure-sandbox keep_on_close=true; leaving "
             f"sandbox_id={state.sandbox_id} disk_image_id={state.created_disk_image_id or '(none)'} alive",

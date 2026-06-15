@@ -366,8 +366,8 @@ Durable workflow runs use the Rust SQLite backend. The CLI uses this backend by 
 ## TODOs
 
 - [ ] improve context passing between agents; provide primitives for propagated context and workflow/pre-defined memory data
-- [ ] environment abstraction
-- [ ] environment sandbox / isolation
-- [ ] remote environment support
+- [x] environment abstraction
+- [x] environment sandbox / isolation
+- [x] remote environment support
 - [ ] human in the loop / steering support
 - [ ] cross-run aggregate budget reporting

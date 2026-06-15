@@ -132,6 +132,27 @@ For private registries, configure the Azure-managed identity used by the service
 }
 ```
 
+## Workspace sync
+
+When `sync_workspace` is enabled, the provider assumes the workspace is a git repository. It prepares the sandbox by fetching the local `HEAD` from `workspace_git_remote` (default `origin`), then applies local tracked changes as a binary git patch and uploads untracked non-ignored files.
+
+Requirements and limitations:
+
+- the sandbox image must include `git`;
+- local `HEAD` must be fetchable from `workspace_git_remote`;
+- ignored files are not synced;
+- symlinks and empty directories are not synced;
+- untracked files larger than `workspace_max_file_size` are skipped;
+- `workspace_git_remote` is validated as a simple git remote name, such as `origin`.
+
+If the workflow file is in a subdirectory of the repository, the repository is synced to `cwd` and the returned sandbox cwd is adjusted to the matching subdirectory. For example, local `examples/azure-sandbox` maps to `/workspace/examples/azure-sandbox` when profile `cwd` is `/workspace`.
+
+For manual inspection, `keep_on_close` can leave resources alive, but it requires an explicit process environment opt-in:
+
+```bash
+AZURE_SANDBOX_ALLOW_KEEP_ON_CLOSE=1
+```
+
 The example config also includes one reusable value provider and an egress policy that references the provider value:
 
 ```json

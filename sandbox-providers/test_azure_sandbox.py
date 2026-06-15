@@ -402,6 +402,49 @@ class AzureSandboxProviderTests(unittest.TestCase):
             self.assertEqual(json.loads(listed_from_env.stdout)["config_path"], str(config_path))
             self.assertEqual(json.loads(listed_from_env.stdout)["profiles"], ["repo"])
 
+    def test_profile_config_rejects_invalid_git_remote_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": {
+                            "bad": {
+                                "azure": {
+                                    "region": "eastus2",
+                                    "subscription_id": "sub",
+                                    "resource_group": "rg",
+                                    "sandbox_group": "sg",
+                                },
+                                "workspace_git_remote": "--upload-pack=sh",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(PROVIDER), "serve", "--config", str(config_path)],
+                input=json.dumps(
+                    {
+                        "id": "req_1",
+                        "method": "open",
+                        "params": {
+                            "metadata": {"sandbox_group_id": "group-1", "request_id": "open", "protocol_version": "sandbox.v1"},
+                            "profile": {"provider": "azure-sandbox", "name": "bad"},
+                            "workspace_sync": {"host_path": tmp},
+                        },
+                    }
+                )
+                + "\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            response = json.loads(result.stdout.strip())
+            self.assertEqual(response["error"]["code"], "provider_failure")
+            self.assertIn("workspace_git_remote must match", response["error"]["message"])
+
     def test_profile_config_rejects_wrong_json_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
