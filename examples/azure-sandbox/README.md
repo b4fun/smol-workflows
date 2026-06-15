@@ -99,7 +99,17 @@ or a public disk image name:
 { "disk": "ubuntu" }
 ```
 
-or an OCI/container image. When `oci_image` is configured, the provider builds a temporary Azure Sandbox disk image from the OCI image, creates the sandbox from that disk image, and deletes the temporary disk image when the sandbox closes:
+or an OCI/container image. When `oci_image` is configured, the provider builds a temporary Azure Sandbox disk image from the OCI image, creates the sandbox from that disk image, and deletes the temporary disk image when the sandbox closes. This repository publishes an agent-tools image with `pi`, `opencode`, `claude`, `codex`, `git`, `python3`, `curl`, and other common tools:
+
+```json
+{
+  "oci_image": {
+    "image": "ghcr.io/b4fun/smol-workflows/agent-tools:latest"
+  }
+}
+```
+
+A custom image can also provide its own entrypoint/cmd:
 
 ```json
 {

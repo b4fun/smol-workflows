@@ -1069,14 +1069,22 @@ def open_sandbox(request_id: str, request: OpenSandboxRequest) -> SandboxSession
                 )
             )
             client_for_sandbox.set_egress_policy(egress_policy)
-        cwd = request.cwd or profile_config.cwd or "/workspace"
+        base_cwd = request.cwd or profile_config.cwd or "/workspace"
+        sync_workspace = profile_config.sync_workspace if profile_config.sync_workspace is not None else True
+        repo_root: Path | None = None
+        repo_relative_cwd = ""
+        effective_cwd = base_cwd
+        if sync_workspace:
+            repo_root, repo_relative_cwd = host_git_repo_info(request.workspace_sync.host_path)
+            if repo_relative_cwd:
+                effective_cwd = path_join(base_cwd, repo_relative_cwd)
         state = ProviderState(
             endpoint=config.endpoint,
             subscription_id=config.subscription_id,
             resource_group=config.resource_group,
             sandbox_group=config.sandbox_group,
             sandbox_id=sandbox_id,
-            cwd=cwd,
+            cwd=effective_cwd,
             api_version=config.api_version,
             http_timeout_seconds=config.http_timeout_seconds,
             created_disk_image_id=created_disk_image_id,
@@ -1085,18 +1093,18 @@ def open_sandbox(request_id: str, request: OpenSandboxRequest) -> SandboxSession
         session = SandboxSession(
             id=sandbox_id,
             provider_session_id=sandbox_id,
-            cwd=cwd,
+            cwd=effective_cwd,
             capabilities={"exec": True},
             provider_state_json=state.to_json(),
         )
-        ensure_sandbox_cwd(session, cwd)
-        sync_workspace = profile_config.sync_workspace if profile_config.sync_workspace is not None else True
+        ensure_sandbox_cwd(session, effective_cwd)
         if sync_workspace:
+            assert repo_root is not None
             sync_workspace_git(
                 client,
                 session,
-                request.workspace_sync.host_path,
-                cwd,
+                repo_root,
+                base_cwd,
                 remote_name=profile_config.workspace_git_remote or "origin",
                 max_file_size=profile_config.workspace_max_file_size or WRITE_CHUNK_SIZE,
             )
@@ -1284,21 +1292,22 @@ def run_host_command_bytes(argv: list[str]) -> bytes:
     return result.stdout
 
 
+def host_git_repo_info(host_path: Path) -> tuple[Path, str]:
+    repo_root = Path(run_host_command(["git", "-C", str(host_path), "rev-parse", "--show-toplevel"]).strip())
+    relative = host_path.resolve().relative_to(repo_root.resolve())
+    relative_posix = "" if str(relative) == "." else relative.as_posix()
+    return repo_root, relative_posix
+
+
 def sync_workspace_git(
     client: AzureSandboxRestClient,
     session: SandboxSession,
-    host_path: Path,
+    repo_root: Path,
     cwd: str,
     *,
     remote_name: str,
     max_file_size: int,
 ) -> None:
-    repo_root = Path(run_host_command(["git", "-C", str(host_path), "rev-parse", "--show-toplevel"]).strip())
-    if host_path.resolve() != repo_root.resolve():
-        raise RuntimeError(
-            "git workspace sync currently requires the workflow cwd to be the git repository root "
-            f"(cwd={host_path}, repo_root={repo_root})"
-        )
     commit = run_host_command(["git", "-C", str(repo_root), "rev-parse", "HEAD"]).strip()
     remote_url = run_host_command(["git", "-C", str(repo_root), "remote", "get-url", remote_name]).strip()
     command = " && ".join(
