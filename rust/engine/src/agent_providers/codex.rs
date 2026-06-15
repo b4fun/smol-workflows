@@ -1,9 +1,9 @@
 use super::common::*;
 use super::types::*;
+use crate::environment::EnvironmentPath;
 use anyhow::{bail, Context};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -63,9 +63,9 @@ async fn run_codex(
     input: AgentProviderRunInput,
     options: &CodexAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
-    let temp = temp_dir("smol-wf-codex-")?;
-    let output_path = temp.path().join("last-message.txt");
-    let schema_path = temp.path().join("schema.json");
+    let temp = input.environment.create_temp_dir("smol-wf-codex-").await?;
+    let output_path = join_environment_path(&temp, "last-message.txt");
+    let schema_path = join_environment_path(&temp, "schema.json");
     let command = options.command.as_deref().unwrap_or("codex");
     let mut args = Vec::new();
     args.extend(options.subcommand.clone());
@@ -83,34 +83,39 @@ async fn run_codex(
     args.extend([
         "--json".into(),
         "--output-last-message".into(),
-        output_path.to_string_lossy().into_owned(),
+        output_path.0.clone(),
     ]);
     let has_schema = option_schema(&input.options).is_some();
     if let Some(schema) = option_schema(&input.options) {
         let schema = to_codex_output_schema(schema);
-        fs::write(&schema_path, serde_json::to_string_pretty(&schema)?)?;
-        args.extend([
-            "--output-schema".into(),
-            schema_path.to_string_lossy().into_owned(),
-        ]);
+        input
+            .environment
+            .write_file(
+                &schema_path,
+                serde_json::to_string_pretty(&schema)?.as_bytes(),
+            )
+            .await?;
+        args.extend(["--output-schema".into(), schema_path.0.clone()]);
     }
     args.push("-".into());
 
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
-    let (stdout, stderr) = run_command(
-        "Codex",
+    let (stdout, stderr) = run_command(RunCommandRequest {
+        provider: "Codex",
         command,
-        &args,
-        Some(&input.prompt),
+        args: &args,
+        stdin: Some(&input.prompt),
         cwd,
-        &options.env,
-        options.timeout_ms,
-    )
+        env: &options.env,
+        timeout_ms: options.timeout_ms,
+        environment: input.environment.as_ref(),
+    })
     .await?;
     let events = parse_json_lines(&stdout);
     let session_id = extract_session_id(&events)
         .context("Codex provider response did not include a session id")?;
-    let final_message = read_final_message(&output_path, &events)?;
+    let final_message =
+        read_final_message(input.environment.as_ref(), &output_path, &events).await?;
     let output = if has_schema {
         parse_structured_output(&final_message)?
     } else {
@@ -128,12 +133,31 @@ async fn run_codex(
     })
 }
 
-fn read_final_message(path: &PathBuf, events: &[Value]) -> anyhow::Result<String> {
-    match fs::read_to_string(path) {
-        Ok(message) if !message.trim().is_empty() => return Ok(message),
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => bail!("Failed to read codex output file: {error}"),
+fn join_environment_path(base: &EnvironmentPath, child: &str) -> EnvironmentPath {
+    EnvironmentPath(format!("{}/{}", base.as_str().trim_end_matches('/'), child))
+}
+
+async fn read_final_message(
+    environment: &dyn crate::environment::AgentExecutionEnvironment,
+    path: &EnvironmentPath,
+    events: &[Value],
+) -> anyhow::Result<String> {
+    match environment.read_file(path).await {
+        Ok(bytes) => {
+            let message = String::from_utf8_lossy(&bytes).into_owned();
+            if !message.trim().is_empty() {
+                return Ok(message);
+            }
+        }
+        Err(error) => {
+            let not_found = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if !not_found {
+                bail!("Failed to read codex output file: {error}");
+            }
+        }
     }
     if let Some(text) = extract_last_assistant_text(events) {
         Ok(text)

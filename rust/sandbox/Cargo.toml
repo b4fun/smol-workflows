@@ -1,0 +1,23 @@
+[package]
+name = "smol-workflow-sandbox"
+description = "Types and local binary plugin client for smol-workflows sandboxes."
+version.workspace = true
+edition.workspace = true
+license-file = "../../LICENSE"
+repository = "https://github.com/b4fun/smol-workflows"
+readme = "README.md"
+
+[lib]
+name = "smol_workflow_sandbox"
+path = "src/lib.rs"
+
+[dependencies]
+schemars = { version = "0.8", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["io-util", "process", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "io-util", "process"] }

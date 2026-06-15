@@ -19,6 +19,7 @@ integration-test = []
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 blake3 = "1"
 jsonschema = { version = "0.46", default-features = false }
 log = "0.4"
@@ -28,8 +29,9 @@ rquickjs-serde = "0.5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+smol-workflow-sandbox = { version = "0.2.1", path = "../sandbox" }
 tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 ulid = "1"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 ureq = { version = "2", features = ["json"] }

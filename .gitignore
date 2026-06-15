@@ -5,10 +5,17 @@
 # events log
 *.jsonl
 
+# local state
+.tmp/
+
 # direnv
 .direnv/
 .envrc.local
 
 # Rust
 /target/
+
+# Python
+__pycache__/
+*.py[cod]
 

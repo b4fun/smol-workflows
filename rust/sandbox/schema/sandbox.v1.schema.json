@@ -1,0 +1,503 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SandboxProviderV1Schema",
+  "description": "Root schema holder used to generate the combined JSON Schema for protocol v1.",
+  "type": "object",
+  "required": [
+    "cleanup_group_request",
+    "create_temp_dir_request",
+    "create_temp_dir_result",
+    "exec_event",
+    "exec_request",
+    "exec_result",
+    "open_request",
+    "provider_error",
+    "read_file_result",
+    "request_envelope",
+    "response_envelope",
+    "sandbox_session",
+    "session_path_request",
+    "spawn_request",
+    "spawn_result",
+    "write_file_request"
+  ],
+  "properties": {
+    "cleanup_group_request": {
+      "$ref": "#/definitions/CleanupSandboxGroupRequest"
+    },
+    "create_temp_dir_request": {
+      "$ref": "#/definitions/CreateTempDirRequest"
+    },
+    "create_temp_dir_result": {
+      "$ref": "#/definitions/CreateTempDirResult"
+    },
+    "exec_event": {
+      "$ref": "#/definitions/SandboxExecEvent"
+    },
+    "exec_request": {
+      "$ref": "#/definitions/SandboxExecRequest"
+    },
+    "exec_result": {
+      "$ref": "#/definitions/SandboxExecResult"
+    },
+    "open_request": {
+      "$ref": "#/definitions/OpenSandboxRequest"
+    },
+    "provider_error": {
+      "$ref": "#/definitions/ProviderError"
+    },
+    "read_file_result": {
+      "$ref": "#/definitions/ReadFileResult"
+    },
+    "request_envelope": {
+      "$ref": "#/definitions/JsonlRequestEnvelope_for_AnyValue"
+    },
+    "response_envelope": {
+      "$ref": "#/definitions/JsonlResponseEnvelope"
+    },
+    "sandbox_session": {
+      "$ref": "#/definitions/SandboxSession"
+    },
+    "session_path_request": {
+      "$ref": "#/definitions/SessionPathRequest"
+    },
+    "spawn_request": {
+      "$ref": "#/definitions/SandboxSpawnRequest"
+    },
+    "spawn_result": {
+      "$ref": "#/definitions/SandboxSpawnResult"
+    },
+    "write_file_request": {
+      "$ref": "#/definitions/WriteFileRequest"
+    }
+  },
+  "definitions": {
+    "Capabilities": {
+      "description": "Provider behavior flags.",
+      "type": "object",
+      "properties": {
+        "exec": {
+          "description": "Whether the provider supports `exec` for sessions it opens.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "CleanupSandboxGroupRequest": {
+      "description": "Request params for `cleanup_group`.",
+      "type": "object",
+      "required": [
+        "metadata",
+        "sandbox_group_id"
+      ],
+      "properties": {
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "sandbox_group_id": {
+          "type": "string"
+        }
+      }
+    },
+    "CreateTempDirRequest": {
+      "type": "object",
+      "required": [
+        "prefix",
+        "session"
+      ],
+      "properties": {
+        "prefix": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        }
+      }
+    },
+    "CreateTempDirResult": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "JsonlRequestEnvelope_for_AnyValue": {
+      "description": "JSONL RPC request envelope.",
+      "type": "object",
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true
+      }
+    },
+    "JsonlResponseEnvelope": {
+      "description": "JSONL RPC response/event envelope emitted by providers.",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event": true,
+        "id": {
+          "type": "string"
+        },
+        "result": true
+      }
+    },
+    "Metadata": {
+      "description": "Opaque metadata attached to sandbox lifecycle requests.",
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "request_id",
+        "sandbox_group_id"
+      ],
+      "properties": {
+        "protocol_version": {
+          "description": "Protocol version, for example [`PROTOCOL_VERSION`].",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Opaque runtime-generated ID for correlating a logical operation with logs.",
+          "type": "string"
+        },
+        "sandbox_group_id": {
+          "description": "Opaque runtime-generated group ID for sandbox resources owned by one run.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional non-sensitive provider tags.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "OpenSandboxRequest": {
+      "description": "Request params for the JSONL `open` method.",
+      "type": "object",
+      "required": [
+        "metadata",
+        "profile",
+        "workspace_sync"
+      ],
+      "properties": {
+        "cwd": {
+          "description": "Optional sandbox-internal cwd override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        },
+        "profile": {
+          "$ref": "#/definitions/ProfileRef"
+        },
+        "workspace_sync": {
+          "$ref": "#/definitions/WorkspaceSync"
+        }
+      }
+    },
+    "ProfileRef": {
+      "description": "Provider-local profile reference selected by the workflow runtime.",
+      "type": "object",
+      "required": [
+        "name",
+        "provider"
+      ],
+      "properties": {
+        "name": {
+          "description": "Profile name local to the provider.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Provider name selected by the runtime.",
+          "type": "string"
+        }
+      }
+    },
+    "ProviderError": {
+      "description": "Provider-declared operation error.",
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ReadFileResult": {
+      "type": "object",
+      "required": [
+        "content_base64"
+      ],
+      "properties": {
+        "content_base64": {
+          "type": "string"
+        }
+      }
+    },
+    "SandboxExecEvent": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "data_base64": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "process_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      }
+    },
+    "SandboxExecRequest": {
+      "type": "object",
+      "required": [
+        "argv",
+        "session"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        },
+        "stdin_base64": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SandboxExecResult": {
+      "type": "object",
+      "required": [
+        "exit_code"
+      ],
+      "properties": {
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "stderr_base64": {
+          "default": "",
+          "type": "string"
+        },
+        "stdout_base64": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "SandboxSession": {
+      "description": "Provider session returned by `open` and passed back to later calls.",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "capabilities": {
+          "description": "Capabilities for this session.",
+          "default": {
+            "exec": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Capabilities"
+            }
+          ]
+        },
+        "cwd": {
+          "description": "Effective sandbox cwd, if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Runtime/provider-facing session ID returned by the provider.",
+          "type": "string"
+        },
+        "provider_session_id": {
+          "description": "Provider-native session ID, if different.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_state_json": {
+          "description": "Opaque provider state for later calls. Treat as sensitive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SandboxSpawnRequest": {
+      "type": "object",
+      "required": [
+        "argv",
+        "session"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        },
+        "stdin_base64": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SandboxSpawnResult": {
+      "type": "object",
+      "properties": {
+        "process_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SessionPathRequest": {
+      "description": "Request params for methods that operate on an existing sandbox session.",
+      "type": "object",
+      "required": [
+        "path",
+        "session"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        }
+      }
+    },
+    "WorkspaceSync": {
+      "description": "Local workspace path supplied by the workflow runner.",
+      "type": "object",
+      "required": [
+        "host_path"
+      ],
+      "properties": {
+        "host_path": {
+          "description": "Local path on the machine running the workflow runner/provider process.",
+          "type": "string"
+        }
+      }
+    },
+    "WriteFileRequest": {
+      "type": "object",
+      "required": [
+        "content_base64",
+        "path",
+        "session"
+      ],
+      "properties": {
+        "content_base64": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/definitions/SandboxSession"
+        }
+      }
+    }
+  }
+}

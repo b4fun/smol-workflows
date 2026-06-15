@@ -1,14 +1,10 @@
 use super::common::*;
 use super::types::*;
-use anyhow::{bail, Context};
+use crate::environment::{EnvironmentPath, ExecRequest, NullExecEventSink};
+use anyhow::{anyhow, bail, Context};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct OpenCodeAgentProviderOptions {
@@ -98,15 +94,16 @@ async fn run_opencode(
     }
     args.push(input.prompt.clone());
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
-    let (stdout, stderr) = run_command(
-        "OpenCode",
+    let (stdout, stderr) = run_command(RunCommandRequest {
+        provider: "OpenCode",
         command,
-        &args,
-        None,
+        args: &args,
+        stdin: None,
         cwd,
-        &options.env,
-        options.timeout_ms,
-    )
+        env: &options.env,
+        timeout_ms: options.timeout_ms,
+        environment: input.environment.as_ref(),
+    })
     .await?;
     let parsed = parse_output(&stdout);
     let events = match &parsed {
@@ -132,41 +129,12 @@ async fn run_opencode_via_server(
     input: AgentProviderRunInput,
     options: &OpenCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
-    let command = options.command.as_deref().unwrap_or("opencode");
-    let mut server = start_opencode_server(command, options, &input).await?;
-    let directory = input
-        .context
-        .cwd
-        .as_ref()
-        .or(options.cwd.as_ref())
-        .cloned()
-        .unwrap_or(std::env::current_dir()?);
     let mut session_body = json!({
         "title": "smol-workflows agent call",
     });
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         session_body["agent"] = Value::String(agent_type);
     }
-    let session = request_json(
-        &server.url,
-        "/session",
-        "POST",
-        &[("directory", directory.to_string_lossy().to_string())],
-        &session_body,
-    )
-    .await?;
-    let session_id = extract_session_id(&session)
-        .or_else(|| {
-            session
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "OpenCode create-session response did not include a session id: {session}"
-            )
-        })?;
 
     let model = option_str(&input.options, "model")
         .map(|model| split_model(&model))
@@ -183,19 +151,15 @@ async fn run_opencode_via_server(
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         body["agent"] = Value::String(agent_type);
     }
-    let response = request_json(
-        &server.url,
-        &format!("/session/{}/message", url_encode(&session_id)),
-        "POST",
-        &[("directory", directory.to_string_lossy().to_string())],
-        &body,
-    )
-    .await?;
+
+    let server_result = run_opencode_server_helper(&input, options, session_body, body).await?;
+    let session = server_result.session;
+    let session_id = extract_server_session_id(&session)?;
+    let response = server_result.response;
     let output = extract_output(&response).ok_or_else(|| {
         anyhow::anyhow!("OpenCode response did not include a final assistant message")
     })?;
-    let logs = server.logs.clone();
-    server.stop().await;
+    let logs = server_result.logs;
     Ok(AgentProviderResult {
         output: Value::String(output.trim_end().to_string()),
         session_id: Some(session_id),
@@ -214,41 +178,12 @@ async fn run_opencode_structured(
     input: AgentProviderRunInput,
     options: &OpenCodeAgentProviderOptions,
 ) -> anyhow::Result<AgentProviderResult> {
-    let command = options.command.as_deref().unwrap_or("opencode");
-    let mut server = start_opencode_server(command, options, &input).await?;
-    let directory = input
-        .context
-        .cwd
-        .as_ref()
-        .or(options.cwd.as_ref())
-        .cloned()
-        .unwrap_or(std::env::current_dir()?);
     let mut session_body = json!({
         "title": "smol-workflows structured output",
     });
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         session_body["agent"] = Value::String(agent_type);
     }
-    let session = request_json(
-        &server.url,
-        "/session",
-        "POST",
-        &[("directory", directory.to_string_lossy().to_string())],
-        &session_body,
-    )
-    .await?;
-    let session_id = extract_session_id(&session)
-        .or_else(|| {
-            session
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "OpenCode create-session response did not include a session id: {session}"
-            )
-        })?;
 
     let model = option_str(&input.options, "model")
         .map(|model| split_model(&model))
@@ -270,19 +205,15 @@ async fn run_opencode_structured(
     if let Some(agent_type) = option_str(&input.options, "agentType") {
         body["agent"] = Value::String(agent_type);
     }
-    let response = request_json(
-        &server.url,
-        &format!("/session/{}/message", url_encode(&session_id)),
-        "POST",
-        &[("directory", directory.to_string_lossy().to_string())],
-        &body,
-    )
-    .await?;
+
+    let server_result = run_opencode_server_helper(&input, options, session_body, body).await?;
+    let session = server_result.session;
+    let session_id = extract_server_session_id(&session)?;
+    let response = server_result.response;
     let output = extract_structured_output(&response).ok_or_else(|| {
         anyhow::anyhow!("OpenCode structured-output response did not include a structured value")
     })?;
-    let logs = server.logs.clone();
-    server.stop().await;
+    let logs = server_result.logs;
     Ok(AgentProviderResult {
         output,
         session_id: Some(session_id),
@@ -297,170 +228,160 @@ async fn run_opencode_structured(
     })
 }
 
-struct OpenCodeServer {
-    child: Child,
-    url: String,
-    logs: String,
-}
-impl OpenCodeServer {
-    async fn stop(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
-    }
-}
-impl Drop for OpenCodeServer {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
-    }
+fn extract_server_session_id(session: &Value) -> anyhow::Result<String> {
+    extract_session_id(session)
+        .or_else(|| {
+            session
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenCode create-session response did not include a session id: {session}"
+            )
+        })
 }
 
-async fn start_opencode_server(
-    command: &str,
-    options: &OpenCodeAgentProviderOptions,
+struct OpenCodeServerHelperResult {
+    session: Value,
+    response: Value,
+    logs: String,
+}
+
+async fn run_opencode_server_helper(
     input: &AgentProviderRunInput,
-) -> anyhow::Result<OpenCodeServer> {
-    let mut args = Vec::new();
-    args.extend(options.server_subcommand.clone());
-    args.extend(options.server_args.clone());
-    args.extend([
+    options: &OpenCodeAgentProviderOptions,
+    session_body: Value,
+    message_body: Value,
+) -> anyhow::Result<OpenCodeServerHelperResult> {
+    let temp = input
+        .environment
+        .create_temp_dir("smol-wf-opencode-")
+        .await?;
+    let helper_path = join_environment_path(&temp, "opencode-server-helper.sh");
+    let session_body_path = join_environment_path(&temp, "session-body.json");
+    let message_body_path = join_environment_path(&temp, "message-body.json");
+    let session_output_path = join_environment_path(&temp, "session-output.json");
+    let response_output_path = join_environment_path(&temp, "response-output.json");
+    let logs_output_path = join_environment_path(&temp, "server.log");
+    input
+        .environment
+        .write_file(&helper_path, OPENCODE_SERVER_HELPER.as_bytes())
+        .await?;
+    input
+        .environment
+        .write_file(&session_body_path, &serde_json::to_vec(&session_body)?)
+        .await?;
+    input
+        .environment
+        .write_file(&message_body_path, &serde_json::to_vec(&message_body)?)
+        .await?;
+
+    let command = options.command.as_deref().unwrap_or("opencode");
+    let mut server_args = Vec::new();
+    server_args.extend(options.server_subcommand.clone());
+    server_args.extend(options.server_args.clone());
+    server_args.extend([
         "--hostname".into(),
         "127.0.0.1".into(),
         "--port".into(),
         "0".into(),
     ]);
-    let mut cmd = Command::new(command);
-    cmd.args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-    if let Some(cwd) = input.context.cwd.as_ref().or(options.cwd.as_ref()) {
-        cmd.current_dir(cwd);
-    }
-    cmd.envs(&options.env);
-    let mut child = cmd.spawn().context("failed to spawn OpenCode server")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("failed to capture OpenCode server stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("failed to capture OpenCode server stderr")?;
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    spawn_reader(stdout, tx.clone());
-    spawn_reader(stderr, tx);
-    let deadline =
-        tokio::time::Instant::now() + Duration::from_millis(options.server_startup_timeout_ms);
-    let mut logs = String::new();
+    let directory = match input.context.cwd.as_ref().or(options.cwd.as_ref()) {
+        Some(path) => path_to_environment_path(path)?,
+        None => input.environment.cwd().cloned().unwrap_or(EnvironmentPath(
+            std::env::current_dir()?.to_string_lossy().into_owned(),
+        )),
+    };
 
-    loop {
-        if let Some(status) = child.try_wait()? {
-            bail!(
-                "OpenCode server exited before it was ready with code {:?}{}",
-                status.code(),
-                if logs.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", truncate(&logs, 4000))
-                }
-            );
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            let _ = child.start_kill();
-            bail!(
-                "Timed out waiting for OpenCode server URL{}",
-                if logs.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", truncate(&logs, 4000))
-                }
-            );
-        }
-        tokio::select! {
-            Some(chunk) = rx.recv() => {
-                logs.push_str(&chunk);
-                if let Some(url) = extract_server_url(&logs) {
-                    return Ok(OpenCodeServer { child, url, logs });
-                }
-            }
-            _ = tokio::time::sleep(remaining.min(Duration::from_millis(50))) => {}
-        }
-    }
-}
-
-fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
-    reader: R,
-    tx: mpsc::UnboundedSender<String>,
-) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = tx.send(format!("{line}\n"));
-        }
-    });
-}
-
-fn extract_server_url(logs: &str) -> Option<String> {
-    let marker = "opencode server listening on ";
-    let start = logs.find(marker)? + marker.len();
-    let rest = &logs[start..];
-    Some(rest.split_whitespace().next()?.to_string())
-}
-
-async fn request_json(
-    base: &str,
-    path: &str,
-    method: &str,
-    query: &[(impl AsRef<str>, String)],
-    body: &Value,
-) -> anyhow::Result<Value> {
-    if method != "POST" {
-        bail!("unsupported method {method}");
-    }
-
-    let url = build_url(base, path, query);
-    let response = reqwest::Client::new().post(url).json(body).send().await?;
-    let status = response.status();
-    let text = response.text().await?;
-    if !status.is_success() {
+    let env = options
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut argv = vec![
+        "bash".to_string(),
+        helper_path.0.clone(),
+        "--command".to_string(),
+        command.to_string(),
+        "--directory".to_string(),
+        directory.0.clone(),
+        "--timeout-ms".to_string(),
+        options.server_startup_timeout_ms.to_string(),
+        "--session-body".to_string(),
+        session_body_path.0.clone(),
+        "--message-body".to_string(),
+        message_body_path.0.clone(),
+        "--session-output".to_string(),
+        session_output_path.0.clone(),
+        "--response-output".to_string(),
+        response_output_path.0.clone(),
+        "--logs-output".to_string(),
+        logs_output_path.0.clone(),
+        "--".to_string(),
+    ];
+    argv.extend(server_args);
+    let mut sink = NullExecEventSink;
+    let output = input
+        .environment
+        .exec(
+            ExecRequest {
+                argv,
+                cwd: Some(directory),
+                env,
+                stdin: None,
+            },
+            &mut sink,
+        )
+        .await
+        .context("failed to run OpenCode server helper")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.exit_code != 0 {
         bail!(
-            "OpenCode {method} {path} failed with HTTP {status}: {}",
-            if text.trim().is_empty() {
-                "<empty response body>".to_string()
-            } else {
-                truncate(&text, 4000)
-            }
+            "OpenCode server helper exited with code {}{}",
+            output.exit_code,
+            format_command_failure(&stdout, &stderr)
         );
     }
-    Ok(if text.trim().is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_str(&text)?
+    let session_bytes = input
+        .environment
+        .read_file(&session_output_path)
+        .await
+        .context("failed to read OpenCode session helper output")?;
+    let response_bytes = input
+        .environment
+        .read_file(&response_output_path)
+        .await
+        .context("failed to read OpenCode response helper output")?;
+    let logs = input
+        .environment
+        .read_file(&logs_output_path)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    Ok(OpenCodeServerHelperResult {
+        session: serde_json::from_slice(&session_bytes)
+            .context("OpenCode server helper session output was not valid JSON")?,
+        response: serde_json::from_slice(&response_bytes)
+            .context("OpenCode server helper response output was not valid JSON")?,
+        logs,
     })
 }
 
-fn build_url(base: &str, path: &str, query: &[(impl AsRef<str>, String)]) -> String {
-    let mut url = format!("{}{}", base.trim_end_matches('/'), path);
-    if !query.is_empty() {
-        url.push('?');
-        url.push_str(
-            &query
-                .iter()
-                .map(|(key, value)| format!("{}={}", key.as_ref(), url_encode(value)))
-                .collect::<Vec<_>>()
-                .join("&"),
-        );
-    }
-    url
+fn join_environment_path(base: &EnvironmentPath, child: &str) -> EnvironmentPath {
+    EnvironmentPath(format!("{}/{}", base.as_str().trim_end_matches('/'), child))
 }
 
-fn url_encode(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('/', "%2F")
-        .replace(' ', "%20")
+fn path_to_environment_path(path: &Path) -> anyhow::Result<EnvironmentPath> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| anyhow!("OpenCode server cwd must be valid UTF-8: {path:?}"))?;
+    Ok(EnvironmentPath(value.to_string()))
 }
+
+const OPENCODE_SERVER_HELPER: &str = include_str!("assets/opencode-server-helper.sh");
 
 fn split_model(model: &str) -> anyhow::Result<Value> {
     let Some((provider, model_id)) = model.split_once('/') else {

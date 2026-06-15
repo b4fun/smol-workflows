@@ -4,6 +4,8 @@ use smol_workflow_engine::agent_providers::{
     CodexAgentProvider, CodexAgentProviderOptions, OpenCodeAgentProvider,
     OpenCodeAgentProviderOptions, PiAgentProvider, PiAgentProviderOptions,
 };
+use smol_workflow_engine::environment::{AgentExecutionEnvironment, LocalExecutionEnvironment};
+use std::sync::Arc;
 fn fixture(name: &str) -> String {
     format!("tests/fixtures/{name}")
 }
@@ -12,11 +14,16 @@ fn node() -> String {
     std::env::var("NODE").unwrap_or_else(|_| "node".to_string())
 }
 
+fn local_environment() -> Arc<dyn AgentExecutionEnvironment> {
+    Arc::new(LocalExecutionEnvironment::new(None).unwrap())
+}
+
 fn input(prompt: &str) -> AgentProviderRunInput {
     AgentProviderRunInput {
         prompt: prompt.to_string(),
         options: None,
         context: Default::default(),
+        environment: local_environment(),
     }
 }
 
@@ -34,6 +41,7 @@ fn schema_input(prompt: &str) -> AgentProviderRunInput {
             }
         })),
         context: Default::default(),
+        environment: local_environment(),
     }
 }
 
@@ -111,6 +119,7 @@ async fn claude_code_provider_maps_agent_type_to_agent_flag() {
             prompt: "specialized claude".to_string(),
             options: Some(json!({ "agentType": "reviewer" })),
             context: Default::default(),
+            environment: local_environment(),
         })
         .await
         .expect("provider should run");
@@ -218,6 +227,7 @@ async fn codex_provider_preserves_required_subset_and_cache_aliases() {
                 }
             })),
             context: Default::default(),
+            environment: local_environment(),
         })
         .await
         .expect("provider should run");
@@ -233,6 +243,7 @@ async fn codex_provider_preserves_required_subset_and_cache_aliases() {
                 }
             })),
             context: Default::default(),
+            environment: local_environment(),
         })
         .await
         .expect("provider should run");
@@ -469,6 +480,7 @@ async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output(
                 }
             })),
             context: Default::default(),
+            environment: local_environment(),
         })
         .await
         .expect("provider should run");
@@ -486,11 +498,33 @@ async fn pi_provider_supports_json_mode_prompt_files_and_structured_tool_output(
                 }
             })),
             context: Default::default(),
+            environment: local_environment(),
         })
         .await
         .expect("provider should recover attempted structured output");
     assert_eq!(recovered.output["summary"], "structured pi summary");
     assert_eq!(recovered.output["extensionRegisteredTool"], true);
+
+    let message_update = provider
+        .run(input("message-update-only"))
+        .await
+        .expect("provider should parse message_update output");
+    assert_eq!(message_update.output, json!("fake pi: message-update-only"));
+
+    let agent_end_without_role = provider
+        .run(input("agent-end-message-without-role"))
+        .await
+        .expect("provider should parse agent_end assistant message without role");
+    assert_eq!(
+        agent_end_without_role.output,
+        json!("fake pi: agent-end-message-without-role")
+    );
+
+    let tool_result_only = provider
+        .run(input("tool-result-only"))
+        .await
+        .expect("provider should fall back to tool result text");
+    assert_eq!(tool_result_only.output, json!("fake pi: tool-result-only"));
 
     let cache = provider
         .run(input("cache-alias"))

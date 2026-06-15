@@ -1,0 +1,8 @@
+{
+  "id": "req_3",
+  "error": {
+    "code": "bad_profile",
+    "message": "unknown profile",
+    "retryable": false
+  }
+}

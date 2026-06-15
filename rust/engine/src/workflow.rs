@@ -2,6 +2,9 @@ use crate::agent_providers::{
     create_agent_provider, AgentProvider, AgentProviderContext, AgentProviderResult,
     AgentProviderRunInput, AgentRunIsolation, AgentUsage, AgentUsageCost,
 };
+use crate::environment::{
+    AgentExecutionEnvironment, LocalExecutionEnvironment, SandboxExecutionEnvironment,
+};
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
     WorkflowBudgetSnapshot, WorkflowJSRuntime, WorkflowModuleInput, WorkflowModuleOutput,
@@ -12,6 +15,9 @@ use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use smol_workflow_sandbox::{
+    Metadata as SandboxMetadata, OpenSandboxRequest, ProfileRef, WorkspaceSync,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1113,6 +1119,7 @@ impl RunState {
             input: AgentProviderRunInput {
                 prompt,
                 options,
+                environment: Arc::new(LocalExecutionEnvironment::new(context.cwd.clone())?),
                 context,
             },
         })
@@ -1484,14 +1491,27 @@ async fn run_agent_with_optional_isolation(
     provider: Arc<dyn AgentProvider>,
     input: AgentProviderRunInput,
 ) -> anyhow::Result<AgentProviderResult> {
-    if !requests_worktree_isolation(&input.options) {
-        return run_agent_with_schema_validation(provider, input).await;
+    if let Some(request) = sandbox_isolation_request(&input.options)? {
+        return run_agent_with_sandbox_isolation(provider, input, request).await;
     }
 
+    if requests_worktree_isolation(&input.options) {
+        return run_agent_with_worktree_isolation(provider, input).await;
+    }
+
+    run_agent_with_schema_validation(provider, input).await
+}
+
+async fn run_agent_with_worktree_isolation(
+    provider: Arc<dyn AgentProvider>,
+    input: AgentProviderRunInput,
+) -> anyhow::Result<AgentProviderResult> {
     let isolation = WorktreeIsolation::create(input.context.cwd.as_deref())?;
     let isolation_info = isolation.info();
     let mut isolated_input = input;
     isolated_input.context.cwd = Some(isolation.cwd.clone());
+    isolated_input.environment =
+        Arc::new(LocalExecutionEnvironment::new(Some(isolation.cwd.clone()))?);
     let mut result = run_agent_with_schema_validation(provider, isolated_input).await;
     if let Ok(result) = &mut result {
         result.isolation = Some(isolation_info);
@@ -1502,12 +1522,146 @@ async fn run_agent_with_optional_isolation(
     result
 }
 
+async fn run_agent_with_sandbox_isolation(
+    provider: Arc<dyn AgentProvider>,
+    input: AgentProviderRunInput,
+    request: SandboxIsolationRequest,
+) -> anyhow::Result<AgentProviderResult> {
+    let program = sandbox_provider_program(&request);
+    let sandbox_group_id = format!("sbxgrp_{}", ulid::Ulid::new());
+    let cwd = input.context.cwd.clone().ok_or_else(|| {
+        anyhow!("agent sandbox isolation requires the workflow cwd to be available")
+    })?;
+    let sandbox_env = SandboxExecutionEnvironment::open(
+        program,
+        OpenSandboxRequest {
+            metadata: SandboxMetadata::new(
+                format!("req_{}", ulid::Ulid::new()),
+                sandbox_group_id.clone(),
+            ),
+            profile: ProfileRef {
+                provider: request.provider.clone(),
+                name: request.profile.clone(),
+            },
+            workspace_sync: WorkspaceSync { host_path: cwd },
+            cwd: request.cwd.clone(),
+        },
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to open sandbox profile `{}` with provider `{}`",
+            request.profile, request.provider
+        )
+    })?;
+
+    let session = sandbox_env.session().clone();
+    let mut isolated_input = input;
+    isolated_input.context.cwd = sandbox_env.cwd().map(|path| PathBuf::from(path.as_str()));
+    isolated_input.environment = Arc::new(sandbox_env.clone());
+    let isolation_info = AgentRunIsolation {
+        kind: "sandbox".to_string(),
+        branch: None,
+        worktree_path: None,
+        cwd: session.cwd.clone(),
+        profile: Some(request.profile.clone()),
+        provider: Some(request.provider.clone()),
+        session_id: Some(session.id.clone()),
+    };
+
+    let mut result = run_agent_with_schema_validation(provider, isolated_input).await;
+    if let Ok(result) = &mut result {
+        result.isolation = Some(isolation_info);
+    }
+
+    if let Err(error) = sandbox_env.close().await {
+        log::warn!("failed to close sandbox-isolated agent session: {error:#}");
+    }
+
+    result
+}
+
 fn requests_worktree_isolation(options: &Option<Value>) -> bool {
     options
         .as_ref()
         .and_then(|options| options.get("isolation"))
         .and_then(Value::as_str)
         == Some("worktree")
+}
+
+#[derive(Debug, Clone)]
+struct SandboxIsolationRequest {
+    provider: String,
+    profile: String,
+    cwd: Option<String>,
+}
+
+fn sandbox_isolation_request(
+    options: &Option<Value>,
+) -> anyhow::Result<Option<SandboxIsolationRequest>> {
+    let Some(isolation) = options
+        .as_ref()
+        .and_then(|options| options.get("isolation"))
+    else {
+        return Ok(None);
+    };
+    let Some(object) = isolation.as_object() else {
+        return Ok(None);
+    };
+    if object.get("type").and_then(Value::as_str) != Some("sandbox") {
+        return Ok(None);
+    }
+    let profile = object
+        .get("profile")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent sandbox isolation requires isolation.profile"))?
+        .to_string();
+    let cwd = object
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let (provider, profile) = parse_sandbox_profile_ref(&profile)?;
+    Ok(Some(SandboxIsolationRequest {
+        provider,
+        profile,
+        cwd,
+    }))
+}
+
+fn parse_sandbox_profile_ref(value: &str) -> anyhow::Result<(String, String)> {
+    let (provider, profile) = value.split_once('/').ok_or_else(|| {
+        anyhow!("agent sandbox isolation.profile must use <provider>/<profile>, got `{value}`")
+    })?;
+    validate_sandbox_provider_name(provider)?;
+    if profile.is_empty() {
+        bail!(
+            "agent sandbox isolation.profile must include a non-empty provider-local profile name"
+        );
+    }
+    Ok((provider.to_string(), profile.to_string()))
+}
+
+fn validate_sandbox_provider_name(provider: &str) -> anyhow::Result<()> {
+    let valid = !provider.is_empty()
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && provider
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && provider
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if !valid {
+        bail!("invalid sandbox provider name `{provider}`; expected lowercase letters, digits, and hyphens, starting and ending with an alphanumeric character");
+    }
+    Ok(())
+}
+
+fn sandbox_provider_program(request: &SandboxIsolationRequest) -> String {
+    format!("smol-sandbox-{}", request.provider)
 }
 
 struct WorktreeIsolation {
@@ -1584,6 +1738,9 @@ impl WorktreeIsolation {
             branch: Some(self.branch_name.clone()),
             worktree_path: Some(path_arg(&self.worktree_root)),
             cwd: Some(path_arg(&self.cwd)),
+            profile: None,
+            provider: None,
+            session_id: None,
         }
     }
 

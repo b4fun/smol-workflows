@@ -75,15 +75,16 @@ async fn run_claude_code(
     args.push("--print".into());
 
     let cwd = input.context.cwd.as_deref().or(options.cwd.as_deref());
-    let (stdout, stderr) = run_command(
-        "Claude Code",
+    let (stdout, stderr) = run_command(RunCommandRequest {
+        provider: "Claude Code",
         command,
-        &args,
-        Some(&input.prompt),
+        args: &args,
+        stdin: Some(&input.prompt),
         cwd,
-        &options.env,
-        options.timeout_ms,
-    )
+        env: &options.env,
+        timeout_ms: options.timeout_ms,
+        environment: input.environment.as_ref(),
+    })
     .await?;
     let events = parse_json_lines(&stdout);
     let raw = if events.is_empty() {

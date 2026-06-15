@@ -40,9 +40,11 @@
 //!    other provider calls up to the configured concurrency limit.
 //! 4. The scheduler resolves or rejects the JS promise with the provider result.
 
+use crate::environment::AgentExecutionEnvironment;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -99,20 +101,30 @@ pub struct AgentProviderContext {
     pub cwd: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentProviderRunInput {
     pub prompt: String,
     pub options: Option<Value>,
     pub context: AgentProviderContext,
+    pub environment: Arc<dyn AgentExecutionEnvironment>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunIsolation {
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

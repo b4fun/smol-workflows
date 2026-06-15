@@ -3,6 +3,12 @@ use smol_workflow_engine::agent_providers::{
     generate_debug_value_from_schema, AgentProvider, AgentProviderContext, AgentProviderRunInput,
     AgentProviderSchemaMode, AgentProviderUsageMode, DebugAgentProvider,
 };
+use smol_workflow_engine::environment::{AgentExecutionEnvironment, LocalExecutionEnvironment};
+use std::sync::Arc;
+
+fn local_environment() -> Arc<dyn AgentExecutionEnvironment> {
+    Arc::new(LocalExecutionEnvironment::new(None).unwrap())
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn debug_provider_echoes_text_when_schema_is_omitted() {
@@ -12,6 +18,7 @@ async fn debug_provider_echoes_text_when_schema_is_omitted() {
             prompt: "hello".to_string(),
             options: None,
             context: AgentProviderContext::default(),
+            environment: local_environment(),
         })
         .await
         .expect("debug provider should run");
@@ -59,6 +66,7 @@ async fn debug_provider_generates_structured_output_from_json_schema() {
             prompt: "structured".to_string(),
             options: Some(json!({ "schema": schema })),
             context: AgentProviderContext::default(),
+            environment: local_environment(),
         })
         .await
         .expect("debug provider should run");
