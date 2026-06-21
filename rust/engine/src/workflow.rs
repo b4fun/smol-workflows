@@ -89,6 +89,9 @@ impl WorkflowAgentRunner for DirectWorkflowAgentRunner {
 
 pub struct RunWorkflowOptions {
     pub script_path: PathBuf,
+    /// Host working directory used for agent provider cwd, worktree isolation,
+    /// and sandbox workspace sync. Defaults to the workflow script directory.
+    pub workflow_cwd: Option<PathBuf>,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
     pub model_map: BTreeMap<String, String>,
@@ -180,6 +183,13 @@ async fn run_workflow_inner(options: RunWorkflowOptions) -> anyhow::Result<RunWo
         metadata.name,
         metadata.phases.len()
     );
+    let workflow_cwd = match options.workflow_cwd {
+        Some(cwd) => Some(
+            fs::canonicalize(&cwd)
+                .with_context(|| format!("failed to resolve workflow cwd {}", cwd.display()))?,
+        ),
+        None => script_path.parent().map(Path::to_path_buf),
+    };
     let source = fs::read_to_string(&script_path)
         .with_context(|| format!("failed to read workflow script {}", script_path.display()))?;
     let runtime = RQuickJSWorkflowRuntime::new();
@@ -203,6 +213,7 @@ async fn run_workflow_inner(options: RunWorkflowOptions) -> anyhow::Result<RunWo
 
     let mut state = RunState {
         script_path,
+        workflow_cwd,
         metadata,
         event_start,
         agent_provider: options.agent_provider,
@@ -441,6 +452,7 @@ async fn send_js_command(
 
 struct RunState {
     script_path: PathBuf,
+    workflow_cwd: Option<PathBuf>,
     metadata: WorkflowMetadata,
     event_start: Instant,
     agent_provider: Arc<dyn AgentProvider>,
@@ -1092,7 +1104,7 @@ impl RunState {
                 .and_then(|options| options.get("phase"))
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
-            cwd: self.script_path.parent().map(Path::to_path_buf),
+            cwd: self.workflow_cwd.clone(),
         };
         let provider_override = options
             .as_ref()
@@ -1288,6 +1300,7 @@ impl RunState {
         log::debug!("child workflow call script={}", script_path.display());
         let child = Box::pin(run_workflow_inner(RunWorkflowOptions {
             script_path,
+            workflow_cwd: self.workflow_cwd.clone(),
             args: args.unwrap_or(Value::Null),
             agent_provider: Arc::clone(&self.agent_provider),
             model_map: self.model_map.clone(),

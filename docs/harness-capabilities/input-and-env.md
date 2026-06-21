@@ -56,7 +56,7 @@ The current Rust helper logs command, cwd, stdin length, and timeout. This is th
 
 ## Working directory (`cwd`) requirement
 
-Every external provider must honor the workflow working directory. This ensures that relative paths, repository discovery, context-file discovery, tool execution, and provider session state are rooted in the same workspace the workflow intended.
+Every external provider must honor the workflow working directory. This ensures that relative paths, repository discovery, context-file discovery, tool execution, and provider session state are rooted in the same workspace the workflow intended. CLI runs set this to the directory from which `smol-wf run` / `smol-wf tui run` was invoked; direct engine API callers may provide it explicitly, otherwise it defaults to the workflow script directory.
 
 Expected behavior:
 
