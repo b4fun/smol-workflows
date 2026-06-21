@@ -3,5 +3,5 @@ members = ["rust/engine", "rust/cli", "rust/sandbox"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0-alpha.3"
+version = "0.3.0-alpha.4"
 edition = "2021"
