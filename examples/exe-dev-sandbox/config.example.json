@@ -1,0 +1,34 @@
+{
+  "profiles": {
+    "default": {
+      "image": "exeuntu",
+      "cwd": "/home/exedev/workspace",
+      "sync_workspace": true,
+      "workspace_sync": {
+        "mode": "tar",
+        "exclude": [".git", "target", "node_modules"]
+      },
+      "control_plane": { "mode": "ssh" },
+      "ssh": {
+        "program": "ssh",
+        "extra_args": [
+          "-o", "StrictHostKeyChecking=accept-new",
+          "-o", "ServerAliveInterval=15",
+          "-o", "ServerAliveCountMax=4"
+        ]
+      },
+      "cleanup": {
+        "on_close": "delete",
+        "on_error": "delete",
+        "keep_env": "SMOL_EXE_DEV_KEEP"
+      }
+    },
+    "debug": {
+      "image": "exeuntu",
+      "cwd": "/home/exedev/workspace",
+      "sync_workspace": true,
+      "control_plane": { "mode": "ssh" },
+      "cleanup": { "on_close": "keep" }
+    }
+  }
+}

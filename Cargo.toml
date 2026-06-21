@@ -1,5 +1,10 @@
 [workspace]
-members = ["rust/engine", "rust/cli", "rust/sandbox"]
+members = [
+  "rust/engine",
+  "rust/cli",
+  "rust/sandbox",
+  "rust/sandbox-providers/exe-dev",
+]
 resolver = "2"
 
 [workspace.package]
