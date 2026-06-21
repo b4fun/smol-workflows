@@ -1,0 +1,31 @@
+[package]
+name = "smol-sandbox-exe-dev"
+description = "exe.dev sandbox provider for smol-workflows."
+version.workspace = true
+edition.workspace = true
+license-file = "../../../LICENSE"
+repository = "https://github.com/b4fun/smol-workflows"
+readme = "README.md"
+
+[lib]
+name = "smol_sandbox_exe_dev"
+path = "src/lib.rs"
+
+[[bin]]
+name = "smol-sandbox-exe-dev"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shlex = "2"
+smol-workflow-sandbox = { path = "../../sandbox" }
+thiserror = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }

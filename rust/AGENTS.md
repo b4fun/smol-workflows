@@ -23,12 +23,12 @@ cargo test -p smol-workflow-cli --test cli packaged_skill_assets_match_harness_s
 
 Do not hand-copy the files. The sync test is intended to catch drift between the harness skills and the packaged CLI copies.
 
-After making Rust workspace changes, run the relevant format, lint, and test commands before handing off. At minimum, prefer:
+After making Rust workspace changes, run the relevant format, lint, and test commands locally before handing off. Do not rely only on CI or remote checks when you can run the checks in the current checkout. At minimum, prefer:
 
 ```sh
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
 If the change also touches the TypeScript SDK or generated workflow-facing types, also run:
