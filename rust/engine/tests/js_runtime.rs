@@ -40,6 +40,15 @@ fn run_to_completion(
                             .resolve_request(&id, WorkflowRuntimeRequestResolution::OkUndefined)?;
                         continue;
                     }
+                    WorkflowRuntimeRequest::SandboxExec {
+                        profile, request, ..
+                    } => json!({
+                        "profile": profile,
+                        "request": request,
+                        "exitCode": 0,
+                        "stdout": "sandbox stdout",
+                        "stderr": "",
+                    }),
                 };
                 trace.requests.push(request);
                 execution.resolve_request(&id, WorkflowRuntimeRequestResolution::Ok(result))?;
@@ -320,6 +329,53 @@ export default { valueType: typeof value, globalSleepType, genericExtraType };
             "valueType": "undefined",
             "globalSleepType": "function",
             "genericExtraType": "undefined",
+        })
+    );
+}
+
+#[test]
+fn rquickjs_exposes_workflow_sandbox_exec_request() {
+    let source = fs::read_to_string("tests/assets/js_runtime/sandbox-exec.workflow.js")
+        .expect("fixture should exist");
+    let (output, trace) = run_to_completion(WorkflowModuleInput::new(
+        source,
+        "sandbox-exec.workflow.js",
+        json!({}),
+    ))
+    .expect("workflow should execute");
+
+    assert_eq!(trace.requests.len(), 1);
+    match &trace.requests[0] {
+        WorkflowRuntimeRequest::SandboxExec {
+            profile, request, ..
+        } => {
+            assert_eq!(profile, "exe-dev/default");
+            assert_eq!(request.command, "sh");
+            assert_eq!(request.args, vec!["-lc", "pwd"]);
+            assert_eq!(request.cwd.as_deref(), Some("/workspace"));
+            assert_eq!(request.env.get("EXAMPLE").map(String::as_str), Some("1"));
+            assert_eq!(request.stdin.as_deref(), Some("hello"));
+        }
+        other => panic!("expected sandbox exec request, got {other:?}"),
+    }
+    assert_eq!(
+        output.result,
+        json!({
+            "value": {
+                "profile": "exe-dev/default",
+                "request": {
+                    "command": "sh",
+                    "args": ["-lc", "pwd"],
+                    "cwd": "/workspace",
+                    "env": { "EXAMPLE": "1" },
+                    "stdin": "hello",
+                },
+                "exitCode": 0,
+                "stdout": "sandbox stdout",
+                "stderr": "",
+            },
+            "globalSandboxExecType": "function",
+            "genericSandboxType": "undefined",
         })
     );
 }

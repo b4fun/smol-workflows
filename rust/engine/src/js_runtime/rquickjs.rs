@@ -149,12 +149,12 @@ impl Loader for WorkflowModuleLoader {
             WORKFLOW_EXTRA_MODULE => Module::declare(
                 ctx.clone(),
                 WORKFLOW_EXTRA_MODULE,
-                include_str!("rquickjs_js/workflow_extra.js"),
+                include_str!("assets/workflow_extra.js"),
             ),
             WORKFLOW_SANDBOX_MODULE => Module::declare(
                 ctx.clone(),
                 WORKFLOW_SANDBOX_MODULE,
-                include_str!("rquickjs_js/workflow_sandbox.js"),
+                include_str!("assets/workflow_sandbox.js"),
             ),
             _ => Err(RQuickJSError::new_loading_message(
                 name,
@@ -555,7 +555,7 @@ fn evaluate_sandbox_prelude(ctx: &rquickjs::Ctx<'_>) -> anyhow::Result<()> {
     let module = Module::declare(
         ctx.clone(),
         "smol:workflow-sandbox-prelude".to_string(),
-        include_str!("rquickjs_js/sandbox_prelude.js").to_string(),
+        include_str!("assets/sandbox_prelude.js").to_string(),
     )
     .catch(ctx)
     .map_err(|error| anyhow!("failed to declare sandbox prelude: {error:?}"))?;
