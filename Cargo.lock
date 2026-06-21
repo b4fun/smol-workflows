@@ -1930,6 +1930,7 @@ name = "smol-workflow-sandbox"
 version = "0.3.0-alpha.5"
 dependencies = [
  "async-trait",
+ "log",
  "schemars",
  "serde",
  "serde_json",

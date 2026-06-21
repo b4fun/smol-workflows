@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 /// JSONL RPC request envelope.
@@ -143,7 +143,7 @@ impl SandboxProviderJsonlClient {
             .arg("serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| JsonlClientError::Spawn {
                 program: program.clone(),
@@ -151,6 +151,9 @@ impl SandboxProviderJsonlClient {
             })?;
         let stdin = child.stdin.take().ok_or(JsonlClientError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(JsonlClientError::MissingStdout)?;
+        if let Some(stderr) = child.stderr.take() {
+            drain_provider_stderr(program.clone(), stderr);
+        }
         Ok(Self {
             program,
             child: Mutex::new(child),
@@ -312,6 +315,29 @@ impl SandboxProviderJsonlClient {
             return serde_json::from_value(result).map_err(JsonlClientError::DecodeResponse);
         }
     }
+}
+
+fn drain_provider_stderr(program: PathBuf, stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if !line.trim().is_empty() {
+                        log::warn!("sandbox provider `{}` stderr: {line}", program.display());
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    log::warn!(
+                        "failed to read sandbox provider `{}` stderr: {error}",
+                        program.display()
+                    );
+                    break;
+                }
+            }
+        }
+    });
 }
 
 impl Drop for SandboxProviderJsonlClient {

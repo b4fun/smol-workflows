@@ -2,6 +2,7 @@ use crate::config::{ProfileConfig, SshConfig, WorkspaceSyncConfig};
 use crate::error::{provider_error, ProviderResult};
 use crate::ssh::{SshCommandOutput, SshRunner};
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -161,6 +162,37 @@ impl DirectSshDataPlane {
         remote_cwd: &str,
         sync: &WorkspaceSyncConfig,
     ) -> ProviderResult<()> {
+        let attempts = ssh_retry_attempts();
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            match self
+                .sync_workspace_tar_once(ssh_dest, host_path, remote_cwd, sync)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt + 1 < attempts && is_retryable_ssh_provider_error(&error) => {
+                    last_error = Some(error);
+                    sleep(ssh_retry_delay(attempt)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            provider_error(
+                "workspace_sync_failed",
+                "workspace upload failed without an error",
+                false,
+            )
+        }))
+    }
+
+    async fn sync_workspace_tar_once(
+        &self,
+        ssh_dest: &str,
+        host_path: &Path,
+        remote_cwd: &str,
+        sync: &WorkspaceSyncConfig,
+    ) -> ProviderResult<()> {
         let mut tar_command = tokio::process::Command::new("tar");
         for exclude in &sync.exclude {
             tar_command.arg("--exclude").arg(exclude);
@@ -232,10 +264,11 @@ impl DirectSshDataPlane {
         })?;
 
         if let Err(source) = copy_result {
+            let retryable = is_retryable_ssh_io_error(&source);
             return Err(provider_error(
                 "workspace_sync_failed",
                 format!("failed to stream workspace tar over SSH: {source}"),
-                false,
+                retryable,
             ));
         }
         if !tar_output.status.success() {
@@ -249,15 +282,23 @@ impl DirectSshDataPlane {
                 false,
             ));
         }
-        ensure_success(
-            SshCommandOutput {
-                status_code: ssh_output.status.code(),
-                stdout: ssh_output.stdout,
-                stderr: ssh_output.stderr,
-            },
-            "workspace_sync_failed",
-            "remote tar extraction",
-        )
+        let ssh_output = SshCommandOutput {
+            status_code: ssh_output.status.code(),
+            stdout: ssh_output.stdout,
+            stderr: ssh_output.stderr,
+        };
+        if is_retryable_ssh_output(&ssh_output) {
+            return Err(provider_error(
+                "workspace_sync_failed",
+                format!(
+                    "remote tar extraction failed with status {:?}: {}",
+                    ssh_output.status_code,
+                    ssh_output.stderr_text()
+                ),
+                true,
+            ));
+        }
+        ensure_success(ssh_output, "workspace_sync_failed", "remote tar extraction")
     }
 
     pub async fn create_temp_dir(
@@ -299,18 +340,57 @@ impl DirectSshDataPlane {
             shell_quote(&parent),
             shell_quote(path)
         );
-        let output = self
-            .runner
-            .run_with_stdin(ssh_dest, &[command], content)
-            .await
-            .map_err(|source| {
-                provider_error(
+        let attempts = ssh_retry_attempts();
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            let output = match self
+                .runner
+                .run_with_stdin(ssh_dest, std::slice::from_ref(&command), content)
+                .await
+            {
+                Ok(output) => output,
+                Err(source) if attempt + 1 < attempts && is_retryable_ssh_io_error(&source) => {
+                    last_error = Some(provider_error(
+                        "file_io_failed",
+                        format!("failed to write remote file over SSH: {source}"),
+                        true,
+                    ));
+                    sleep(ssh_retry_delay(attempt)).await;
+                    continue;
+                }
+                Err(source) => {
+                    return Err(provider_error(
+                        "file_io_failed",
+                        format!("failed to write remote file over SSH: {source}"),
+                        false,
+                    ));
+                }
+            };
+            if output.success() {
+                return Ok(());
+            }
+            if attempt + 1 < attempts && is_retryable_ssh_output(&output) {
+                last_error = Some(provider_error(
                     "file_io_failed",
-                    format!("failed to write remote file over SSH: {source}"),
-                    false,
-                )
-            })?;
-        ensure_success(output, "file_io_failed", "remote file write")
+                    format!(
+                        "remote file write failed with status {:?}: {}",
+                        output.status_code,
+                        output.stderr_text()
+                    ),
+                    true,
+                ));
+                sleep(ssh_retry_delay(attempt)).await;
+                continue;
+            }
+            return ensure_success(output, "file_io_failed", "remote file write");
+        }
+        Err(last_error.unwrap_or_else(|| {
+            provider_error(
+                "file_io_failed",
+                "remote file write failed without an error",
+                false,
+            )
+        }))
     }
 
     pub async fn read_file(&self, ssh_dest: &str, path: &str) -> ProviderResult<Vec<u8>> {
@@ -359,17 +439,45 @@ impl DirectSshDataPlane {
         code: &'static str,
     ) -> ProviderResult<SshCommandOutput> {
         let args = vec![command.to_string()];
-        let output = self.runner.run(ssh_dest, &args).await.map_err(|source| {
-            provider_error(
-                code,
-                format!("failed to run remote command over SSH: {source}"),
-                false,
-            )
-        })?;
-        if output.success() {
-            Ok(output)
-        } else {
-            Err(provider_error(
+        let attempts = ssh_retry_attempts();
+        let mut last_error = None;
+        for attempt in 0..attempts {
+            let output = match self.runner.run(ssh_dest, &args).await {
+                Ok(output) => output,
+                Err(source) if attempt + 1 < attempts && is_retryable_ssh_io_error(&source) => {
+                    last_error = Some(provider_error(
+                        code,
+                        format!("failed to run remote command over SSH: {source}"),
+                        true,
+                    ));
+                    sleep(ssh_retry_delay(attempt)).await;
+                    continue;
+                }
+                Err(source) => {
+                    return Err(provider_error(
+                        code,
+                        format!("failed to run remote command over SSH: {source}"),
+                        false,
+                    ));
+                }
+            };
+            if output.success() {
+                return Ok(output);
+            }
+            if attempt + 1 < attempts && is_retryable_ssh_output(&output) {
+                last_error = Some(provider_error(
+                    code,
+                    format!(
+                        "remote command failed with status {:?}: {}",
+                        output.status_code,
+                        output.stderr_text()
+                    ),
+                    true,
+                ));
+                sleep(ssh_retry_delay(attempt)).await;
+                continue;
+            }
+            return Err(provider_error(
                 code,
                 format!(
                     "remote command failed with status {:?}: {}",
@@ -377,8 +485,11 @@ impl DirectSshDataPlane {
                     output.stderr_text()
                 ),
                 false,
-            ))
+            ));
         }
+        Err(last_error.unwrap_or_else(|| {
+            provider_error(code, "remote command failed without an error", false)
+        }))
     }
 }
 
@@ -466,6 +577,51 @@ fn sanitize_temp_prefix(prefix: &str) -> String {
     }
 }
 
+fn is_retryable_ssh_io_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn is_retryable_ssh_output(output: &SshCommandOutput) -> bool {
+    !output.success() && is_retryable_ssh_message(&output_diagnostics(output))
+}
+
+fn is_retryable_ssh_provider_error(error: &smol_workflow_sandbox::ProviderError) -> bool {
+    error.retryable || is_retryable_ssh_message(&error.message)
+}
+
+fn is_retryable_ssh_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "broken pipe",
+        "connection reset",
+        "connection timed out",
+        "connection closed",
+        "connection refused",
+        "operation timed out",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn ssh_retry_attempts() -> usize {
+    3
+}
+
+fn ssh_retry_delay(attempt: usize) -> Duration {
+    const BASE_MS: u64 = 250;
+    const MAX_MS: u64 = 2_000;
+    let shift = u32::try_from(attempt).unwrap_or(u32::MAX).min(16);
+    Duration::from_millis(BASE_MS.saturating_mul(1u64 << shift).min(MAX_MS))
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -476,6 +632,25 @@ fn env_u64(name: &str, default: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_retryable_ssh_failures() {
+        let broken_pipe = io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe");
+        assert!(is_retryable_ssh_io_error(&broken_pipe));
+        assert!(is_retryable_ssh_message(
+            "client_loop: send disconnect: Broken pipe"
+        ));
+        assert!(is_retryable_ssh_output(&SshCommandOutput {
+            status_code: Some(255),
+            stdout: Vec::new(),
+            stderr: b"Connection reset by peer".to_vec(),
+        }));
+        assert!(!is_retryable_ssh_output(&SshCommandOutput {
+            status_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"permission denied".to_vec(),
+        }));
+    }
 
     #[test]
     fn parses_new_and_ls_json() {
