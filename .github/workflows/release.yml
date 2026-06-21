@@ -19,15 +19,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: smol-wf-linux-x86_64.tar.gz
-            binary: smol-wf
+            binaries: smol-wf smol-sandbox-exe-dev
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: smol-wf-macos-aarch64.tar.gz
-            binary: smol-wf
+            binaries: smol-wf smol-sandbox-exe-dev
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: smol-wf-windows-x86_64.zip
-            binary: smol-wf.exe
+            binaries: smol-wf.exe smol-sandbox-exe-dev.exe
 
     steps:
       - name: Checkout
@@ -39,21 +39,26 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - name: Build CLI
-        run: cargo build --release --locked -p smol-workflow-cli --target ${{ matrix.target }}
+      - name: Build binaries
+        run: cargo build --release --locked -p smol-workflow-cli -p smol-sandbox-exe-dev --target ${{ matrix.target }}
 
-      - name: Ad-hoc sign macOS binary
+      - name: Ad-hoc sign macOS binaries
         if: runner.os == 'macOS'
-        run: codesign --force --sign - target/${{ matrix.target }}/release/${{ matrix.binary }}
+        run: |
+          for binary in ${{ matrix.binaries }}; do
+            codesign --force --sign - target/${{ matrix.target }}/release/${binary}
+          done
 
-      - name: Package Unix binary
+      - name: Package Unix binaries
         if: runner.os != 'Windows'
-        run: tar -C target/${{ matrix.target }}/release -czf ${{ matrix.archive }} ${{ matrix.binary }}
+        run: tar -C target/${{ matrix.target }}/release -czf ${{ matrix.archive }} ${{ matrix.binaries }}
 
-      - name: Package Windows binary
+      - name: Package Windows binaries
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+        run: |
+          $binaries = "${{ matrix.binaries }}" -split " " | ForEach-Object { "target/${{ matrix.target }}/release/$_" }
+          Compress-Archive -Path $binaries -DestinationPath ${{ matrix.archive }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -8,7 +8,43 @@ Minimal agentic workflow runtime for orchestrating your agents at scale.
 
 ### Installing
 
-Download the latest release into the current directory:
+Install the latest official release to `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/b4fun/smol-workflows/main/install.sh | bash
+```
+
+Override the destination with `INSTALL_DIR`, `BIN_DIR`, or `--dir`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/b4fun/smol-workflows/main/install.sh \
+  | bash -s -- --dir "$HOME/bin"
+```
+
+Install a specific release tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/b4fun/smol-workflows/main/install.sh \
+  | bash -s -- --version v0.3.0-alpha.4
+```
+
+From a source checkout, `./install.sh` also installs the latest official release
+by default. Use `--from-source` when you explicitly want to build and install
+local checkout binaries:
+
+```sh
+./install.sh --from-source
+./install.sh --from-source --dir "$HOME/.local/bin"
+```
+
+The installer requests these binaries:
+
+- `smol-wf`
+- `smol-sandbox-exe-dev`
+
+Release archives are packaged with both binaries.
+
+You can also download release archives manually:
 
 ```sh
 # Linux x86_64
