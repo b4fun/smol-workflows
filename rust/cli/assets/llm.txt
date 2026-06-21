@@ -86,6 +86,14 @@ Workflow primitives syntax:
     workflow(nameOrRef: string | { scriptPath: string }, args?: unknown): Promise<unknown>
     Invoke a child workflow. Relative scriptPath resolves from the current workflow file.
 
+  import { sleep } from "workflow:extra"
+    sleep(ms: number): Promise<void>
+    Pause workflow execution using a runtime-managed sleep primitive.
+
+  import { exec } from "workflow:sandbox"
+    exec(profile: string, request: { command: string, args?: string[], cwd?: string, env?: Record<string,string>, stdin?: string }): Promise<{ exitCode: number, stdout: string, stderr: string }>
+    Run a deterministic command inside a fresh sandbox profile without LLM inference in that sandbox.
+
   budget
     budget.total: number | null
     budget.spent(): number

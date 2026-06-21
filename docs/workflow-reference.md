@@ -179,6 +179,29 @@ This is a workflow runtime primitive, not browser/Node `setTimeout`.
 
 ---
 
+### `workflow:sandbox`
+
+Run deterministic commands inside a configured sandbox profile without running an LLM/agent inside that sandbox.
+
+```js
+import { exec } from "workflow:sandbox";
+
+const result = await exec("exe-dev/default", {
+  command: "sh",
+  args: ["-lc", "pwd && uname -a"],
+});
+
+if (result.exitCode !== 0) {
+  throw new Error(result.stderr);
+}
+```
+
+`exec(profile, request)` opens a fresh sandbox session, runs the command, captures `{ exitCode, stdout, stderr }`, closes the sandbox, and returns the result. `profile` uses the same `<provider>/<profile>` form as agent sandbox isolation. Non-zero command exits are returned, not thrown; provider/open/cleanup failures reject the promise.
+
+See [`docs/js/workflow_sandbox.md`](js/workflow_sandbox.md) for request fields and lifecycle details.
+
+---
+
 ### `budget` — token budget object
 
 ```js

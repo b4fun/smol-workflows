@@ -86,6 +86,7 @@ type WorkflowIntrinsics = (
 );
 
 const WORKFLOW_EXTRA_MODULE: &str = "workflow:extra";
+const WORKFLOW_SANDBOX_MODULE: &str = "workflow:sandbox";
 // Default safety cap for workflow sleeps. This prevents accidental effectively
 // infinite sleeps while still allowing long durable waits. Embedders can
 // override it with `RQuickJSWorkflowRuntime::with_max_sleep_ms`.
@@ -114,47 +115,52 @@ const BLOCKED_GLOBALS: &[&str] = &[
 const INTERNAL_GLOBALS: &[&str] = &["__readonly"];
 
 #[derive(Debug)]
-struct WorkflowExtraResolver;
+struct WorkflowModuleResolver;
 
-impl Resolver for WorkflowExtraResolver {
+impl Resolver for WorkflowModuleResolver {
     fn resolve<'js>(
         &mut self,
         _ctx: &rquickjs::Ctx<'js>,
         base: &str,
         name: &str,
     ) -> rquickjs::Result<String> {
-        if name == WORKFLOW_EXTRA_MODULE {
-            Ok(WORKFLOW_EXTRA_MODULE.to_string())
-        } else {
-            Err(RQuickJSError::new_resolving_message(
+        match name {
+            WORKFLOW_EXTRA_MODULE => Ok(WORKFLOW_EXTRA_MODULE.to_string()),
+            WORKFLOW_SANDBOX_MODULE => Ok(WORKFLOW_SANDBOX_MODULE.to_string()),
+            _ => Err(RQuickJSError::new_resolving_message(
                 base,
                 name,
-                "workflow imports are restricted; only workflow:extra is available",
-            ))
+                "workflow imports are restricted; only workflow:extra and workflow:sandbox are available",
+            )),
         }
     }
 }
 
 #[derive(Debug)]
-struct WorkflowExtraLoader;
+struct WorkflowModuleLoader;
 
-impl Loader for WorkflowExtraLoader {
+impl Loader for WorkflowModuleLoader {
     fn load<'js>(
         &mut self,
         ctx: &rquickjs::Ctx<'js>,
         name: &str,
     ) -> rquickjs::Result<Module<'js, Declared>> {
-        if name != WORKFLOW_EXTRA_MODULE {
-            return Err(RQuickJSError::new_loading_message(
+        match name {
+            WORKFLOW_EXTRA_MODULE => Module::declare(
+                ctx.clone(),
+                WORKFLOW_EXTRA_MODULE,
+                include_str!("assets/workflow_extra.js"),
+            ),
+            WORKFLOW_SANDBOX_MODULE => Module::declare(
+                ctx.clone(),
+                WORKFLOW_SANDBOX_MODULE,
+                include_str!("assets/workflow_sandbox.js"),
+            ),
+            _ => Err(RQuickJSError::new_loading_message(
                 name,
-                "workflow imports are restricted; only workflow:extra is available",
-            ));
+                "workflow imports are restricted; only workflow:extra and workflow:sandbox are available",
+            )),
         }
-        Module::declare(
-            ctx.clone(),
-            WORKFLOW_EXTRA_MODULE,
-            include_str!("rquickjs_js/workflow_extra.js"),
-        )
     }
 }
 
@@ -202,7 +208,7 @@ impl WorkflowJSRuntime for RQuickJSWorkflowRuntime {
         let runtime = Runtime::new().context("failed to create QuickJS runtime")?;
         runtime.set_memory_limit(input.sandbox.memory_limit_bytes);
         runtime.set_max_stack_size(input.sandbox.max_stack_size_bytes);
-        runtime.set_loader(WorkflowExtraResolver, WorkflowExtraLoader);
+        runtime.set_loader(WorkflowModuleResolver, WorkflowModuleLoader);
 
         let timeout = input.sandbox.timeout;
         let deadline = Arc::new(Mutex::new(Instant::now() + timeout));
@@ -549,7 +555,7 @@ fn evaluate_sandbox_prelude(ctx: &rquickjs::Ctx<'_>) -> anyhow::Result<()> {
     let module = Module::declare(
         ctx.clone(),
         "smol:workflow-sandbox-prelude".to_string(),
-        include_str!("rquickjs_js/sandbox_prelude.js").to_string(),
+        include_str!("assets/sandbox_prelude.js").to_string(),
     )
     .catch(ctx)
     .map_err(|error| anyhow!("failed to declare sandbox prelude: {error:?}"))?;
@@ -1038,9 +1044,12 @@ fn create_sw_object<'js>(
     state: Rc<RefCell<RuntimeState>>,
 ) -> anyhow::Result<Object<'js>> {
     let sw = Object::new(ctx.clone()).context("failed to create workflow SW object")?;
-    let extra = create_extra_object(ctx, state)?;
+    let extra = create_extra_object(ctx, Rc::clone(&state))?;
     sw.prop("extra", Property::from(extra).enumerable())
         .context("failed to install workflow SW.extra object")?;
+    let sandbox = create_sandbox_object(ctx, state)?;
+    sw.prop("sandbox", Property::from(sandbox).enumerable())
+        .context("failed to install workflow SW.sandbox object")?;
     Ok(sw)
 }
 
@@ -1066,6 +1075,39 @@ fn create_extra_object<'js>(
         )
         .context("failed to install workflow extra sleep function")?;
     Ok(extra)
+}
+
+fn create_sandbox_object<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    state: Rc<RefCell<RuntimeState>>,
+) -> anyhow::Result<Object<'js>> {
+    let sandbox = Object::new(ctx.clone()).context("failed to create workflow sandbox object")?;
+    let exec_state = Rc::clone(&state);
+    sandbox
+        .prop(
+            "exec",
+            Property::from(Func::from(MutFn::from(
+                move |ctx: rquickjs::Ctx<'js>, profile: String, request: Value<'js>| {
+                    let request =
+                        rquickjs_serde::from_value::<super::WorkflowSandboxExecRequest>(request)
+                            .map_err(|error| rquickjs::Error::FromJs {
+                                from: "value",
+                                to: "WorkflowSandboxExecRequest",
+                                message: Some(error.to_string()),
+                            })?;
+                    create_pending_request(&ctx, &exec_state, |id, _state| {
+                        WorkflowRuntimeRequest::SandboxExec {
+                            id,
+                            profile,
+                            request,
+                        }
+                    })
+                },
+            )))
+            .enumerable(),
+        )
+        .context("failed to install workflow sandbox exec function")?;
+    Ok(sandbox)
 }
 
 fn validate_sleep_duration<'js>(

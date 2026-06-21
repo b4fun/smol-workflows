@@ -17,6 +17,30 @@ export type SandboxOpenOptions = {
   cwd?: string;
 };
 
+/** Request to run one foreground command in a sandbox. */
+export type SandboxExecRequest = {
+  /** Executable to run inside the sandbox. */
+  command: string;
+  /** Arguments passed to the executable. */
+  args?: string[];
+  /** Optional working directory override inside the sandbox. This is not a host path. */
+  cwd?: string;
+  /** Per-command environment variable overrides. */
+  env?: Record<string, string>;
+  /** Optional UTF-8 stdin. */
+  stdin?: string;
+};
+
+/** Result from running one foreground command in a sandbox. */
+export type SandboxExecOutput = {
+  /** Process exit code returned by the sandbox command. */
+  exitCode: number;
+  /** UTF-8 stdout captured from the command. */
+  stdout: string;
+  /** UTF-8 stderr captured from the command. */
+  stderr: string;
+};
+
 /** Handle for an advanced reusable sandbox session. */
 export type SandboxHandle = {
   /** Runtime-assigned sandbox session ID. */
@@ -31,6 +55,8 @@ export type SandboxHandle = {
 
 /** Advanced sandbox lifecycle helpers exposed by the runtime. */
 export type SandboxFn = {
+  /** Run one deterministic command in a fresh sandbox session. */
+  exec(profile: string, request: SandboxExecRequest): Promise<SandboxExecOutput>;
   /** Advanced: create a reusable workflow-owned sandbox session. */
   open(profile: string, options?: SandboxOpenOptions): Promise<SandboxHandle>;
   /** Advanced: create a scoped reusable sandbox session. */

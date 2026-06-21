@@ -3,13 +3,15 @@ use crate::agent_providers::{
     AgentProviderRunInput, AgentRunIsolation, AgentUsage, AgentUsageCost,
 };
 use crate::environment::{
-    AgentExecutionEnvironment, LocalExecutionEnvironment, SandboxExecutionEnvironment,
+    AgentExecutionEnvironment, EnvironmentPath, ExecRequest, LocalExecutionEnvironment,
+    NullExecEventSink, SandboxExecutionEnvironment,
 };
 use crate::js_runtime::rquickjs::RQuickJSWorkflowRuntime;
 use crate::js_runtime::{
     WorkflowBudgetSnapshot, WorkflowJSRuntime, WorkflowModuleInput, WorkflowModuleOutput,
     WorkflowRef, WorkflowRuntimeCall, WorkflowRuntimeExecution, WorkflowRuntimePoll,
-    WorkflowRuntimeRequest, WorkflowRuntimeRequestResolution,
+    WorkflowRuntimeRequest, WorkflowRuntimeRequestResolution, WorkflowSandboxExecOutput,
+    WorkflowSandboxExecRequest,
 };
 use crate::metadata::{read_workflow_metadata, WorkflowMetadata};
 use anyhow::{anyhow, bail, Context};
@@ -730,6 +732,20 @@ impl RunState {
                     send_js_command(js_commands, JsCommand::ResolveRequest { id, resolution })
                         .await?;
                 }
+                WorkflowRuntimeRequest::SandboxExec {
+                    id,
+                    profile,
+                    request,
+                } => {
+                    let resolution = match self.handle_sandbox_exec(&profile, request).await {
+                        Ok(value) => WorkflowRuntimeRequestResolution::Ok(value),
+                        Err(error) => WorkflowRuntimeRequestResolution::Err {
+                            message: error.to_string(),
+                        },
+                    };
+                    send_js_command(js_commands, JsCommand::ResolveRequest { id, resolution })
+                        .await?;
+                }
             }
         }
     }
@@ -994,7 +1010,9 @@ impl RunState {
                     Err(error) => Err((id, error)),
                 }
             }
-            WorkflowRuntimeRequest::Workflow { .. } | WorkflowRuntimeRequest::Sleep { .. } => {
+            WorkflowRuntimeRequest::Workflow { .. }
+            | WorkflowRuntimeRequest::Sleep { .. }
+            | WorkflowRuntimeRequest::SandboxExec { .. } => {
                 unreachable!("prepare_agent_request only accepts agent requests")
             }
         }
@@ -1280,6 +1298,61 @@ impl RunState {
             usage: result.usage.clone(),
             isolation: result.isolation.clone(),
         });
+    }
+
+    async fn handle_sandbox_exec(
+        &self,
+        profile: &str,
+        request: WorkflowSandboxExecRequest,
+    ) -> anyhow::Result<Value> {
+        let (provider, profile_name) = parse_sandbox_profile_ref(profile)?;
+        let program = format!("smol-sandbox-{provider}");
+        let sandbox_group_id = format!("sbxgrp_{}", ulid::Ulid::new());
+        let workspace_path = self
+            .workflow_cwd
+            .clone()
+            .ok_or_else(|| anyhow!("sandbox.exec requires the workflow cwd to be available"))?;
+        let sandbox_env = SandboxExecutionEnvironment::open(
+            program,
+            OpenSandboxRequest {
+                metadata: SandboxMetadata::new(
+                    format!("sandbox-exec-{}", ulid::Ulid::new()),
+                    sandbox_group_id,
+                ),
+                profile: ProfileRef {
+                    provider,
+                    name: profile_name,
+                },
+                workspace_sync: WorkspaceSync {
+                    host_path: workspace_path,
+                },
+                cwd: request.cwd.clone(),
+            },
+        )
+        .await
+        .with_context(|| format!("failed to open sandbox profile `{profile}`"))?;
+
+        let mut argv = Vec::with_capacity(1 + request.args.len());
+        argv.push(request.command);
+        argv.extend(request.args);
+        let exec_request = ExecRequest {
+            argv,
+            cwd: request.cwd.map(EnvironmentPath),
+            env: request.env,
+            stdin: request.stdin.map(String::into_bytes),
+        };
+        let mut sink = NullExecEventSink;
+        let exec_result = sandbox_env.exec(exec_request, &mut sink).await;
+        let close_result = sandbox_env.close().await;
+        let output = exec_result?;
+        close_result.context("failed to close sandbox after sandbox.exec")?;
+
+        let value = serde_json::to_value(WorkflowSandboxExecOutput {
+            exit_code: output.exit_code,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })?;
+        Ok(value)
     }
 
     async fn handle_workflow(
