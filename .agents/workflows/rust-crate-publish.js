@@ -2,12 +2,13 @@ import { sleep } from "workflow:extra";
 
 export const meta = {
   name: 'rust-crate-publish',
-  description: 'Prepare and finalize a Rust crates.io release from a natural-language request: resolve version, open PR, wait for merge, and create the GitHub release tag',
+  description: 'Prepare and finalize a Rust crates.io release from a natural-language request: resolve version, open PR, wait for merge, create the GitHub release tag, and verify the published install artifact',
   phases: [
     { title: 'prepare', detail: 'Detect release intent and choose the next release version', model: 'fast' },
     { title: 'release-prepare-code', detail: 'Update local Rust release files, validate, commit, push, and open a PR', model: 'smart' },
     { title: 'release-prepare-pr', detail: 'Poll the release PR until it is merged', model: 'fast' },
-    { title: 'release-finalize', detail: 'Create the GitHub release/tag on the merged commit', model: 'smart' },
+    { title: 'release-finalize', detail: 'Create the GitHub release/tag on the merged commit and wait for publish workflows', model: 'smart' },
+    { title: 'release-install-verify', detail: 'Create an exe.dev VM sandbox, install from the latest release artifact, and verify smol-wf version', model: 'smart' },
   ],
 }
 
@@ -351,6 +352,22 @@ if (!remoteReleaseStatus || !remoteReleaseStatus.allRunsCompleted) {
   throw new Error(`Timed out waiting for remote release workflows to complete after ${releaseStatusMaxPolls} polls`)
 }
 
+phase('release-install-verify')
+log(`Running install verification sub-workflow for ${resolvedIntent.expectedTag}`)
+
+const installVerifyReport = await workflow(
+  { scriptPath: './rust-release-install-verify.js' },
+  {
+    expectedTag: resolvedIntent.expectedTag,
+    version: resolvedIntent.version,
+    remoteReleaseStatus,
+  },
+)
+
+if (!installVerifyReport.sandboxVmVerified || !installVerifyReport.versionMatchesLatestRelease) {
+  throw new Error(`Latest release install verification failed: ${installVerifyReport.summary}`)
+}
+
 export default {
   releaseRequest,
   resolvedIntent,
@@ -358,4 +375,5 @@ export default {
   mergedPr,
   finalReport,
   remoteReleaseStatus,
+  installVerifyReport,
 }
