@@ -27,6 +27,6 @@ ratatui = "0.29"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smol-workflow-engine = { version = "0.3.0-alpha.2", path = "../engine" }
+smol-workflow-engine = { version = "0.3.0-alpha.3", path = "../engine" }
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt", "signal", "sync"] }
