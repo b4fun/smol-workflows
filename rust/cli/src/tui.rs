@@ -2183,12 +2183,13 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
             }
             let event_index = row.event_index();
             let summary = timeline_row_summary(app, row);
+            let display_summary = timeline_cell_text(&summary, usize::from(list_area.width));
             let selected = row_index == app.selected;
             let distance = row_index.abs_diff(app.selected);
             let dim_enabled = true;
             let search_match = !query.is_empty() && summary.to_ascii_lowercase().contains(&query);
             let line = Line::from(vec![Span::styled(
-                summary,
+                display_summary,
                 timeline_event_style(
                     &app.events[event_index],
                     selected,
@@ -2208,6 +2209,27 @@ fn render_timeline(frame: &mut Frame<'_>, app: &TuiReplayApp, area: ratatui::lay
         end < virtual_len,
         focused,
     );
+}
+
+fn timeline_cell_text(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let single_line = value
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\t' => ' ',
+            _ if ch.is_control() => ' ',
+            _ => ch,
+        })
+        .collect::<String>();
+
+    if single_line.chars().count() > width {
+        truncate(&single_line, width.saturating_sub(1))
+    } else {
+        single_line
+    }
 }
 
 fn timeline_list_areas(
@@ -3622,6 +3644,14 @@ mod tests {
         EventRecord {
             event: Arc::new(event),
         }
+    }
+
+    #[test]
+    fn timeline_cell_text_is_single_line_and_fits_width() {
+        assert_eq!(timeline_cell_text("hello\nworld", 20), "hello world");
+        assert_eq!(timeline_cell_text("abcdef", 4), "abc…");
+        assert_eq!(timeline_cell_text("abcdef", 1), "…");
+        assert_eq!(timeline_cell_text("abcdef", 0), "");
     }
 
     #[test]
