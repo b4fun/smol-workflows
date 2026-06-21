@@ -155,12 +155,13 @@ declare module "workflow:extra" {
 
 ## Sandbox and import policy
 
-The runtime should continue to deny arbitrary imports. `workflow:extra` should be an explicit allowlisted virtual module.
+The runtime should continue to deny arbitrary imports. `workflow:extra` and [`workflow:sandbox`](workflow_sandbox.md) are explicit allowlisted virtual modules.
 
 Allowed:
 
 ```js
 import { sleep } from "workflow:extra";
+import { exec } from "workflow:sandbox";
 ```
 
 Denied:
@@ -172,7 +173,7 @@ import { sleep } from "extra";
 import local from "./local.js";
 ```
 
-This preserves the current sandbox posture: workflow scripts do not get filesystem, process, network, Node, Deno, Bun, or QuickJS `std`/`os` APIs unless a host capability is deliberately added.
+This preserves the current sandbox posture: workflow scripts do not get direct filesystem, process, network, Node, Deno, Bun, or QuickJS `std`/`os` APIs unless a host capability is deliberately added. `workflow:sandbox` process execution is routed through an explicit sandbox provider profile rather than through the workflow JavaScript runtime itself.
 
 ## Why not `setTimeout` or `setInterval`?
 

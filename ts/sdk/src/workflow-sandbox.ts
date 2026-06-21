@@ -6,6 +6,9 @@ function unsupportedHostModule(): never {
   );
 }
 
+/** Run one deterministic command in a fresh sandbox session. */
+export const exec: SandboxFn["exec"] = async () => unsupportedHostModule();
+
 /** Advanced: create a reusable workflow-owned sandbox session. */
 export const open: SandboxFn["open"] = async () => unsupportedHostModule();
 
@@ -13,6 +16,7 @@ export const open: SandboxFn["open"] = async () => unsupportedHostModule();
 export const withSandbox: SandboxFn["with"] = async () => unsupportedHostModule();
 
 const sandbox: SandboxFn = {
+  exec,
   open,
   with: withSandbox,
 };

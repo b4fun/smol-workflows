@@ -163,13 +163,13 @@ export default result;
 
 ## Sandbox isolation
 
-An agent step may request sandbox isolation by referencing a sandbox profile configured in the workflow runner/project/user settings:
+An agent step may request sandbox isolation by referencing a sandbox profile configured in the workflow runner/project/user settings. Profiles use `<provider>/<profile>` names:
 
 ```ts
 const result = await agent("Inspect the repository and summarize findings", {
   isolation: {
     type: "sandbox",
-    profile: "node-repo",
+    profile: "exe-dev/default",
   },
 });
 
@@ -182,7 +182,7 @@ A sandbox-internal working directory override may be provided:
 const result = await agent("Debug the API package", {
   isolation: {
     type: "sandbox",
-    profile: "node-repo",
+    profile: "exe-dev/default",
     cwd: "/workspace/packages/api",
   },
 });
@@ -190,12 +190,29 @@ const result = await agent("Debug the API package", {
 
 Detailed sandbox provisioning is intentionally outside the SDK call. Profiles/settings own provider selection, templates/images, environment variables, secrets, resource limits, network policy, workspace sync behavior, and lifecycle policy.
 
-Advanced workflows that need multiple steps to share one sandbox can use the host-provided virtual module `workflow:sandbox`:
+Workflows that need deterministic command output from a sandbox, without running an LLM inside that sandbox, can use the host-provided virtual module `workflow:sandbox`:
+
+```ts
+import { exec } from "workflow:sandbox";
+
+const result = await exec("exe-dev/default", {
+  command: "sh",
+  args: ["-lc", "npm test"],
+});
+
+if (result.exitCode !== 0) {
+  throw new Error(result.stderr);
+}
+
+export default result.stdout;
+```
+
+Advanced workflows that need multiple agent steps to share one sandbox can use the same module's lifecycle helpers:
 
 ```ts
 import sandbox from "workflow:sandbox";
 
-const result = await sandbox.with("node-repo", async (box) => {
+const result = await sandbox.with("exe-dev/default", async (box) => {
   await agent("Inspect the repository", { isolation: box });
   return await agent("Summarize the findings", { isolation: box });
 });
@@ -206,7 +223,7 @@ export default result;
 Named imports are also available:
 
 ```ts
-import { open, withSandbox } from "workflow:sandbox";
+import { exec, open, withSandbox } from "workflow:sandbox";
 ```
 
 `workflow:sandbox` is provided by the workflow runtime. The SDK package provides types and a stub module that throws if used outside the workflow runtime.
@@ -239,7 +256,7 @@ The runner injects these globals:
 - `log(...values)` — write workflow logs
 - `phase(name)` — mark workflow phase
 - `SW.extra.sleep(ms)` / `ctx.extra.sleep(ms)` / `import { sleep } from "workflow:extra"` — pause workflow execution
-- `SW.sandbox` / `ctx.sandbox` / `import sandbox from "workflow:sandbox"` — advanced sandbox lifecycle helpers
+- `SW.sandbox` / `ctx.sandbox` / `import sandbox from "workflow:sandbox"` — sandbox command execution and advanced sandbox lifecycle helpers
 
 ## Scripts
 

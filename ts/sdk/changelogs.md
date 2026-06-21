@@ -7,7 +7,8 @@ Track user-visible changes to `@smol-workflows/sdk`, especially public TypeScrip
 - Added sandbox isolation SDK types: `SandboxIsolation`, `SandboxOpenOptions`, `SandboxHandle`, `SandboxFn`, and `AgentIsolation`.
 - Widened `AgentRunOptions.isolation` to accept `"worktree"`, one-step sandbox profile isolation, or an advanced `SandboxHandle`.
 - Added `sandbox` to `WorkflowContext` and `SW.sandbox`.
-- Added `workflow:sandbox` virtual module declarations and `@smol-workflows/sdk/workflow-sandbox` runtime stub for advanced sandbox lifecycle helpers.
+- Added `workflow:sandbox` virtual module declarations and `@smol-workflows/sdk/workflow-sandbox` runtime stub for sandbox command execution and advanced sandbox lifecycle helpers.
+- Added `SandboxExecRequest`, `SandboxExecOutput`, and `SandboxFn.exec` types.
 - Added `key` to `AgentRunOptions` for durable agent checkpoint keys.
 - Kept `workflow:extra` available to editors when loading root SDK types via `types: ["@smol-workflows/sdk"]`.
 

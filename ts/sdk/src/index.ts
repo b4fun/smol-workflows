@@ -18,6 +18,8 @@ export type {
 export type { PipelineFn, PipelineStage } from "./pipeline.js";
 export type {
   AgentIsolation,
+  SandboxExecOutput,
+  SandboxExecRequest,
   SandboxFn,
   SandboxHandle,
   SandboxIsolation,
