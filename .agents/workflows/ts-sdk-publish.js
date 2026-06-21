@@ -2,9 +2,9 @@ export const meta = {
   name: 'ts-sdk-publish',
   description: 'Prepare a TypeScript SDK release PR: changelog, version/tag selection, validation, commit, and draft PR',
   phases: [
-    { title: 'Prepare', detail: 'Read release intent and set release scope', model: 'gpt-5.4-mini' },
-    { title: 'ReleasePrep', detail: 'Update changelog and package version in parallel', model: 'gpt-5.4-mini' },
-    { title: 'Finalize', detail: 'Validate, commit, and create a draft release PR', model: 'gpt-5.5' },
+    { title: 'Prepare', detail: 'Read release intent and set release scope', model: 'fast' },
+    { title: 'ReleasePrep', detail: 'Update changelog and package version in parallel', model: 'fast' },
+    { title: 'Finalize', detail: 'Validate, commit, and create a draft release PR', model: 'smart' },
   ],
 }
 
@@ -59,20 +59,6 @@ const VERSION_REPORT_SCHEMA = {
     },
   },
   required: ['releaseKind', 'packageVersion', 'expectedTag', 'npmDistTag', 'summary', 'filesChanged', 'verification', 'skipped'],
-}
-
-const FINAL_REPORT_SCHEMA = {
-  type: 'object',
-  properties: {
-    release: { type: 'string' },
-    expectedTag: { type: 'string' },
-    branch: { type: 'string' },
-    commit: { type: 'string' },
-    prUrl: { type: 'string' },
-    validation: { type: 'array', items: { type: 'string' } },
-    notes: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['release', 'expectedTag', 'branch', 'commit', 'prUrl', 'validation', 'notes'],
 }
 
 const rawReleaseInput = args && typeof args === 'object' ? args : {}
@@ -208,11 +194,10 @@ Requirements:
 11. Do not create or push the release tag yourself.
 12. If committing or creating the draft PR is not possible because credentials/remotes/tools are unavailable, do as much validation as possible and report the blocker in notes.
 
-Return a structured report with release, expectedTag, branch, commit, prUrl, validation, and notes. Use an empty string for commit or prUrl only if blocked.`,
+Return a concise plain-text final report containing release, expectedTag, branch, commit, prUrl, validation, and notes. Use an empty string for commit or prUrl only if blocked.`,
   {
     phase: 'Finalize',
     label: 'validate-commit-draft-pr',
-    schema: FINAL_REPORT_SCHEMA,
   },
 )
 
