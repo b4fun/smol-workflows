@@ -120,10 +120,3 @@ cargo test -p smol-sandbox-exe-dev
 cargo check --workspace
 ```
 
-Do not run real exe.dev lifecycle/e2e tests unless explicitly opted in with
-`EXE_DEV_E2E=1`, because those tests may create or delete real VMs. When enabled,
-the gated smoke test opens exactly one provider VM through the JSONL `open` path,
-records its VM name and SSH destination, verifies it appears in `ssh exe.dev ls
---json`, verifies direct SSH/cwd usability, then closes/deletes it by default.
-Set `SMOL_EXE_DEV_KEEP=1` to preserve that VM for debugging; the test reports the
-VM name and deletion command.
