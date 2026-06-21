@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub mod rquickjs;
@@ -153,12 +154,46 @@ pub enum WorkflowRuntimeRequest {
         #[serde(rename = "durationMs")]
         duration_ms: u64,
     },
+
+    /// Workflow called `sandbox.exec(...)` and is awaiting command output.
+    #[serde(rename = "sandbox_exec")]
+    SandboxExec {
+        id: String,
+        profile: String,
+        request: WorkflowSandboxExecRequest,
+    },
+}
+
+/// Command request for `workflow:sandbox` / `SW.sandbox.exec`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkflowSandboxExecRequest {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+}
+
+/// Command output returned by `workflow:sandbox` / `SW.sandbox.exec`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkflowSandboxExecOutput {
+    #[serde(rename = "exitCode")]
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl WorkflowRuntimeRequest {
     pub fn id(&self) -> &str {
         match self {
-            Self::Agent { id, .. } | Self::Workflow { id, .. } | Self::Sleep { id, .. } => id,
+            Self::Agent { id, .. }
+            | Self::Workflow { id, .. }
+            | Self::Sleep { id, .. }
+            | Self::SandboxExec { id, .. } => id,
         }
     }
 
@@ -167,6 +202,7 @@ impl WorkflowRuntimeRequest {
             Self::Agent { .. } => "agent",
             Self::Workflow { .. } => "workflow",
             Self::Sleep { .. } => "sleep",
+            Self::SandboxExec { .. } => "sandbox_exec",
         }
     }
 }
