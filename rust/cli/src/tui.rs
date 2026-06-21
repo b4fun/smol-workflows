@@ -111,6 +111,7 @@ pub struct ReplayCommandOptions {
 
 pub struct RunCommandOptions {
     pub script_path: PathBuf,
+    pub workflow_cwd: Option<PathBuf>,
     pub args: Value,
     pub agent_provider: String,
     pub db_path: PathBuf,
@@ -188,6 +189,7 @@ fn run_workflow_in_thread(
         let mut store = SqliteDurableStore::open(&options.db_path)?;
         let mut durable_options =
             LocalDurableRunOptions::new(options.script_path, options.args, provider);
+        durable_options.workflow_cwd = options.workflow_cwd;
         durable_options.budget_total = options.budget_total;
         durable_options.model_map = options.model_map;
         durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;

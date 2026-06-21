@@ -1303,6 +1303,7 @@ async fn tui_run_command(script_path: String, argv: Vec<String>) -> anyhow::Resu
 
     tui::run_command(tui::RunCommandOptions {
         script_path: PathBuf::from(script_path),
+        workflow_cwd: Some(std::env::current_dir()?),
         args: Value::Object(options.args),
         agent_provider: options.agent_provider,
         db_path: options.db_path,
@@ -1345,6 +1346,7 @@ async fn run_command(script_path: String, argv: Vec<String>) -> anyhow::Result<(
         Value::Object(options.args),
         provider,
     );
+    durable_options.workflow_cwd = Some(std::env::current_dir()?);
     durable_options.budget_total = options.budget_allowance;
     durable_options.model_map = options.model_map;
     durable_options.max_parallel_agent_requests = options.max_parallel_agent_requests;

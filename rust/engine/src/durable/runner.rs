@@ -32,6 +32,7 @@ const DEFAULT_STEP_LEASE_MS: u64 = 60_000;
 /// Options for a local durable workflow run.
 pub struct LocalDurableRunOptions {
     pub script_path: PathBuf,
+    pub workflow_cwd: Option<PathBuf>,
     pub args: Value,
     pub agent_provider: Arc<dyn AgentProvider>,
     pub model_map: BTreeMap<String, String>,
@@ -47,6 +48,7 @@ impl LocalDurableRunOptions {
     pub fn new(script_path: PathBuf, args: Value, agent_provider: Arc<dyn AgentProvider>) -> Self {
         Self {
             script_path,
+            workflow_cwd: None,
             args,
             agent_provider,
             model_map: BTreeMap::new(),
@@ -391,6 +393,7 @@ pub async fn run_local_durable_workflow(
 
     let result = run_workflow(RunWorkflowOptions {
         script_path: options.script_path.clone(),
+        workflow_cwd: options.workflow_cwd.clone(),
         args: options.args.clone(),
         agent_provider: Arc::clone(&options.agent_provider),
         model_map: options.model_map.clone(),

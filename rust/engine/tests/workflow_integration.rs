@@ -486,6 +486,7 @@ fn run_debug(
     let provider = Arc::new(DebugAgentProvider::new());
     block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args,
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -522,6 +523,7 @@ export default { agent: await agent("inspect cluster") };
     let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: Arc::new(RawEventsProvider),
         model_map: Default::default(),
@@ -647,6 +649,7 @@ export default { item: args.item };
     let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path: parent_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
         model_map: Default::default(),
@@ -740,6 +743,7 @@ throw new Error("child exploded");
     let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path: parent_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
         model_map: Default::default(),
@@ -819,6 +823,7 @@ throw new Error("integration boom");
     let event_sink_dyn: Arc<dyn WorkflowEventSink> = event_sink.clone();
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
         model_map: Default::default(),
@@ -877,12 +882,66 @@ fn runs_child_workflow_that_uses_workflow_extra_sleep() {
     assert_eq!(result.workflow_calls.len(), 1);
 }
 
+#[test]
+fn child_workflow_agent_uses_invocation_cwd_when_provided() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let workflow_dir = temp.path().join(".agents/workflows");
+    fs::create_dir_all(&workflow_dir).expect("workflow dir should be created");
+    let parent = workflow_dir.join("parent.mjs");
+    let child = workflow_dir.join("child.mjs");
+    fs::write(
+        &parent,
+        r#"
+export const meta = { name: "parent", description: "Parent" };
+export default await workflow({ scriptPath: "./child.mjs" });
+"#,
+    )
+    .expect("parent workflow should be written");
+    fs::write(
+        &child,
+        r#"
+export const meta = { name: "child", description: "Child" };
+export default await agent("report cwd");
+"#,
+    )
+    .expect("child workflow should be written");
+
+    let provider = Arc::new(CwdProbeProvider::new());
+    let result = block_on(run_workflow(RunWorkflowOptions {
+        script_path: parent,
+        workflow_cwd: Some(temp.path().to_path_buf()),
+        args: json!({}),
+        agent_provider: provider.clone(),
+        model_map: Default::default(),
+        budget_total: None,
+        budget_spent: 0,
+        nesting_depth: 0,
+        max_parallel_agent_requests: None,
+        agent_runner: None,
+        cancel_rx: None,
+        event_sink: None,
+        event_parent_step_id: None,
+        event_stream_start: None,
+        session_log_sink: None,
+    }))
+    .expect("workflow should run");
+
+    let expected_cwd = temp.path().canonicalize().expect("temp path");
+    assert_eq!(provider.cwd(), Some(expected_cwd.clone()));
+    assert_eq!(
+        result.output.result["cwd"],
+        json!(expected_cwd.to_string_lossy())
+    );
+    assert!(temp.path().join("agent-created.txt").exists());
+}
+
 fn run_with_provider(
     script_path: PathBuf,
     provider: Arc<dyn AgentProvider>,
 ) -> anyhow::Result<smol_workflow_engine::workflow::RunWorkflowResult> {
     block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider,
         model_map: Default::default(),
@@ -1246,6 +1305,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
     let provider = Arc::new(DebugAgentProvider::new());
     let no_meta = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("no-meta.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1267,6 +1327,7 @@ fn rejects_missing_metadata_and_missing_default_export() {
 
     let missing_default = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("missing-default.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1341,6 +1402,7 @@ fn rejects_nested_child_workflow_fixture() {
     let provider = Arc::new(DebugAgentProvider::new());
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("nested-parent.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1372,6 +1434,7 @@ fn applies_phase_metadata_defaults() {
     let provider = Arc::new(OptionsEchoProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1424,6 +1487,7 @@ export default result;
     let provider = Arc::new(NamedOptionsEchoProvider("pi"));
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map,
@@ -1474,6 +1538,7 @@ export default result;
     let provider = Arc::new(NamedOptionsEchoProvider("claude-code"));
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map,
@@ -1505,6 +1570,7 @@ fn agent_provider_option_overrides_default_provider() {
     let provider = Arc::new(FixedUsageProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1534,6 +1600,7 @@ fn runs_parallel_agent_requests_concurrently() {
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1566,6 +1633,7 @@ fn starts_follow_up_agent_requests_when_capacity_frees() {
     let provider = Arc::new(DynamicSchedulingProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1598,6 +1666,7 @@ fn honors_parallel_agent_request_limit() {
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1630,6 +1699,7 @@ fn honors_serial_parallel_agent_request_limit() {
     let provider = Arc::new(ConcurrentProbeProvider::new());
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1663,6 +1733,7 @@ fn exposes_shared_budget_across_agents_and_child_workflows() {
     let provider = Arc::new(FixedUsageProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("budget-parent.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider,
         model_map: Default::default(),
@@ -1744,6 +1815,7 @@ export default await agent("work", { retry: { maxAttempts: 2, backoffMs: 1 } });
     });
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1781,6 +1853,7 @@ export default await agent("runner work", { retry: { maxAttempts: 2, backoffMs: 
     });
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: Arc::new(DebugAgentProvider::new()),
         model_map: Default::default(),
@@ -1806,6 +1879,7 @@ fn validates_schema_backed_agent_output_and_retries_once() {
     let provider = Arc::new(SchemaRetryProvider::new(false));
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("schema-validation.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1837,6 +1911,7 @@ fn rejects_invalid_schema_backed_agent_output_after_retry() {
     let provider = Arc::new(SchemaRetryProvider::new(true));
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("schema-validation.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1883,6 +1958,7 @@ export default await agent("produce schema result", {
     let provider = Arc::new(SchemaRetryProvider::new(true));
     let error = block_on(run_workflow(RunWorkflowOptions {
         script_path,
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
@@ -1911,6 +1987,7 @@ fn updates_live_budget_from_agent_output_token_usage() {
     let provider = Arc::new(FixedUsageProvider);
     let result = block_on(run_workflow(RunWorkflowOptions {
         script_path: fixture_path("on-agent-usage-budget.workflow.js"),
+        workflow_cwd: None,
         args: json!({}),
         agent_provider: provider.clone(),
         model_map: Default::default(),
