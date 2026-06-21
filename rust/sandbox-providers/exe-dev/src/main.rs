@@ -18,7 +18,12 @@ enum Command {
 async fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Serve => smol_sandbox_exe_dev::jsonl_server::serve_stdio().await,
+        Command::Serve => {
+            match smol_sandbox_exe_dev::provider::ExeDevProvider::from_environment() {
+                Ok(provider) => smol_workflow_sandbox::serve_stdio(provider).await,
+                Err(error) => Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            }
+        }
     };
 
     if let Err(error) = result {

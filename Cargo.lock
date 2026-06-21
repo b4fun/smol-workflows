@@ -1870,10 +1870,12 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 name = "smol-sandbox-exe-dev"
 version = "0.3.0-alpha.4"
 dependencies = [
+ "async-trait",
  "base64",
  "clap",
  "serde",
  "serde_json",
+ "shlex",
  "smol-workflow-sandbox",
  "tempfile",
  "thiserror 1.0.69",
@@ -1927,6 +1929,7 @@ dependencies = [
 name = "smol-workflow-sandbox"
 version = "0.3.0-alpha.4"
 dependencies = [
+ "async-trait",
  "schemars",
  "serde",
  "serde_json",

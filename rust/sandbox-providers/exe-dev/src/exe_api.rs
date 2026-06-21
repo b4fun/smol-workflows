@@ -1,6 +1,5 @@
 use crate::config::{ProfileConfig, SshConfig, WorkspaceSyncConfig};
 use crate::error::{provider_error, ProviderResult};
-use crate::quoting::shell_quote;
 use crate::ssh::{SshCommandOutput, SshRunner};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -400,6 +399,12 @@ pub fn find_vm<'a>(vms: &'a [ExeVm], name: &str) -> Option<&'a ExeVm> {
     vms.iter().find(|vm| vm.vm_name == name)
 }
 
+fn shell_quote(value: &str) -> String {
+    shlex::try_quote(value)
+        .expect("remote shell arguments must not contain NUL bytes")
+        .into_owned()
+}
+
 fn output_diagnostics(output: &SshCommandOutput) -> String {
     let stderr = output.stderr_text();
     if !stderr.is_empty() {
@@ -435,7 +440,6 @@ fn remote_parent(path: &str) -> String {
     }
     match path.rsplit_once('/') {
         Some(("", _)) => "/".to_string(),
-        Some((parent, _)) if parent.is_empty() => "/".to_string(),
         Some((parent, _)) => parent.to_string(),
         None => "/".to_string(),
     }

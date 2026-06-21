@@ -1,24 +1,23 @@
 use crate::config::{load_config, profile_for, Config, ProfileConfig};
 use crate::error::{
-    bad_profile, invalid_request, provider_error, provider_failure, unsupported_method,
-    ProviderResult,
+    bad_profile, invalid_request, provider_error, unsupported_method, ProviderResult,
 };
 use crate::exe_api::{find_vm, DirectSshDataPlane, SshExeControlPlane};
-use crate::quoting::{quote_argv, resolve_remote_path, shell_quote};
 use crate::ssh::SshRunner;
 use crate::state::{
     load_group_states, load_persisted_state, persist_state, remove_state, ProviderState,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use smol_workflow_sandbox::{
-    Capabilities, CleanupSandboxGroupRequest, CreateTempDirRequest, JsonlResponseEnvelope,
-    OpenSandboxRequest, SandboxExecEvent, SandboxExecRequest, SandboxSession, SandboxSpawnRequest,
-    SessionPathRequest, WriteFileRequest,
+    Capabilities, CleanupSandboxGroupRequest, CreateTempDirRequest, JsonlEventWriter,
+    JsonlProvider, JsonlProviderAction, OpenSandboxRequest, SandboxExecEvent, SandboxExecRequest,
+    SandboxSession, SandboxSpawnRequest, SessionPathRequest, WriteFileRequest,
 };
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -59,9 +58,9 @@ impl ExeDevProvider {
         &mut self,
         method: &str,
         params: Value,
-    ) -> Result<ProviderAction, smol_workflow_sandbox::ProviderError> {
+    ) -> Result<JsonlProviderAction, smol_workflow_sandbox::ProviderError> {
         let mut sink = tokio::io::sink();
-        let mut events = EventWriter::new("", &mut sink);
+        let mut events = JsonlEventWriter::new("", &mut sink);
         self.handle_with_events("", method, params, &mut events)
             .await
     }
@@ -71,41 +70,49 @@ impl ExeDevProvider {
         request_id: &str,
         method: &str,
         params: Value,
-        events: &mut EventWriter<'_, W>,
-    ) -> Result<ProviderAction, smol_workflow_sandbox::ProviderError>
+        events: &mut JsonlEventWriter<'_, W>,
+    ) -> Result<JsonlProviderAction, smol_workflow_sandbox::ProviderError>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         match method {
-            "capabilities" => Ok(ProviderAction::Respond(json!(Capabilities { exec: true }))),
-            "open" => self.open(params).await.map(ProviderAction::Respond),
-            "close" => self.close(params).await.map(ProviderAction::Respond),
+            "capabilities" => Ok(JsonlProviderAction::Respond(json!(Capabilities {
+                exec: true
+            }))),
+            "open" => self.open(params).await.map(JsonlProviderAction::Respond),
+            "close" => self.close(params).await.map(JsonlProviderAction::Respond),
             "cleanup_group" => self
                 .cleanup_group(params)
                 .await
-                .map(ProviderAction::Respond),
+                .map(JsonlProviderAction::Respond),
             "create_temp_dir" => self
                 .create_temp_dir(params)
                 .await
-                .map(ProviderAction::Respond),
+                .map(JsonlProviderAction::Respond),
             "create_dir_all" => self
                 .create_dir_all(params)
                 .await
-                .map(ProviderAction::Respond),
-            "write_file" => self.write_file(params).await.map(ProviderAction::Respond),
-            "read_file" => self.read_file(params).await.map(ProviderAction::Respond),
-            "remove" => self.remove(params).await.map(ProviderAction::Respond),
+                .map(JsonlProviderAction::Respond),
+            "write_file" => self
+                .write_file(params)
+                .await
+                .map(JsonlProviderAction::Respond),
+            "read_file" => self
+                .read_file(params)
+                .await
+                .map(JsonlProviderAction::Respond),
+            "remove" => self.remove(params).await.map(JsonlProviderAction::Respond),
             "exec" => self
                 .exec(request_id, params, events)
                 .await
-                .map(ProviderAction::Respond),
+                .map(JsonlProviderAction::Respond),
             "spawn" => self
                 .spawn(request_id, params, events)
                 .await
-                .map(ProviderAction::Respond),
+                .map(JsonlProviderAction::Respond),
             "shutdown" => {
                 self.shutdown_spawned().await;
-                Ok(ProviderAction::Shutdown(json!({})))
+                Ok(JsonlProviderAction::Shutdown(json!({})))
             }
             other => Err(unsupported_method(other)),
         }
@@ -312,10 +319,10 @@ impl ExeDevProvider {
         &self,
         _request_id: &str,
         params: Value,
-        events: &mut EventWriter<'_, W>,
+        events: &mut JsonlEventWriter<'_, W>,
     ) -> ProviderResult<Value>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         let request: SandboxExecRequest = serde_json::from_value(params)
             .map_err(|source| invalid_request(format!("invalid exec request: {source}")))?;
@@ -443,10 +450,10 @@ impl ExeDevProvider {
         &mut self,
         _request_id: &str,
         params: Value,
-        events: &mut EventWriter<'_, W>,
+        events: &mut JsonlEventWriter<'_, W>,
     ) -> ProviderResult<Value>
     where
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite + Unpin + Send,
     {
         let request: SandboxSpawnRequest = serde_json::from_value(params)
             .map_err(|source| invalid_request(format!("invalid spawn request: {source}")))?;
@@ -593,56 +600,26 @@ impl ExeDevProvider {
     }
 }
 
+#[async_trait::async_trait]
+impl JsonlProvider for ExeDevProvider {
+    async fn handle<W>(
+        &mut self,
+        request_id: &str,
+        method: &str,
+        params: Value,
+        events: &mut JsonlEventWriter<'_, W>,
+    ) -> Result<JsonlProviderAction, smol_workflow_sandbox::ProviderError>
+    where
+        W: AsyncWrite + Unpin + Send,
+    {
+        self.handle_with_events(request_id, method, params, events)
+            .await
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CloseRequest {
     session: SandboxSession,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProviderAction {
-    Respond(Value),
-    Shutdown(Value),
-}
-
-pub struct EventWriter<'a, W> {
-    request_id: &'a str,
-    writer: &'a mut W,
-}
-
-impl<'a, W> EventWriter<'a, W>
-where
-    W: AsyncWrite + Unpin,
-{
-    pub fn new(request_id: &'a str, writer: &'a mut W) -> Self {
-        Self { request_id, writer }
-    }
-
-    pub async fn emit<T>(&mut self, event: T) -> ProviderResult<()>
-    where
-        T: Serialize,
-    {
-        let event = serde_json::to_value(event).map_err(|source| {
-            provider_failure(format!("failed to encode JSONL event: {source}"))
-        })?;
-        let response = JsonlResponseEnvelope {
-            id: self.request_id.to_string(),
-            result: None,
-            error: None,
-            event: Some(event),
-        };
-        let mut line = serde_json::to_vec(&response).map_err(|source| {
-            provider_failure(format!("failed to serialize JSONL event: {source}"))
-        })?;
-        line.push(b'\n');
-        self.writer
-            .write_all(&line)
-            .await
-            .map_err(|source| provider_failure(format!("failed to write JSONL event: {source}")))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|source| provider_failure(format!("failed to flush JSONL event: {source}")))
-    }
 }
 
 async fn resolve_ssh_dest(control: &SshExeControlPlane, vm_name: &str) -> ProviderResult<String> {
@@ -764,6 +741,43 @@ fn decode_optional_base64(field: &str, value: Option<String>) -> ProviderResult<
                 .map_err(|source| invalid_request(format!("invalid {field}: {source}")))
         })
         .transpose()
+}
+
+fn shell_quote(value: &str) -> String {
+    shlex::try_quote(value)
+        .expect("remote shell arguments must not contain NUL bytes")
+        .into_owned()
+}
+
+fn quote_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn resolve_remote_path(cwd: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize_path(path)
+    } else {
+        normalize_path(&format!("{}/{}", cwd.trim_end_matches('/'), path))
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::RootDir => parts.clear(),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            _ => {}
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 fn build_exec_shell_command(cwd: &str, env: &BTreeMap<String, String>, argv: &[String]) -> String {
@@ -1020,7 +1034,7 @@ mod tests {
         let mut provider = ExeDevProvider::new(Config::default());
         assert_eq!(
             provider.handle("capabilities", json!({})).await.unwrap(),
-            ProviderAction::Respond(json!({ "exec": true }))
+            JsonlProviderAction::Respond(json!({ "exec": true }))
         );
         assert_eq!(
             provider
@@ -1033,11 +1047,11 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            ProviderAction::Respond(json!({ "cleaned_count": 0 }))
+            JsonlProviderAction::Respond(json!({ "cleaned_count": 0 }))
         );
         assert_eq!(
             provider.handle("shutdown", json!({})).await.unwrap(),
-            ProviderAction::Shutdown(json!({}))
+            JsonlProviderAction::Shutdown(json!({}))
         );
     }
 
@@ -1054,10 +1068,12 @@ mod tests {
 
     #[test]
     fn cleanup_policy_honors_profile_keep() {
-        let mut profile = ProfileConfig::default();
-        profile.cleanup = CleanupConfig {
-            on_close: "keep".to_string(),
-            ..CleanupConfig::default()
+        let profile = ProfileConfig {
+            cleanup: CleanupConfig {
+                on_close: "keep".to_string(),
+                ..CleanupConfig::default()
+            },
+            ..ProfileConfig::default()
         };
         assert!(!cleanup_on_close(&profile));
     }

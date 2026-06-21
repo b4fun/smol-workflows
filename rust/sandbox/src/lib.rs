@@ -5,7 +5,9 @@
 //! reads one JSON response from stdout, and treats stderr as diagnostics.
 
 pub mod jsonl;
+pub mod jsonl_server;
 pub mod v1;
 
 pub use jsonl::*;
+pub use jsonl_server::*;
 pub use v1::*;

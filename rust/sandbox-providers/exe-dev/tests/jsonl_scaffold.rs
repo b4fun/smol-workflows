@@ -10,21 +10,22 @@ use smol_workflow_sandbox::{
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_process_handles_capabilities_cleanup_and_shutdown() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     std::env::remove_var("SMOL_SANDBOX_EXE_DEV_CONFIG");
     std::env::set_var(
@@ -52,7 +53,7 @@ async fn provider_process_handles_capabilities_cleanup_and_shutdown() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_lifecycle_uses_fake_ssh_and_deletes_on_close() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -126,7 +127,7 @@ async fn provider_lifecycle_uses_fake_ssh_and_deletes_on_close() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn open_failure_deletes_created_vm_when_readiness_times_out() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -196,7 +197,7 @@ async fn open_failure_deletes_created_vm_when_readiness_times_out() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn control_plane_new_failure_includes_stdout_json_error_body() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -268,7 +269,7 @@ async fn control_plane_new_failure_includes_stdout_json_error_body() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn fake_ssh_fixture_enforces_control_plane_shapes_and_name_constraints() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let ssh = fake_ssh_bin.join("ssh");
@@ -401,7 +402,7 @@ async fn fake_ssh_fixture_enforces_control_plane_shapes_and_name_constraints() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn cleanup_group_removes_persisted_fake_ssh_vm() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -472,7 +473,7 @@ async fn cleanup_group_removes_persisted_fake_ssh_vm() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_syncs_workspace_with_tar_over_fake_ssh() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -562,7 +563,7 @@ async fn provider_syncs_workspace_with_tar_over_fake_ssh() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_file_apis_use_base64_and_session_cwd() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -685,7 +686,7 @@ async fn provider_file_apis_use_base64_and_session_cwd() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_exec_streams_events_and_handles_stdin_env_and_cwd() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -819,7 +820,7 @@ async fn provider_exec_streams_events_and_handles_stdin_env_and_cwd() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn provider_spawn_returns_pid_and_close_kills_tracked_pid() {
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let fake_ssh_bin = write_fake_ssh_on_path(temp.path());
     let _path_guard = prepend_path(&fake_ssh_bin);
@@ -937,7 +938,7 @@ async fn real_exe_dev_smoke_when_enabled() {
         return;
     }
 
-    let _guard = lock_env();
+    let _guard = lock_env().await;
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("config.json");
     let state_dir = temp.path().join("provider-state");

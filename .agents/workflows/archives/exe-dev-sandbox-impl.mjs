@@ -73,6 +73,9 @@ function asList(value, fallback) {
 }
 
 const finalChecks = asList(args?.finalChecks, DEFAULT_FINAL_CHECKS)
+const agentProvider = typeof args?.agentProvider === 'string' && args.agentProvider.trim()
+  ? args.agentProvider.trim()
+  : 'pi'
 const skipRealExeDevSmoke = args?.skipRealExeDevSmoke === true
   || String(args?.skipRealExeDevSmoke ?? '').toLowerCase() === 'true'
   || String(args?.skipRealExeDevSmoke ?? '') === '1'
@@ -110,6 +113,7 @@ Return:
 - which protocol types to reuse;
 - the test strategy, especially fake ssh;
 - any adjustments needed to the proposal before implementation.`), {
+  provider: agentProvider,
   label: 'orient-exe-dev-sandbox-provider',
   phase: 'Orient',
 })
@@ -132,6 +136,7 @@ Required changes:
 After editing, run focused validation such as cargo fmt and cargo test for the new crate if possible.
 
 Return a structured report.`), {
+  provider: agentProvider,
   label: 'scaffold-exe-dev-provider',
   phase: 'Scaffold',
   schema: REPORT_SCHEMA,
@@ -152,6 +157,7 @@ Run focused checks:
 Fix failures that are within the scaffold scope. Do not implement lifecycle yet except where needed for compilation.
 
 Return a structured test report.`), {
+  provider: agentProvider,
   label: 'test-scaffold-exe-dev-provider',
   phase: 'TestScaffold',
   schema: TEST_REPORT_SCHEMA,
@@ -175,6 +181,7 @@ Required behavior:
 - Do not hard-code proposal-era exe.dev assumptions into fake fixtures without checking current CLI/help output; real behavior is validated in the RealExeDevSmoke phase.
 
 Run focused tests and return a structured report.`), {
+  provider: agentProvider,
   label: 'lifecycle-exe-dev-provider',
   phase: 'Lifecycle',
   schema: REPORT_SCHEMA,
@@ -198,6 +205,7 @@ The fake fixture should mirror known current exe.dev constraints where practical
 Run focused lifecycle tests. Fix failures. Keep this phase deterministic; real exe.dev validation is handled in the RealExeDevSmoke phase.
 
 Return a structured test report.`), {
+  provider: agentProvider,
   label: 'test-lifecycle-exe-dev-provider',
   phase: 'TestLifecycle',
   schema: TEST_REPORT_SCHEMA,
@@ -220,6 +228,7 @@ Required behavior:
 - Keep git-sync as optional future work unless easy; do not regress the tar MVP.
 
 Add fake ssh tests for file APIs and workspace sync. Run focused tests and return a structured report.`), {
+  provider: agentProvider,
   label: 'workspace-files-exe-dev-provider',
   phase: 'WorkspaceFiles',
   schema: REPORT_SCHEMA,
@@ -242,6 +251,7 @@ Run tests that prove:
 Fix failures. Do not implement exec/spawn except where needed for compilation.
 
 Return a structured test report.`), {
+  provider: agentProvider,
   label: 'test-workspace-files-exe-dev-provider',
   phase: 'TestWorkspaceFiles',
   schema: TEST_REPORT_SCHEMA,
@@ -266,6 +276,7 @@ Required behavior:
 Do not build the remote helper in this milestone unless the MVP is already stable.
 
 Run focused tests and return a structured report.`), {
+  provider: agentProvider,
   label: 'exec-spawn-exe-dev-provider',
   phase: 'ExecSpawn',
   schema: REPORT_SCHEMA,
@@ -289,6 +300,7 @@ Run tests that prove:
 Fix failures. Keep this phase focused on deterministic fake-ssh/process fixtures; real exe.dev validation is handled in the next phase.
 
 Return a structured test report.`), {
+  provider: agentProvider,
   label: 'test-exec-spawn-exe-dev-provider',
   phase: 'TestExecSpawn',
   schema: TEST_REPORT_SCHEMA,
@@ -321,6 +333,7 @@ Required real smoke behavior when enabled:
 If real validation was explicitly skipped with args.skipRealExeDevSmoke=true or cannot run due to an external blocker, do not create VMs. Return passed=false and include a remaining failure stating why real exe.dev validation did not run, so the final phase cannot accidentally claim runtime compatibility.
 
 Return a structured test report. Include VM names and cleanup outcome in the summary/fixes fields without logging secrets.`), {
+  provider: agentProvider,
   label: 'real-exe-dev-smoke-provider',
   phase: 'RealExeDevSmoke',
   schema: TEST_REPORT_SCHEMA,
@@ -353,6 +366,7 @@ Required behavior:
 - By default, delete the real VM after the passing rerun and verify it no longer appears in "ssh exe.dev ls --json". Preserve it only if SMOL_EXE_DEV_KEEP=1 is explicitly set, and report the exact VM name and deletion command.
 
 Return a structured test report. The report must say whether real exe.dev validation finally passed, list fixes applied, tests/commands run, any remaining failures, and the cleanup outcome.`), {
+    provider: agentProvider,
     label: 'fix-real-exe-dev-smoke-provider',
     phase: 'FixRealExeDevSmoke',
     schema: TEST_REPORT_SCHEMA,
@@ -382,12 +396,14 @@ ${finalChecks.map(cmd => `  - ${cmd}`).join('\n')}
 If a check cannot run in this environment, record why. Treat real exe.dev validation as passed only if either realExeDevSmoke.passed or fixRealExeDevSmoke.passed is true after an actually enabled real-VM run. If both real reports are failed/skipped, list real exe.dev validation as a known limitation/next step and do not state that runtime compatibility with current exe.dev was verified. If real validation passed, include the VM name/ssh_dest evidence and cleanup outcome in validation.
 
 Return the final structured report.`), {
+  provider: agentProvider,
   label: 'finalize-exe-dev-provider',
   phase: 'DocsFinal',
   schema: FINAL_SCHEMA,
 })
 
 export default {
+  agentProvider,
   orientation,
   scaffold,
   scaffoldTest,
