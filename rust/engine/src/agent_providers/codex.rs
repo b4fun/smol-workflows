@@ -73,8 +73,7 @@ async fn run_codex(
         args.push("exec".into());
     }
     args.extend(options.args.clone());
-    if cfg!(feature = "integration-test") && !args.iter().any(|arg| arg == "--skip-git-repo-check")
-    {
+    if !args.iter().any(|arg| arg == "--skip-git-repo-check") {
         args.push("--skip-git-repo-check".into());
     }
     if let Some(model) = option_str(&input.options, "model") {

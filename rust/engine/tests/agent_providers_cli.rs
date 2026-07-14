@@ -172,6 +172,19 @@ async fn codex_provider_reads_output_schema_and_usage() {
     assert_eq!(result.output, json!("fake codex: hello codex"));
     assert_eq!(result.session_id.as_deref(), Some("codex-session-1"));
     assert_eq!(result.usage.unwrap().total_tokens, Some(15));
+    let argv = result.raw.as_ref().unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "argv")
+        .and_then(|event| event["argv"].as_array())
+        .expect("fake provider should emit argv");
+    assert_eq!(
+        argv.iter()
+            .filter(|arg| arg.as_str() == Some("--skip-git-repo-check"))
+            .count(),
+        1
+    );
 
     let structured = provider
         .run(schema_input("structured prompt"))
@@ -285,7 +298,12 @@ async fn codex_provider_preserves_explicit_skip_git_repo_check_arg() {
         .find(|event| event["type"] == "argv")
         .and_then(|event| event["argv"].as_array())
         .expect("fake provider should emit argv");
-    assert!(argv.iter().any(|arg| arg == "--skip-git-repo-check"));
+    assert_eq!(
+        argv.iter()
+            .filter(|arg| arg.as_str() == Some("--skip-git-repo-check"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

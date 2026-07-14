@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Enables provider conveniences needed by real integration tests in temporary workspaces.
+# Enables real integration tests that run in temporary workspaces.
 integration-test = []
 
 [dependencies]
