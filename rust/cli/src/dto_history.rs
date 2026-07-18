@@ -231,7 +231,7 @@ where
     }
 }
 
-fn epoch_ms_to_iso8601(timestamp_ms: i64) -> String {
+pub fn epoch_ms_to_iso8601(timestamp_ms: i64) -> String {
     let seconds = timestamp_ms.div_euclid(1000);
     let millis = timestamp_ms.rem_euclid(1000);
     let days = seconds.div_euclid(86_400);

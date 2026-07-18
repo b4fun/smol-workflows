@@ -5,9 +5,9 @@ mod tui;
 use clap::{Arg, ArgAction, Command as ClapCommand};
 use comfy_table::{presets::NOTHING, Cell, Table};
 use dto_history::{
-    HistoryAttempt, HistoryOptions, HistoryRunDetail, HistoryRunSummary, HistoryStep,
-    HistoryStepAgent, HistoryTokenUsage, HistoryTokenUsageTotals, HistoryWorkflowRunResource,
-    OutputFormat,
+    epoch_ms_to_iso8601, HistoryAttempt, HistoryOptions, HistoryRunDetail, HistoryRunSummary,
+    HistoryStep, HistoryStepAgent, HistoryTokenUsage, HistoryTokenUsageTotals,
+    HistoryWorkflowRunResource, OutputFormat,
 };
 use log::{LevelFilter, Log, Metadata, Record};
 use paths::default_database_path;
@@ -122,8 +122,13 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 .get_many::<String>("history-args")
                 .map(|values| values.cloned().collect())
                 .unwrap_or_default();
-            if let Some(output) = matches.get_one::<String>("output") {
-                args.extend(["--output".to_string(), output.clone()]);
+            // `history delete` does not honor --output; only forward it for the
+            // default list/detail form so the delete parser does not reject it.
+            let is_delete = args.first().is_some_and(|first| first == "delete");
+            if !is_delete {
+                if let Some(output) = matches.get_one::<String>("output") {
+                    args.extend(["--output".to_string(), output.clone()]);
+                }
             }
             history_command(args).await
         }
@@ -132,6 +137,9 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn history_command(argv: Vec<String>) -> anyhow::Result<()> {
+    if argv.first().is_some_and(|first| first == "delete") {
+        return history_delete_command(argv[1..].to_vec()).await;
+    }
     let (run_id, options) = parse_history_options(argv)?;
     if !options.db_path.exists() {
         anyhow::bail!(
@@ -160,6 +168,342 @@ async fn history_command(argv: Vec<String>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn history_delete_command(argv: Vec<String>) -> anyhow::Result<()> {
+    let options = parse_history_delete_options(argv)?;
+    if !options.db_path.exists() {
+        anyhow::bail!(
+            "history database {} was not found; pass --db or run a workflow first",
+            options.db_path.display()
+        );
+    }
+    let mut store = SqliteDurableStore::open(&options.db_path)?;
+    let summary = collect_history_delete_targets(&mut store, &options)?;
+
+    print_history_delete_plan(&summary, &options);
+
+    if summary.run_count == 0 {
+        println!();
+        println!("No runs matched; nothing to delete.");
+        return Ok(());
+    }
+
+    if options.dry_run {
+        println!();
+        println!("Dry run: no rows were deleted.");
+        println!(
+            "Re-run without --dry-run to delete {} run(s).",
+            summary.run_count
+        );
+        return Ok(());
+    }
+
+    let deleted = execute_history_delete(&mut store)?;
+    println!();
+    println!("Deleted {} run(s).", deleted.runs);
+    println!(
+        "  steps: {}, attempts: {}, events: {}, budget entries: {}, tasks: {}",
+        deleted.steps, deleted.attempts, deleted.events, deleted.budget_entries, deleted.tasks
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct HistoryDeleteOptions {
+    db_path: PathBuf,
+    states: Vec<String>,
+    all: bool,
+    dry_run: bool,
+}
+
+#[derive(Debug, Default)]
+struct HistoryDeletePlan {
+    /// (state, count) for matched runs, ordered by state.
+    by_state: Vec<(String, i64)>,
+    /// Total matched runs (including descendants pulled in via root_run_id).
+    run_count: i64,
+    /// Matched runs that were pulled in as descendants of a directly-matched run.
+    descendant_count: i64,
+    /// Earliest and latest created_at for matched runs.
+    earliest_created_at: Option<i64>,
+    latest_created_at: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+struct HistoryDeleteCounts {
+    runs: i64,
+    steps: i64,
+    attempts: i64,
+    events: i64,
+    budget_entries: i64,
+    tasks: i64,
+}
+
+fn parse_history_delete_options(argv: Vec<String>) -> anyhow::Result<HistoryDeleteOptions> {
+    let mut db_path = None;
+    let mut states = Vec::new();
+    let mut all = false;
+    let mut dry_run = false;
+    let mut index = 0;
+
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--db" || token.starts_with("--db=") {
+            let parsed = parse_required_history_flag(
+                token,
+                argv.get(index + 1).map(String::as_str),
+                "--db",
+            )?;
+            db_path = Some(PathBuf::from(parsed.value));
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if token == "--state" || token.starts_with("--state=") {
+            let parsed = parse_required_history_flag(
+                token,
+                argv.get(index + 1).map(String::as_str),
+                "--state",
+            )?;
+            validate_history_state(&parsed.value)?;
+            states.push(parsed.value);
+            if parsed.consumed_next {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if token == "--all" {
+            all = true;
+            index += 1;
+            continue;
+        }
+        if token == "--dry-run" {
+            dry_run = true;
+            index += 1;
+            continue;
+        }
+        anyhow::bail!("Unknown history delete option: {token}");
+    }
+
+    if !all && states.is_empty() {
+        anyhow::bail!(
+            "history delete requires either --all or at least one --state <state>"
+        );
+    }
+    if all && !states.is_empty() {
+        anyhow::bail!("history delete: --all cannot be combined with --state");
+    }
+
+    Ok(HistoryDeleteOptions {
+        db_path: match db_path {
+            Some(db_path) => db_path,
+            None => default_database_path()?,
+        },
+        states,
+        all,
+        dry_run,
+    })
+}
+
+/// Build per-connection temp tables holding the run ids (and their task
+/// ids) to delete, including descendants pulled in transitively via
+/// `root_run_id` so foreign keys stay satisfied.
+fn collect_history_delete_targets(
+    store: &mut SqliteDurableStore,
+    options: &HistoryDeleteOptions,
+) -> anyhow::Result<HistoryDeletePlan> {
+    let connection = store.connection_mut();
+    connection.execute_batch(
+        r#"
+        CREATE TEMP TABLE IF NOT EXISTS sw_history_delete_target (
+          run_id TEXT PRIMARY KEY
+        );
+        CREATE TEMP TABLE IF NOT EXISTS sw_history_delete_tasks (
+          task_id TEXT PRIMARY KEY
+        );
+        DELETE FROM sw_history_delete_target;
+        DELETE FROM sw_history_delete_tasks;
+        "#,
+    )?;
+
+    let (direct_filter, params): (String, Vec<&dyn rusqlite::ToSql>) = if options.all {
+        ("1 = 1".to_string(), vec![])
+    } else {
+        let placeholders = (0..options.states.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = format!("r.state IN ({placeholders})");
+        let params = options
+            .states
+            .iter()
+            .map(|state| state as &dyn rusqlite::ToSql)
+            .collect();
+        (filter, params)
+    };
+
+    // Direct matches first, then pull in descendants via root_run_id so we never
+    // leave a run pointing at a deleted root.
+    connection.execute(
+        &format!(
+            r#"
+            WITH RECURSIVE target(run_id) AS (
+              SELECT r.run_id FROM sw_workflow_runs r WHERE {direct_filter}
+              UNION
+              SELECT r.run_id
+              FROM sw_workflow_runs r
+              JOIN target ON r.root_run_id = target.run_id
+            )
+            INSERT INTO sw_history_delete_target (run_id)
+            SELECT run_id FROM target
+            "#
+        ),
+        params.as_slice(),
+    )?;
+
+    // Capture task ids of the targeted runs before we delete the runs, so the
+    // task cleanup can run after the runs are gone.
+    connection.execute(
+        r#"
+        INSERT OR IGNORE INTO sw_history_delete_tasks (task_id)
+        SELECT DISTINCT task_id
+        FROM sw_workflow_runs
+        WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)
+        "#,
+        [],
+    )?;
+
+    let run_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sw_history_delete_target",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let descendant_count: i64 = connection.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM sw_workflow_runs r
+        JOIN sw_history_delete_target t ON t.run_id = r.run_id
+        WHERE r.root_run_id <> r.run_id
+          AND r.root_run_id NOT IN (SELECT run_id FROM sw_history_delete_target)
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+
+    let mut by_state_stmt = connection.prepare(
+        r#"
+        SELECT r.state, COUNT(*)
+        FROM sw_workflow_runs r
+        JOIN sw_history_delete_target t ON t.run_id = r.run_id
+        GROUP BY r.state
+        ORDER BY r.state
+        "#,
+    )?;
+    let by_state: Vec<(String, i64)> = by_state_stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let (earliest_created_at, latest_created_at): (Option<i64>, Option<i64>) = connection
+        .query_row(
+            r#"
+            SELECT MIN(r.created_at), MAX(r.created_at)
+            FROM sw_workflow_runs r
+            JOIN sw_history_delete_target t ON t.run_id = r.run_id
+            "#,
+            [],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+
+    Ok(HistoryDeletePlan {
+        by_state,
+        run_count,
+        descendant_count,
+        earliest_created_at,
+        latest_created_at,
+    })
+}
+
+fn print_history_delete_plan(plan: &HistoryDeletePlan, options: &HistoryDeleteOptions) {
+    let scope = if options.all {
+        "all runs"
+    } else {
+        &format!("runs in state: {}", options.states.join(", "))
+    };
+    if options.dry_run {
+        println!("history delete (dry run) — {scope}");
+    } else {
+        println!("history delete — {scope}");
+    }
+    if plan.run_count == 0 {
+        return;
+    }
+    for (state, count) in &plan.by_state {
+        println!("  {state:<12} {count}");
+    }
+    if plan.descendant_count > 0 {
+        println!(
+            "  ({} of these are descendant runs pulled in via root_run_id)",
+            plan.descendant_count
+        );
+    }
+    if let (Some(earliest), Some(latest)) = (plan.earliest_created_at, plan.latest_created_at) {
+        println!("  created between {} and {}", epoch_ms_to_iso8601(earliest), epoch_ms_to_iso8601(latest));
+    }
+}
+
+fn execute_history_delete(store: &mut SqliteDurableStore) -> anyhow::Result<HistoryDeleteCounts> {
+    let connection = store.connection_mut();
+    let tx = connection.transaction()?;
+
+    // Delete in dependency order so foreign keys stay satisfied:
+    // events -> budget -> steps -> attempts -> runs -> tasks.
+    let events = delete_targeted(&tx, "DELETE FROM sw_workflow_events WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)")?;
+    let budget_entries = delete_targeted(&tx, "DELETE FROM sw_budget_ledger WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)")?;
+    let steps = delete_targeted(&tx, "DELETE FROM sw_workflow_steps WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)")?;
+    let attempts = delete_targeted(&tx, "DELETE FROM sw_workflow_attempts WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)")?;
+    let runs = delete_targeted(&tx, "DELETE FROM sw_workflow_runs WHERE run_id IN (SELECT run_id FROM sw_history_delete_target)")?;
+    // Delete tasks that belonged to deleted runs and are no longer referenced by
+    // any surviving run (resume reuses a task across runs, so a task may still
+    // be owned by a run we are keeping).
+    let tasks = delete_targeted(
+        &tx,
+        r#"
+        DELETE FROM sw_workflow_tasks
+        WHERE task_id IN (SELECT task_id FROM sw_history_delete_tasks)
+          AND task_id NOT IN (SELECT task_id FROM sw_workflow_runs)
+        "#,
+    )?;
+
+    tx.commit()?;
+
+    // VACUUM cannot run inside a transaction and requires exclusive access; it
+    // reclaims the disk space freed by the deletes. Best-effort: a failure here
+    // does not undo the committed deletes.
+    if let Err(error) = connection.execute_batch("VACUUM") {
+        eprintln!(
+            "warning: VACUUM failed (deleted rows remain committed): {error}"
+        );
+    }
+
+    Ok(HistoryDeleteCounts {
+        runs,
+        steps,
+        attempts,
+        events,
+        budget_entries,
+        tasks,
+    })
+}
+
+fn delete_targeted(tx: &rusqlite::Transaction<'_>, sql: &str) -> anyhow::Result<i64> {
+    tx.execute(sql, [])?;
+    let changed: i64 = tx.query_row("SELECT changes()", [], |row| row.get(0))?;
+    Ok(changed)
 }
 
 fn parse_history_options(argv: Vec<String>) -> anyhow::Result<(Option<String>, HistoryOptions)> {
@@ -2042,7 +2386,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "History options:\n  --db path (default: platform app state workflows.db)\n  -o, --output table|json\n  --state pending|running|completed|failed|cancelled\n  --name metadata-name-substring\n  --since unixEpochMs\n  --until unixEpochMs\n  --limit count",
+                    "History options:\n  --db path (default: platform app state workflows.db)\n  -o, --output table|json\n  --state pending|running|completed|failed|cancelled\n  --name metadata-name-substring\n  --since unixEpochMs\n  --until unixEpochMs\n  --limit count\n\nSubcommands:\n  history delete [--state <state>]... | --all [--dry-run]\n    Delete workflow runs (and their steps, attempts, events, budget entries,\n    and orphaned tasks), then VACUUM to reclaim disk space.\n    Use --dry-run to preview.",
                 ),
         )
         .subcommand(

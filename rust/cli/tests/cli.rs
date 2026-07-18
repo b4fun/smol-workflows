@@ -1648,3 +1648,219 @@ export default { result: await agent("sqlite") };
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn history_delete_removes_runs_by_state_and_keeps_others() {
+    let dir = temp_dir("history-delete-state");
+    let db_path = dir.join("history.db");
+    let ok_script = dir.join("ok.mjs");
+    let fail_script = dir.join("fail.mjs");
+    fs::write(
+        &ok_script,
+        r#"export const meta = { name: "ok", description: "ok" };
+export default { result: await agent("ok") };
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &fail_script,
+        r#"export const meta = { name: "fail", description: "fail" };
+throw new Error("boom");
+"#,
+    )
+    .unwrap();
+
+    // One completed run and two failed runs.
+    for script in [&ok_script, &fail_script, &fail_script] {
+        let output = smol_wf()
+            .args([
+                "run",
+                script.to_str().unwrap(),
+                "--db",
+                db_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("smol-wf should run");
+        let _ = output.status;
+    }
+
+    let run_count = |state: Option<&str>| -> i64 {
+        let connection = Connection::open(&db_path).unwrap();
+        match state {
+            Some(state) => connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sw_workflow_runs WHERE state = ?1",
+                    [state],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            None => connection
+                .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| row.get(0))
+                .unwrap(),
+        }
+    };
+
+    assert_eq!(run_count(None), 3);
+    assert_eq!(run_count(Some("completed")), 1);
+    assert_eq!(run_count(Some("failed")), 2);
+
+    // Dry run must not mutate the database.
+    let output = smol_wf()
+        .args([
+            "history",
+            "delete",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--state",
+            "failed",
+            "--dry-run",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dry run"), "stdout: {stdout}");
+    assert!(stdout.contains("failed       2"), "stdout: {stdout}");
+    assert_eq!(run_count(Some("failed")), 2);
+    assert_eq!(run_count(None), 3);
+
+    // Real delete of failed runs only.
+    let output = smol_wf()
+        .args([
+            "history",
+            "delete",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--state",
+            "failed",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Deleted 2 run(s)."), "stdout: {stdout}");
+    assert_eq!(run_count(Some("failed")), 0);
+    assert_eq!(run_count(Some("completed")), 1);
+    assert_eq!(run_count(None), 1);
+
+    // The surviving run is still visible to `history`.
+    let output = smol_wf()
+        .args([
+            "history",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+    let runs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["state"], "completed");
+
+    // Steps and tasks for deleted runs are gone; the survivor's remain.
+    let connection = Connection::open(&db_path).unwrap();
+    let steps: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sw_workflow_steps", [], |row| row.get(0))
+        .unwrap();
+    let tasks: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert!(steps > 0, "surviving run should keep its steps");
+    assert_eq!(tasks, 1, "only the surviving task should remain");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_delete_all_clears_database() {
+    let dir = temp_dir("history-delete-all");
+    let db_path = dir.join("history.db");
+    let script = dir.join("ok.mjs");
+    fs::write(
+        &script,
+        r#"export const meta = { name: "ok", description: "ok" };
+export default { result: await agent("ok") };
+"#,
+    )
+    .unwrap();
+    let output = smol_wf()
+        .args([
+            "run",
+            script.to_str().unwrap(),
+            "--db",
+            db_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(output.status.success());
+
+    let output = smol_wf()
+        .args([
+            "history",
+            "delete",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--all",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Deleted 1 run(s)."), "stdout: {stdout}");
+
+    let connection = Connection::open(&db_path).unwrap();
+    let runs: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| row.get(0))
+        .unwrap();
+    let tasks: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(runs, 0);
+    assert_eq!(tasks, 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_delete_rejects_invalid_invocations() {
+    let dir = temp_dir("history-delete-invalid");
+    let db_path = dir.join("history.db");
+    fs::write(&db_path, b"").unwrap();
+
+    let run = |args: &[&str]| -> (bool, String) {
+        let output = smol_wf()
+            .args({
+                let mut full = vec!["history", "delete", "--db", db_path.to_str().unwrap()];
+                full.extend_from_slice(args);
+                full
+            })
+            .output()
+            .expect("smol-wf should run");
+        (output.status.success(), String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+
+    let (ok, _) = run(&[]);
+    assert!(!ok, "delete without --state or --all should fail");
+
+    let (ok, _) = run(&["--all", "--state", "failed"]);
+    assert!(!ok, "delete with --all and --state should fail");
+
+    let (ok, _) = run(&["--state", "bogus"]);
+    assert!(!ok, "delete with an invalid state should fail");
+
+    let _ = fs::remove_dir_all(&dir);
+}
