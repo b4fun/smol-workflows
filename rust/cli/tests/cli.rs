@@ -1695,7 +1695,9 @@ throw new Error("boom");
                 )
                 .unwrap(),
             None => connection
-                .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| {
+                    row.get(0)
+                })
                 .unwrap(),
         }
     };
@@ -1770,10 +1772,14 @@ throw new Error("boom");
     // Steps and tasks for deleted runs are gone; the survivor's remain.
     let connection = Connection::open(&db_path).unwrap();
     let steps: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sw_workflow_steps", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM sw_workflow_steps", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let tasks: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(steps > 0, "surviving run should keep its steps");
     assert_eq!(tasks, 1, "only the surviving task should remain");
@@ -1824,10 +1830,14 @@ export default { result: await agent("ok") };
 
     let connection = Connection::open(&db_path).unwrap();
     let runs: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM sw_workflow_runs", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let tasks: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM sw_workflow_tasks", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(runs, 0);
     assert_eq!(tasks, 0);
@@ -1850,7 +1860,10 @@ fn history_delete_rejects_invalid_invocations() {
             })
             .output()
             .expect("smol-wf should run");
-        (output.status.success(), String::from_utf8_lossy(&output.stdout).into_owned())
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
     };
 
     let (ok, _) = run(&[]);

@@ -290,9 +290,7 @@ fn parse_history_delete_options(argv: Vec<String>) -> anyhow::Result<HistoryDele
     }
 
     if !all && states.is_empty() {
-        anyhow::bail!(
-            "history delete requires either --all or at least one --state <state>"
-        );
+        anyhow::bail!("history delete requires either --all or at least one --state <state>");
     }
     if all && !states.is_empty() {
         anyhow::bail!("history delete: --all cannot be combined with --state");
@@ -377,11 +375,10 @@ fn collect_history_delete_targets(
         [],
     )?;
 
-    let run_count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sw_history_delete_target",
-        [],
-        |row| row.get(0),
-    )?;
+    let run_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM sw_history_delete_target", [], |row| {
+            row.get(0)
+        })?;
 
     let descendant_count: i64 = connection.query_row(
         r#"
@@ -405,7 +402,9 @@ fn collect_history_delete_targets(
         "#,
     )?;
     let by_state: Vec<(String, i64)> = by_state_stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let (earliest_created_at, latest_created_at): (Option<i64>, Option<i64>) = connection
@@ -452,7 +451,11 @@ fn print_history_delete_plan(plan: &HistoryDeletePlan, options: &HistoryDeleteOp
         );
     }
     if let (Some(earliest), Some(latest)) = (plan.earliest_created_at, plan.latest_created_at) {
-        println!("  created between {} and {}", epoch_ms_to_iso8601(earliest), epoch_ms_to_iso8601(latest));
+        println!(
+            "  created between {} and {}",
+            epoch_ms_to_iso8601(earliest),
+            epoch_ms_to_iso8601(latest)
+        );
     }
 }
 
@@ -485,9 +488,7 @@ fn execute_history_delete(store: &mut SqliteDurableStore) -> anyhow::Result<Hist
     // reclaims the disk space freed by the deletes. Best-effort: a failure here
     // does not undo the committed deletes.
     if let Err(error) = connection.execute_batch("VACUUM") {
-        eprintln!(
-            "warning: VACUUM failed (deleted rows remain committed): {error}"
-        );
+        eprintln!("warning: VACUUM failed (deleted rows remain committed): {error}");
     }
 
     Ok(HistoryDeleteCounts {
