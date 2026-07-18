@@ -122,13 +122,17 @@ async fn run_cli(argv: Vec<String>) -> anyhow::Result<()> {
                 .get_many::<String>("history-args")
                 .map(|values| values.cloned().collect())
                 .unwrap_or_default();
-            // `history delete` does not honor --output; only forward it for the
-            // default list/detail form so the delete parser does not reject it.
             let is_delete = args.first().is_some_and(|first| first == "delete");
-            if !is_delete {
-                if let Some(output) = matches.get_one::<String>("output") {
-                    args.extend(["--output".to_string(), output.clone()]);
+            if is_delete {
+                // `history delete` has its own fixed text output and does not
+                // honor -o/--output; fail fast instead of silently ignoring it.
+                if matches.get_one::<String>("output").is_some() {
+                    anyhow::bail!(
+                        "history delete does not support --output; it uses fixed text output"
+                    );
                 }
+            } else if let Some(output) = matches.get_one::<String>("output") {
+                args.extend(["--output".to_string(), output.clone()]);
             }
             history_command(args).await
         }
@@ -317,12 +321,16 @@ fn collect_history_delete_targets(
     let connection = store.connection_mut();
     connection.execute_batch(
         r#"
+        CREATE TEMP TABLE IF NOT EXISTS sw_history_delete_direct (
+          run_id TEXT PRIMARY KEY
+        );
         CREATE TEMP TABLE IF NOT EXISTS sw_history_delete_target (
           run_id TEXT PRIMARY KEY
         );
         CREATE TEMP TABLE IF NOT EXISTS sw_history_delete_tasks (
           task_id TEXT PRIMARY KEY
         );
+        DELETE FROM sw_history_delete_direct;
         DELETE FROM sw_history_delete_target;
         DELETE FROM sw_history_delete_tasks;
         "#,
@@ -344,23 +352,32 @@ fn collect_history_delete_targets(
         (filter, params)
     };
 
-    // Direct matches first, then pull in descendants via root_run_id so we never
-    // leave a run pointing at a deleted root.
+    // Capture the direct matches (runs matching the filter) separately from the
+    // full target set, so we can distinguish runs that were pulled in as
+    // descendants via root_run_id from runs that matched directly.
     connection.execute(
         &format!(
-            r#"
-            WITH RECURSIVE target(run_id) AS (
-              SELECT r.run_id FROM sw_workflow_runs r WHERE {direct_filter}
-              UNION
-              SELECT r.run_id
-              FROM sw_workflow_runs r
-              JOIN target ON r.root_run_id = target.run_id
-            )
-            INSERT INTO sw_history_delete_target (run_id)
-            SELECT run_id FROM target
-            "#
+            "INSERT INTO sw_history_delete_direct (run_id) SELECT r.run_id FROM sw_workflow_runs r WHERE {direct_filter}"
         ),
         params.as_slice(),
+    )?;
+
+    // Build the full target set: direct matches plus descendants pulled in
+    // transitively via root_run_id, so we never leave a run pointing at a
+    // deleted root.
+    connection.execute(
+        r#"
+        WITH RECURSIVE target(run_id) AS (
+          SELECT run_id FROM sw_history_delete_direct
+          UNION
+          SELECT r.run_id
+          FROM sw_workflow_runs r
+          JOIN target ON r.root_run_id = target.run_id
+        )
+        INSERT INTO sw_history_delete_target (run_id)
+        SELECT run_id FROM target
+        "#,
+        [],
     )?;
 
     // Capture task ids of the targeted runs before we delete the runs, so the
@@ -380,13 +397,13 @@ fn collect_history_delete_targets(
             row.get(0)
         })?;
 
+    // Descendants pulled in: runs in the target set that were not direct
+    // matches (i.e. they were added because an ancestor root was targeted).
     let descendant_count: i64 = connection.query_row(
         r#"
         SELECT COUNT(*)
-        FROM sw_workflow_runs r
-        JOIN sw_history_delete_target t ON t.run_id = r.run_id
-        WHERE r.root_run_id <> r.run_id
-          AND r.root_run_id NOT IN (SELECT run_id FROM sw_history_delete_target)
+        FROM sw_history_delete_target
+        WHERE run_id NOT IN (SELECT run_id FROM sw_history_delete_direct)
         "#,
         [],
         |row| row.get(0),

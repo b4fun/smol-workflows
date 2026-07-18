@@ -1877,3 +1877,56 @@ fn history_delete_rejects_invalid_invocations() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn history_delete_rejects_output_flag() {
+    let dir = temp_dir("history-delete-output");
+    let db_path = dir.join("history.db");
+    fs::write(&db_path, b"").unwrap();
+
+    // `smol-wf history -o json delete ...` should fail fast: delete has its
+    // own fixed text output and does not honor --output.
+    let output = smol_wf()
+        .args([
+            "history",
+            "-o",
+            "json",
+            "delete",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--all",
+            "--dry-run",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        !output.status.success(),
+        "history delete with --output should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--output"), "stderr: {stderr}");
+
+    // `--output` passed inside the trailing delete args is also rejected by the
+    // delete option parser.
+    let output = smol_wf()
+        .args([
+            "history",
+            "delete",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--all",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("smol-wf should run");
+    assert!(
+        !output.status.success(),
+        "history delete with trailing --output should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--output"), "stderr: {stderr}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
