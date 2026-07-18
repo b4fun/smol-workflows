@@ -203,6 +203,14 @@ smol-wf history run_01kt...
 smol-wf history run_01kt... --output json | jq '.steps'
 ```
 
+Clean up old runs to reclaim disk space with `smol-wf history delete`:
+
+```sh
+# Preview, then delete all failed runs and vacuum the database
+smol-wf history delete --state failed --dry-run
+smol-wf history delete --state failed
+```
+
 ### Installing in Code Agents
 
 Ask your code agent to read the [harness installation instructions](https://github.com/b4fun/smol-workflows/blob/main/harness/README.md) and install the smol-workflows harness integration for itself.
