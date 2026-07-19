@@ -92,7 +92,7 @@ Example:
 
 ```sh
 smol-wf submit examples/stock.mjs \
-  --args-from-file stock-args.json
+  --args-from-file stock-args.yaml
 ```
 
 ### Runner process

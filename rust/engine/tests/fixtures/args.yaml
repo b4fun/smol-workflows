@@ -1,0 +1,3 @@
+fromFile: "file-value"
+nested:
+  value: "nested-file-value"
