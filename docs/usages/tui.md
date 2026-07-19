@@ -63,7 +63,7 @@ smol-wf tui replay events.jsonl
 - `--log-level <level>`
 - `--debug`
 - `--args-<name> <value>`
-- `--args-from-file <json-file>`
+- `--args-from-file <json|yaml-file>`
 
 `tui run` does not accept `--events`; the TUI itself is the event consumer. Users who want raw JSONL should use `smol-wf run --events`.
 

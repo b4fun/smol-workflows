@@ -342,9 +342,11 @@ Workflow sees:
 }
 ```
 
-### `--args-from-file <json-file>`
+### `--args-from-file <file>`
 
-Load arguments from a JSON object file. Prefer this flag for complicated inputs, nested objects, arrays, or values that are awkward to quote in a shell.
+Load arguments from a JSON or YAML object file. Prefer this flag for complicated inputs, nested objects, arrays, or values that are awkward to quote in a shell.
+
+The file extension determines the parser: `.yaml`/`.yml` files are parsed as YAML, everything else as JSON.
 
 ```json
 {
@@ -359,7 +361,17 @@ Run:
 smol-wf run ./examples/pod-diagnostics.mjs --args-from-file args.json
 ```
 
-The file must contain a JSON object. File arguments can be combined with `--args-*`; later values merge with earlier values using the same repeated-argument array behavior.
+```yaml
+# args.yaml
+target: coredns pods under kube-system
+namespace: kube-system
+```
+
+```sh
+smol-wf run ./examples/pod-diagnostics.mjs --args-from-file args.yaml
+```
+
+The file must contain a JSON or YAML object. File arguments can be combined with `--args-*`; later values merge with earlier values using the same repeated-argument array behavior.
 
 ## Examples
 

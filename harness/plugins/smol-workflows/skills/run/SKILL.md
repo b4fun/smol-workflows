@@ -18,7 +18,7 @@ The slash command arguments are:
 ```
 
 - `<path>` — workflow script path (`.js` or `.mjs`).
-- `<args-file>` — JSON object file to pass with `--args-from-file`.
+- `<args-file>` — JSON or YAML object file to pass with `--args-from-file`.
 - `<token-budget>` — output-token budget for `--budget-allowance`; use `0`, `none`, or `-` to omit the flag.
 
 If any parameter is missing or ambiguous, ask the user before running.
@@ -31,8 +31,8 @@ Before running, inspect or create `<args-file>`:
 
 1. If the user supplied an existing args file, read it and verify it is a JSON object.
 2. If the file does not exist, ask the user what args to write, then create it.
-3. If the user supplied JSON in the prompt instead of a file path, write it to a sensible path next to the workflow, such as `.agents/workflows/<name>.args.json`, then use that file.
-4. Current CLI limitation: `--args-from-file` expects a JSON object. Wrap arrays/scalars as `{ "items": [...] }` or another named field.
+3. If the user supplied JSON or YAML in the prompt instead of a file path, write it to a sensible path next to the workflow, such as `.agents/workflows/<name>.args.json` or `.agents/workflows/<name>.args.yaml`, then use that file.
+4. The file extension determines the parser: `.yaml`/`.yml` files are parsed as YAML, everything else as JSON. Wrap arrays/scalars as `{ "items": [...] }` or another named field.
 
 ## Checklist
 

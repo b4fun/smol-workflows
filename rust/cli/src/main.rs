@@ -2073,13 +2073,22 @@ fn parse_workflow_args(argv: &[String]) -> anyhow::Result<Map<String, Value>> {
 }
 
 fn read_args_file(file_path: &str) -> anyhow::Result<Map<String, Value>> {
-    let value: Value = serde_json::from_str(&fs::read_to_string(file_path)?)?;
+    let content = fs::read_to_string(file_path)?;
+    let is_yaml = file_path
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"));
+
+    let value: Value = if is_yaml {
+        serde_yaml::from_str(&content)?
+    } else {
+        serde_json::from_str(&content)?
+    };
     match value {
         Value::Object(object) => Ok(object),
-        _ => anyhow::bail!("--args-from-file must contain a JSON object"),
+        _ => anyhow::bail!("--args-from-file must contain a JSON or YAML object"),
     }
 }
-
 fn merge_args(args: &mut Map<String, Value>, from_file: Map<String, Value>) {
     for (key, value) in from_file {
         assign_arg(args, &key, value);
@@ -2328,7 +2337,7 @@ fn cli_command() -> ClapCommand {
                         .allow_hyphen_values(true),
                 )
                 .after_help(
-                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --model-map alias:selector (repeatable)\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json-file>",
+                    "Run options:\n  --db path (default: platform app state workflows.db)\n  --resume-run run_id\n  --agent-provider debug|claude-code|codex|opencode|pi\n  --model-map alias:selector (repeatable)\n  --budget-allowance outputTokens\n  --max-parallel-agents count\n  --save-raw-sessions dir\n  --events\n  --log-level off|error|warn|info|debug|trace\n  --debug\n  --args-<name> value\n  --args-from-file <json|yaml-file>",
                 ),
         )
         .subcommand(

@@ -505,6 +505,34 @@ fn run_loads_workflow_args_from_json_file() {
 }
 
 #[test]
+fn run_loads_workflow_args_from_yaml_file() {
+    let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
+        .args([
+            "--args-from-file",
+            "../engine/tests/fixtures/args.yaml",
+            "--args-my-arg1",
+            "file-arg-1",
+        ])
+        .output()
+        .expect("smol-wf should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(stdout["results"]["args"]["fromFile"], "file-value");
+    assert_eq!(
+        stdout["results"]["args"]["nested"]["value"],
+        "nested-file-value"
+    );
+    assert_eq!(stdout["results"]["args"]["my-arg1"], "file-arg-1");
+    assert_eq!(stdout["results"]["result"], "echo: hello file-arg-1");
+}
+
+#[test]
 fn run_rejects_unprefixed_run_args() {
     let output = smol_wf_run("../engine/tests/fixtures/cli-args.workflow.js")
         .args(["--my-arg1", "world"])
