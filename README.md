@@ -54,6 +54,31 @@ curl -fsSL https://github.com/b4fun/smol-workflows/releases/latest/download/smol
 curl -fsSL https://github.com/b4fun/smol-workflows/releases/latest/download/smol-wf-macos-aarch64.tar.gz | tar -xz
 ```
 
+### Using smol-wf in GitHub Actions
+
+The [smol-workflows GitHub Action](https://github.com/b4fun/smol-workflows-action) installs `smol-wf` and runs a workflow script from your repository. Check out your repository first, then provide workflow arguments as a YAML mapping:
+
+```yaml
+steps:
+  - uses: actions/checkout@v6
+
+  # Install and authenticate the provider CLI before this step.
+  - name: Run workflow
+    id: smol-wf
+    uses: b4fun/smol-workflows-action@v1.0.0
+    with:
+      workflow: ./workflows/review.mjs
+      provider: pi
+      smol-wf-version: latest
+      args: |
+        target: ${{ github.event.pull_request.title }}
+
+  - name: Read the workflow report
+    run: cat "${{ steps.smol-wf.outputs.result-file }}"
+```
+
+The action's default provider is `debug`. For real agent calls, install and authenticate the chosen provider CLI in an earlier step and pass credentials through GitHub Actions secrets. The action also exposes the run ID and SQLite database path. See the [action README](https://github.com/b4fun/smol-workflows-action#readme) for all inputs, outputs, and retention details.
+
 ### Running your first workflow
 
 Here is a workflow that uses `agent`, `parallel`, and `pipeline` to diagnose Kubernetes pod status. This example is also available at [`examples/pod-diagnostics.mjs`](examples/pod-diagnostics.mjs):
